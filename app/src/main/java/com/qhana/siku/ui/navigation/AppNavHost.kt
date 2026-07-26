@@ -108,7 +108,10 @@ fun AppNavHost(
                 onNavigateToNowPlaying = { appState.playerExpanded = true },
                 onNavigateToSettings = { navController.navigate(Screen.Settings.route) },
                 playbackViewModel = playbackViewModel,
-                onPlaylistsTabActive = { appState.homeOnPlaylistsTab = it },
+                // El MISMO LibraryViewModel que reciben los detalles. Antes esta ruta se quedaba
+                // con el default `hiltViewModel()` de la pantalla, que resuelve al scope del
+                // NavBackStackEntry: había dos instancias vivas de la nada.
+                libraryViewModel = libraryViewModel,
                 // Shared elements foto/carátula → headers de los detalles.
                 sharedTransitionScope = sharedTransitionScope,
                 animatedVisibilityScope = this@composable

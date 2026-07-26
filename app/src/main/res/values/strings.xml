@@ -300,7 +300,6 @@
     <string name="np_open_eq">Abrir ecualizador</string>
     <string name="np_more_options">Más opciones</string>
     <string name="np_download">Descargar</string>
-    <string name="np_view_queue_shuffled">Ver cola de reproducción, en aleatorio</string>
     <string name="np_seek_forward">Adelantar %1$d segundos</string>
     <string name="np_seek_back">Retroceder %1$d segundos</string>
     <string name="np_album_art_options">Elegir el color del tema</string>

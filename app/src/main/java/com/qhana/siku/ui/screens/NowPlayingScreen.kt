@@ -233,6 +233,9 @@ fun NowPlayingScreen(
     } else {
         song.playbackOrigin
     }
+    // El nivel de búfer solo se dibuja aquí: en local y en descargadas el player reporta la
+    // canción entera bufferizada desde el primer instante, así que no informaría de nada.
+    val isStreaming = origin == PlaybackOrigin.STREAMING
     val formatInfo = rememberAudioFormat(song.path, song.title)
 
     val onAlbumArtLongPress = { navigationActions.onShowDebugInfo() }
@@ -352,6 +355,7 @@ fun NowPlayingScreen(
                         currentPositionFlow = currentPositionFlow,
                         durationFlow = durationFlow,
                         bufferedPositionFlow = bufferedPositionFlow,
+                        showBuffer = isStreaming,
                         origin = origin,
                         solidBackground = solidBackground,
                         gesturesEnabled = gesturesEnabled,
@@ -371,7 +375,6 @@ fun NowPlayingScreen(
                         eqEnabled = eqEnabled,
                         sleepTimerActive = sleepTimer != null,
                         onSleepTimerClick = onSleepTimerClick,
-                        isShuffleEnabled = isShuffleEnabled,
                         onShareSong = onShareSong,
                         toolbarConfig = toolbarConfig,
                         hazeState = hazeState,
@@ -398,6 +401,7 @@ fun NowPlayingScreen(
                         currentPositionFlow = currentPositionFlow,
                         durationFlow = durationFlow,
                         bufferedPositionFlow = bufferedPositionFlow,
+                        showBuffer = isStreaming,
                         gesturesEnabled = gesturesEnabled,
                         dismiss = activeDismiss,
                         format = formatInfo,
@@ -413,7 +417,6 @@ fun NowPlayingScreen(
                         eqEnabled = eqEnabled,
                         sleepTimerActive = sleepTimer != null,
                         onSleepTimerClick = onSleepTimerClick,
-                        isShuffleEnabled = isShuffleEnabled,
                         onShareSong = onShareSong,
                         toolbarConfig = toolbarConfig,
                         hazeState = hazeState,

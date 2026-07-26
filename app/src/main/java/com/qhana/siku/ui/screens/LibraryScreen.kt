@@ -1,12 +1,9 @@
 package com.qhana.siku.ui.screens
 
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
@@ -23,10 +20,10 @@ import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -35,7 +32,6 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -48,7 +44,6 @@ import com.qhana.siku.data.local.ArtistSummary
 import com.qhana.siku.data.model.LibraryTabId
 import com.qhana.siku.data.model.LibraryTabsConfig
 import com.qhana.siku.data.model.PlaybackContext
-import com.qhana.siku.data.model.PlaybackState
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.model.SongFilter
 import com.qhana.siku.ui.components.*
@@ -118,15 +113,20 @@ fun LibraryScreen(
     onGenreClick: (String) -> Unit,
     onNavigateToNowPlaying: () -> Unit,
     onNavigateToSettings: () -> Unit,
-    // Notifica a MainActivity si la pestaña activa es Listas (el FAB flotante muta
-    // de aleatorio a "crear lista").
-    onPlaylistsTabActive: (Boolean) -> Unit = {},
     // Scopes para los shared elements foto/carátula → header del detalle (artista/álbum).
     sharedTransitionScope: SharedTransitionScope? = null,
     animatedVisibilityScope: AnimatedVisibilityScope? = null,
     modifier: Modifier = Modifier,
-    // Inyección de ViewModels
-    libraryViewModel: LibraryViewModel = hiltViewModel(),
+    // Inyección de ViewModels.
+    //
+    // `libraryViewModel` SIN default a propósito: tiene que llegar el de la Activity. Con
+    // `hiltViewModel()` aquí, la resolución cae en el ViewModelStore del `NavBackStackEntry` de
+    // esta ruta y nace una SEGUNDA instancia, distinta de la que `AppNavHost` pasa a los detalles
+    // de lista/artista/álbum. Eran dos objetos con sus propios colectores de `syncManager.state` y
+    // sus propios flujos de paging sobre la misma base de datos, y cualquier estado que no viva en
+    // DataStore o en un singleton (favoritos en memoria, banner, query) se veía distinto según la
+    // pantalla. Quitar el default es lo que impide que se cuele otra vez sin darse cuenta.
+    libraryViewModel: LibraryViewModel,
     // El banner de progreso de sync lo maneja LibraryViewModel; syncViewModel se usa para el
     // banner PERSISTENTE de descargas pausadas/detenidas (lee flows de singletons).
     syncViewModel: SyncViewModel = hiltViewModel(),
@@ -211,8 +211,6 @@ fun LibraryScreen(
         if (pagerState.currentPage >= tabs.size) pagerState.scrollToPage(tabs.lastIndex)
     }
 
-    LaunchedEffect(currentTab) { onPlaylistsTabActive(currentTab.tab == LibraryTabId.PLAYLISTS) }
-
     // --- SCROLL & APPBAR ---
     // Va ANTES de la búsqueda: el color de la píldora depende del estado de scroll (ver
     // headerItemColor).
@@ -246,11 +244,11 @@ fun LibraryScreen(
         animationSpec = MaterialTheme.motionScheme.defaultEffectsSpec(),
         label = "headerColor"
     )
-    // Color de lo que va SOBRE el bloque: píldora de búsqueda y botones inactivos del grupo de
-    // tabs. Sube un peldaño con el bloque para conservar la MISMA distancia tonal en los dos
-    // estados. Fijo en surfaceContainerHigh (el default de ambos componentes) se leía bien en
-    // reposo —contra surface hay ~11 puntos de tono— pero al scrollear el bloque pasa a
-    // surfaceContainer y la distancia cae a ~5: los botones inactivos se fundían con el fondo.
+    // Color del contenedor de la píldora de búsqueda, que va SOBRE el bloque. Sube un peldaño con
+    // el bloque para conservar la MISMA distancia tonal en los dos estados. Fijo en
+    // surfaceContainerHigh (el default del componente) se leía bien en reposo —contra surface hay
+    // ~11 puntos de tono— pero al scrollear el bloque pasa a surfaceContainer y la distancia cae a
+    // ~5: la píldora se fundía con el fondo. Las tabs ya no lo usan (no tienen contenedor propio).
     val headerItemColor by animateColorAsState(
         targetValue = if (headerScrolled) colorScheme.surfaceContainerHighest
                       else colorScheme.surfaceContainerHigh,
@@ -485,7 +483,7 @@ fun LibraryScreen(
             }
         },
     ) { paddingValues ->
-        // El MiniPlayer + ShuffleFab viven en MainActivity y FLOTAN sobre el final de la
+        // El MiniPlayer vive en MainActivity y FLOTA sobre el final de la
         // lista; arriba, espejo: el CONTENIDO PASA POR DEBAJO del header (TopBar + tabs,
         // opacos con tinte on-scroll). El pager ocupa TODA la altura y cada lista reserva
         // el alto del header como contentPadding superior — así el borde del bloque tonal
@@ -715,8 +713,7 @@ fun LibraryScreen(
                     tabs = tabs,
                     selectedIndex = pagerState.currentPage,
                     onTabSelected = { index -> scope.launch { pagerState.animateScrollToPage(index) } },
-                    containerColor = headerColor,
-                    itemColor = headerItemColor
+                    containerColor = headerColor
                 )
                 // El banner FLOTA sobre la lista (tarjeta suelta, sin fondo de bloque); su
                 // alto medido se suma al contentPadding para que el primer ítem nazca debajo.
@@ -892,38 +889,70 @@ private fun resumeContext(
 }
 
 /**
- * Alto total de [LibraryTabsRow]: 48dp del grupo conectado + 16dp de aire teñido inferior.
+ * Alto total de [LibraryTabsRow]: 48dp de la fila de tabs + 16dp de aire teñido inferior.
  * Las listas del pager lo reservan como contentPadding (el contenido pasa por debajo).
  */
 private val TabsRowHeight = 64.dp
 
-/** Alto de cada botón del grupo conectado (spec: connected button group, tamaño small). */
-private val TabHeight = 48.dp
-
-/**
- * Padding horizontal DENTRO de cada botón. El ancho NO lo pone el contenido sino el reparto
- * del [ButtonGroup] (weights), así que el default de `ButtonDefaults.contentPaddingFor` —
- * pensado para botones que se miden solos — sobra: con 5 pestañas en 360dp se comía el glifo.
- */
-private val TabContentPadding = 4.dp
-private val TabIconSize = 24.sp
+/** Glifo de cada pestaña, y su separación de la etiqueta cuando la pestaña está activa. */
+private val TabIconSize = 20.sp
 private val TabIconGap = 8.dp
 
 /**
- * Navegación de la biblioteca bajo la cabecera de búsqueda: **connected button group** real de
- * M3 Expressive (`ButtonGroup` + `ToggleButton`), no píldoras artesanales. Lo que aporta el
- * componente y no se puede imitar a mano de forma barata:
+ * Padding horizontal DENTRO de la píldora, alrededor del glifo (y de la etiqueta en la activa).
+ * No confundir con [TabPillGap], que es la separación ENTRE píldoras, ni con el `edgePadding` de
+ * la fila, que es el margen contra los bordes de la pantalla.
  *
- * - **Shape morph** por interacción: cada botón pasa de su esquina conectada a la esquina
- *   presionada mientras se mantiene el dedo, y a píldora completa cuando queda seleccionado
- *   (`connectedButtonCheckedShape`). Lo resuelve `ToggleButton` internamente.
- * - **Squish de los vecinos**: `animateWidth(interactionSource)` hace que el botón presionado
- *   se ensanche y los de al lado se compriman — el sello del button group Expressive.
- * - Formas leading/middle/trailing de spec, en vez de un `RoundedCornerShape(50)` a ojo.
- *
- * El ítem inactivo sigue siendo SOLO icono y el activo suma su etiqueta, igual que antes.
+ * **12dp es el techo con seis pestañas, no un valor elegido a ojo.** Con los 16dp del
+ * `HorizontalTextPadding` de Material, en 393dp salían 5×60 + 94 de la activa + 24 de márgenes =
+ * 418dp y la última pestaña quedaba cortada por el borde (se vio en el dispositivo, en español;
+ * en inglés colaba porque "Home"/"Songs" son más cortas que "Inicio"/"Canciones"). Con 12dp la
+ * inactiva mide exactamente los 48dp del mínimo táctil y el peor caso —"Canciones" activa— cae en
+ * ~376dp. Subirlo obliga a quitar una pestaña.
  */
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+private val TabContentPadding = 12.dp
+
+/**
+ * Aire a los lados de la píldora de cada pestaña: la mitad de la separación real entre dos
+ * píldoras contiguas, porque cada una pone la suya (2 + 2 = 4dp de canal). Ojo si se toca — este
+ * padding recorta el área táctil de la pestaña (va antes del `selectable`), así que en vertical no
+ * se pone ninguno, y en horizontal cada dp de más son 6dp de fila con las seis pestañas.
+ */
+private val TabPillGap = 2.dp
+
+/** Dónde nace la primera píldora (y dónde acaba la última) respecto al borde de la pantalla. */
+private val TabRowEdgePadding = 12.dp
+
+/**
+ * Ancho mínimo de una pestaña, gaps incluidos: 48dp de píldora + el aire a cada lado. El 48 NO es
+ * estético — es el objetivo táctil mínimo de Material, y con [TabContentPadding] a 12dp una
+ * pestaña inactiva mide justo eso (12 + glifo 20 + 12), así que este mínimo es exactamente el que
+ * la sostiene. Si alguien baja el padding, la píldora deja de encogerse y sigue siendo pulsable.
+ */
+private val TabMinWidth = 48.dp + TabPillGap * 2
+
+/**
+ * Navegación de la biblioteca bajo la cabecera de búsqueda: [PrimaryScrollableTabRow] de Material 3
+ * con el look de píldora que tenía la botonera anterior — inactiva = solo glifo, activa = glifo +
+ * etiqueta dentro de un contenedor tonal.
+ *
+ * Sustituyó al connected button group (`ButtonGroup` + `ToggleButton`), que era un componente de
+ * SELECCIÓN entre opciones puesto a hacer de navegación. Lo que se gana con el componente real:
+ * semántica de pestaña, scroll automático hasta la activa, y que el ancho de cada una lo decida su
+ * contenido en vez de un reparto por `weight` que obligaba a recortar el padding interno a 4dp
+ * para que el glifo cupiera en 360dp.
+ *
+ * **Siempre la variante scrollable**, sin caso especial para pocas pestañas: la fija reparte el
+ * ancho a partes iguales, así que con las inactivas a solo icono las dejaría como píldoras enormes
+ * con un glifo perdido en el centro. Con la scrollable cada pestaña mide lo suyo; si caben todas,
+ * simplemente no hay scroll.
+ *
+ * El slot `indicator` queda VACÍO a propósito y la píldora se pinta en cada pestaña — el porqué
+ * está en [LibraryTabs].
+ */
+// El `indicator` de esta fila recibe un `TabIndicatorScope`, que sigue tras la puerta experimental
+// en esta versión de Material 3, aunque aquí se le pase un lambda vacío.
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LibraryTabsRow(
     /** Pestañas visibles, ya en el orden del usuario. Nunca vacía (ver el caller). */
@@ -931,139 +960,151 @@ private fun LibraryTabsRow(
     selectedIndex: Int,
     onTabSelected: (Int) -> Unit,
     containerColor: Color,
-    // Contenedor de los botones INACTIVOS. Lo gobierna el caller porque sigue al estado de
-    // scroll: tiene que subir cuando sube el bloque o el grupo se funde con su propio fondo.
-    itemColor: Color,
     modifier: Modifier = Modifier
 ) {
-    val haptic = LocalHapticFeedback.current
-    val density = LocalDensity.current
-    val textMeasurer = rememberTextMeasurer()
-    // Token real del type scale Expressive (antes: labelLarge con un FontWeight a mano).
-    val labelStyle = MaterialTheme.typography.labelLargeEmphasized
-    // getOrNull: al ocultar la pestaña activa desde Ajustes, el pager recompone con el índice
-    // viejo un frame antes de que el LaunchedEffect lo corrija — con indexado directo, crash.
-    val activeLabel = stringResource((tabs.getOrNull(selectedIndex) ?: tabs.first()).titleRes)
-
-    // Cuánto más ancha es la pestaña activa que una de solo icono. NO es una constante elegida
-    // a ojo: se MIDE la etiqueta real con la fuente, el idioma y el fontScale vigentes y se
-    // compara con el ancho de un glifo con su padding. Así una traducción larga no recorta el
-    // texto y una corta no deja aire de más, sin tocar nada al añadir idiomas.
-    val activeWeight = remember(activeLabel, labelStyle, density, textMeasurer) {
-        with(density) {
-            val iconOnly = TabIconSize.toPx() + TabContentPadding.toPx() * 2
-            val withLabel = iconOnly + TabIconGap.toPx() +
-                textMeasurer.measure(activeLabel, labelStyle).size.width
-            withLabel / iconOnly
-        }
-    }
+    // getOrNull + coerceIn: al ocultar la pestaña activa desde Ajustes, el pager recompone con el
+    // índice viejo un frame antes de que el LaunchedEffect lo corrija — y `PrimaryTabRow` indexa
+    // su lista de posiciones con él, así que un índice fuera de rango revienta.
+    val safeIndex = selectedIndex.coerceIn(0, tabs.lastIndex)
 
     Box(
         modifier = modifier
             .fillMaxWidth()
             // Tinte tonal compartido con la cabecera (elevación M3 al scrollear). El padding
-            // INFERIOR va dentro del fondo teñido: es el aire que separa el grupo del corte
+            // INFERIOR va dentro del fondo teñido: es el aire que separa la fila del corte
             // del bloque al scrollear.
             .background(containerColor)
-            .padding(start = 16.dp, end = 16.dp, bottom = 16.dp)
+            .padding(bottom = 16.dp)
     ) {
-        ButtonGroup(
-            // Con weight en TODOS los ítems el reparto llena exactamente el ancho disponible y
-            // el grupo nunca desborda; este indicador es la red por si el redondeo del reparto
-            // deja un ítem fuera: la navegación tiene que seguir siendo alcanzable SIEMPRE.
-            overflowIndicator = { menuState ->
-                FilledIconButton(
-                    onClick = { menuState.show() },
-                    modifier = Modifier.height(TabHeight)
-                ) { MaterialSymbol("more_horiz") }
-            },
-            horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween),
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
+        // `containerColor = Color.Transparent`: el tinte ya lo pinta el Box de arriba, que es
+        // quien comparte el color animado con la TopBar. Si además lo pintara la fila, el
+        // degradado de elevación se aplicaría dos veces.
+        PrimaryScrollableTabRow(
+            selectedTabIndex = safeIndex,
+            containerColor = Color.Transparent,
+            // Margen contra los bordes de la pantalla. Se le resta el aire propio de la píldora
+            // para que lo que quede alineado sea el borde del CONTENEDOR, no el del glifo. Son
+            // 12dp y no los 16dp de la barra de búsqueda: con seis pestañas, esos 4dp por lado son
+            // 8dp que deciden si la última entra o queda cortada contra el borde.
+            edgePadding = TabRowEdgePadding - TabPillGap,
+            // OBLIGATORIO bajarlo: el default de la fila scrollable es
+            // `TabRowDefaults.ScrollableTabRowMinTabWidth` = 90dp, y con las inactivas a solo
+            // icono eso las dejaría como píldoras de 90dp con un glifo perdido en el centro y
+            // la fila enorme. Bajándolo, cada pestaña mide lo que mide su contenido y solo la
+            // activa se ensancha; el valor sigue ahí como red del mínimo táctil.
+            minTabWidth = TabMinWidth,
+            indicator = {},
+            divider = {}
         ) {
-            tabs.forEachIndexed { index, tab ->
-                val selected = index == selectedIndex
-                customItem(
-                    buttonGroupContent = {
-                        // Hoisted: es la señal que el grupo escucha para el squish.
-                        val interaction = remember { MutableInteractionSource() }
-                        val weight by animateFloatAsState(
-                            targetValue = if (selected) activeWeight else 1f,
-                            animationSpec = MaterialTheme.motionScheme.fastSpatialSpec(),
-                            label = "tabWeight"
-                        )
-                        ToggleButton(
-                            checked = selected,
-                            onCheckedChange = {
-                                if (!selected) {
-                                    // Tick de segmento: el háptico del spec para moverse
-                                    // dentro de un grupo (LongPress sería un golpe de más).
-                                    haptic.performHapticFeedback(HapticFeedbackType.SegmentTick)
-                                    onTabSelected(index)
-                                }
-                            },
-                            shapes = when (index) {
-                                0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
-                                tabs.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
-                                else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
-                            },
-                            colors = ToggleButtonDefaults.toggleButtonColors(
-                                // Ni el default del token (surfaceContainer, que es justo el
-                                // color al que vira la cabecera al scrollear) ni un valor fijo
-                                // sirven: el contenedor tiene que MOVERSE con el bloque para
-                                // conservar la distancia tonal. Lo resuelve el caller.
-                                containerColor = itemColor
-                            ),
-                            // Plano: el grupo se apoya en el bloque teñido, no flota sobre él.
-                            elevation = null,
-                            contentPadding = PaddingValues(horizontal = TabContentPadding),
-                            interactionSource = interaction,
-                            modifier = Modifier
-                                .weight(weight)
-                                .animateWidth(interaction)
-                                .height(TabHeight)
-                        ) {
-                            MaterialSymbol(tab.iconName, size = TabIconSize, fill = selected)
-                            AnimatedVisibility(
-                                visible = selected,
-                                // Mismo spring espacial que el ancho del botón: si el texto
-                                // se abriera con otra curva, se vería llegar tarde o pronto.
-                                enter = expandHorizontally(
-                                    animationSpec = MaterialTheme.motionScheme.fastSpatialSpec()
-                                ) + fadeIn(
-                                    animationSpec = MaterialTheme.motionScheme.defaultEffectsSpec()
-                                ),
-                                exit = shrinkHorizontally(
-                                    animationSpec = MaterialTheme.motionScheme.fastSpatialSpec()
-                                ) + fadeOut(
-                                    animationSpec = MaterialTheme.motionScheme.fastEffectsSpec()
-                                )
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Spacer(modifier = Modifier.width(TabIconGap))
-                                    Text(
-                                        text = stringResource(tab.titleRes),
-                                        style = labelStyle,
-                                        maxLines = 1,
-                                        softWrap = false
-                                    )
-                                }
-                            }
-                        }
-                    },
-                    menuContent = { state ->
-                        DropdownMenuItem(
-                            text = { Text(stringResource(tab.titleRes)) },
-                            leadingIcon = { MaterialSymbol(tab.iconName, fill = selected) },
-                            onClick = {
-                                onTabSelected(index)
-                                state.dismiss()
-                            }
-                        )
-                    }
-                )
-            }
+            LibraryTabs(tabs, safeIndex, onTabSelected)
         }
+    }
+}
+
+/**
+ * Las pestañas en sí. Recuperan el look de la botonera que había antes —**inactiva = solo glifo,
+ * activa = glifo + etiqueta dentro de una píldora**— pero montado sobre `Tab`, así que conserva el
+ * comportamiento de pestaña (selección, semántica, scroll hasta la activa) y ya no depende de un
+ * componente de selección de opciones.
+ *
+ * **Todo el contenido va en el slot `icon`, con `text = null`**, y no repartido entre los dos
+ * slots. `Tab` coloca text+icon con `TabBaselineLayout`, que alinea el texto por su BASELINE y
+ * reserva su sitio; con la etiqueta apareciendo y desapareciendo eso da saltos verticales. Con
+ * solo el slot de icono, el layout centra el contenido y la fila del glifo + etiqueta se gobierna
+ * aquí, que es justo lo que hace falta para que la etiqueta crezca en horizontal sin mover nada.
+ *
+ * **La píldora se pinta en el modifier de cada pestaña, no en el slot `indicator` de la fila**
+ * (que por eso queda vacío). No es una preferencia: `TabRow` coloca el indicador DESPUÉS de las
+ * pestañas en su `SubcomposeLayout`, o sea que se dibuja ENCIMA — vale para una barrita al borde
+ * inferior, pero un contenedor relleno taparía el contenido. Como fondo de la pestaña queda detrás
+ * por construcción, y de paso el `clip` que va antes es lo que hace que el **ripple del pressed
+ * salga con forma de píldora** también en las inactivas.
+ *
+ * Consecuencia asumida: la píldora aparece en su sitio en vez de deslizarse, así que el indicador
+ * ya no sigue el arrastre del pager (solo salta al soltar).
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun LibraryTabs(
+    tabs: List<TabInfo>,
+    selectedIndex: Int,
+    onTabSelected: (Int) -> Unit
+) {
+    val haptic = LocalHapticFeedback.current
+    tabs.forEachIndexed { index, tab ->
+        val selected = index == selectedIndex
+        // OJO con el destino de la animación: NO es `Color.Transparent`, que es negro transparente
+        // (0x00000000). Interpolar desde `secondaryContainer` hasta él arrastra el RGB hacia el
+        // negro mientras baja el alpha, y eso es el DESTELLO oscuro que se veía al cambiar de
+        // pestaña. Con el mismo color a alpha 0 la interpolación se queda en su propio tono y solo
+        // se desvanece.
+        val pillColor by animateColorAsState(
+            targetValue = colorScheme.secondaryContainer.copy(alpha = if (selected) 1f else 0f),
+            animationSpec = MaterialTheme.motionScheme.defaultEffectsSpec(),
+            label = "tabPill"
+        )
+        Tab(
+            selected = selected,
+            onClick = {
+                if (!selected) {
+                    // Tick de segmento: el háptico del spec para moverse dentro de un grupo
+                    // (LongPress sería un golpe de más).
+                    haptic.performHapticFeedback(HapticFeedbackType.SegmentTick)
+                    onTabSelected(index)
+                }
+            },
+            // EXPLÍCITOS, no los defaults: `Tab` define `unselectedContentColor` como "lo mismo
+            // que el seleccionado", y el contentColor que hereda de `PrimaryTabRow` es `primary`
+            // — o sea que sin esto las seis pestañas se pintarían del color de la activa y ninguna
+            // se leería como inactiva. La activa va sobre la píldora, así que su color es el `on-`
+            // del contenedor, no el acento suelto.
+            selectedContentColor = colorScheme.onSecondaryContainer,
+            unselectedContentColor = colorScheme.onSurfaceVariant,
+            text = null,
+            icon = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = TabContentPadding)
+                ) {
+                    MaterialSymbol(tab.iconName, size = TabIconSize, fill = selected)
+                    // La etiqueta solo en la activa. `expandHorizontally` + `fadeIn` con el MISMO
+                    // spring espacial que usaba la botonera: si el texto se abriera con otra curva
+                    // se vería llegar tarde respecto al ensanchado de la píldora.
+                    AnimatedVisibility(
+                        visible = selected,
+                        enter = expandHorizontally(
+                            animationSpec = MaterialTheme.motionScheme.fastSpatialSpec()
+                        ) + fadeIn(
+                            animationSpec = MaterialTheme.motionScheme.defaultEffectsSpec()
+                        ),
+                        exit = shrinkHorizontally(
+                            animationSpec = MaterialTheme.motionScheme.fastSpatialSpec()
+                        ) + fadeOut(
+                            animationSpec = MaterialTheme.motionScheme.fastEffectsSpec()
+                        )
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Spacer(modifier = Modifier.width(TabIconGap))
+                            Text(
+                                text = stringResource(tab.titleRes),
+                                style = MaterialTheme.typography.labelLargeEmphasized,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+                }
+            },
+            modifier = Modifier
+                // Solo separación HORIZONTAL. Un inset vertical se vería mejor, pero este padding
+                // va ANTES del `selectable` que añade `Tab`, así que recorta también el área
+                // táctil: con 4dp arriba y abajo la pestaña quedaría en 40dp de alto, por debajo
+                // del mínimo de 48dp. La píldora ocupa el alto completo de la fila y el aire se lo
+                // dan la cabecera de búsqueda (arriba) y el padding del bloque (abajo).
+                .padding(horizontal = TabPillGap)
+                .clip(CircleShape)
+                .background(pillColor)
+        )
     }
 }
 

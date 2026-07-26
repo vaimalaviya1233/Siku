@@ -2,10 +2,8 @@ package com.qhana.siku.ui.components
 
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
@@ -21,16 +19,10 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.compositeOver
-import androidx.compose.ui.graphics.isSpecified
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.HazeTint
 import dev.chrisbanes.haze.hazeEffect
@@ -217,117 +209,6 @@ fun GlassSurface(
     }
 }
 
-/**
- * FAB de acción global: `FloatingActionButton` REAL de M3 Expressive (no un Surface artesanal),
- * par del FAB-menú de reproducción en la capa flotante inferior. Por defecto es el aleatorio;
- * [icon] permite mutarlo por contexto (p. ej. "playlist_add" en la pestaña Listas).
- */
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
-@Composable
-fun ShuffleFab(
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    icon: String = "shuffle"
-) {
-    val haptic = LocalHapticFeedback.current
-    FloatingActionButton(
-        onClick = {
-            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-            onClick()
-        },
-        // toShape() ya es @Composable y memoiza internamente (no envolver en remember).
-        shape = MaterialShapes.Square.toShape(),
-        // Tonal APAGADO (no primary): el acento pleno competía con el play/pause del MiniPlayer —
-        // un solo protagonista por capa flotante.
-        containerColor = MaterialTheme.colorScheme.secondaryContainer,
-        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-        // Elevación por DEFAULT del FAB (M3 Expressive: shadow sutil del spec), igual que el
-        // ToggleFloatingActionButton del FAB-menú → ambos a la misma altura.
-        modifier = modifier.size(ComponentConfig.FloatingFabSize)
-    ) {
-        MaterialSymbol(icon, size = 28.sp)
-    }
-}
-
-/**
- * FAB MENU M3 Expressive (m3.material.io/components/fab-menu): el toggle abre dos acciones —
- * reproducir toda la biblioteca EN ORDEN o en ALEATORIO.
- *
- * Layout: tamaño NATURAL del componente (su padding interno de 16dp es el margen del spec, no se
- * compensa con offsets); `wrapContentSize(unbounded)` deja que los ítems crezcan HACIA ARRIBA
- * dibujando fuera de los bounds, así el MiniPlayer de abajo no se mueve al abrir el menú. La
- * alineación con el MiniPlayer la da el contenedor (ambos al mismo margen lateral).
- */
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
-@Composable
-fun PlayAllFabMenu(
-    enabled: Boolean,
-    onPlayAll: () -> Unit,
-    onShuffleAll: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    var expanded by remember { mutableStateOf(false) }
-    val haptic = LocalHapticFeedback.current
-    // Predictive-back/atrás cierra el menú antes de salir de la pantalla.
-    androidx.activity.compose.BackHandler(enabled = expanded) { expanded = false }
-
-    // wrapContentSize(unbounded): el menú se dimensiona a su tamaño NATURAL (el del spec, con su
-    // padding interno de 16dp que ES el margen del componente) y sus ítems, al expandir, dibujan
-    // HACIA ARRIBA fuera de los bounds sin empujar al MiniPlayer de abajo. Sin offsets: la
-    // alineación con el MiniPlayer se resuelve en el contenedor (ambos al margen de 16dp del spec).
-    Box(
-        modifier = modifier
-            .wrapContentSize(align = Alignment.BottomEnd, unbounded = true)
-            .alpha(if (enabled) 1f else 0.5f)
-    ) {
-        FloatingActionButtonMenu(
-            expanded = expanded,
-            button = {
-                ToggleFloatingActionButton(
-                    checked = expanded,
-                    onCheckedChange = {
-                        if (enabled) {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            expanded = !expanded
-                        }
-                    },
-                    // Cerrado APAGADO (secondaryContainer, no el primaryContainer del
-                    // default): el acento competía con el play/pause del MiniPlayer de al
-                    // lado. Abierto SÍ sube a primary — el menú desplegado es el foco.
-                    containerColor = ToggleFloatingActionButtonDefaults.containerColor(
-                        initialColor = MaterialTheme.colorScheme.secondaryContainer,
-                        finalColor = MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    // Morph play ↔ close siguiendo el progreso del toggle; el color acompaña
-                    // la animación de contenedor (secondaryContainer → primary).
-                    MaterialSymbol(
-                        if (checkedProgress > 0.5f) "close" else "play_arrow",
-                        color = androidx.compose.ui.graphics.lerp(
-                            MaterialTheme.colorScheme.onSecondaryContainer,
-                            MaterialTheme.colorScheme.onPrimary,
-                            checkedProgress
-                        ),
-                        size = 26.sp,
-                        // El triángulo va FILLED; la cruz de cerrar no tiene relleno.
-                        fill = checkedProgress <= 0.5f
-                    )
-                }
-            }
-        ) {
-            FloatingActionButtonMenuItem(
-                onClick = { expanded = false; onPlayAll() },
-                text = { Text(androidx.compose.ui.res.stringResource(com.qhana.siku.R.string.detail_play_all)) },
-                icon = { MaterialSymbol("play_arrow", fill = true) }
-            )
-            FloatingActionButtonMenuItem(
-                onClick = { expanded = false; onShuffleAll() },
-                text = { Text(androidx.compose.ui.res.stringResource(com.qhana.siku.R.string.detail_shuffle)) },
-                icon = { MaterialSymbol("shuffle") }
-            )
-        }
-    }
-}
 
 /**
  * Barra de progreso Expressive estilo Apple Music.

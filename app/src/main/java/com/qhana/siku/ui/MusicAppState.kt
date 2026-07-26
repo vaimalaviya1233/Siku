@@ -32,9 +32,6 @@ class MusicAppState(
     /** Reproductor expandido = NowPlaying a pantalla completa sobre el NavHost. */
     var playerExpanded by playerExpandedState
 
-    /** El home está en la pestaña Listas: el FAB de aleatorio muta a "crear lista". */
-    var homeOnPlaylistsTab by mutableStateOf(false)
-
     /** Hoja "añadir canciones" disparada desde el FAB en detalle de playlist/Favoritos. */
     var showAddSongsSheet by mutableStateOf(false)
 

@@ -748,13 +748,6 @@ internal fun BottomActionBar(
     onSleepTimerClick: () -> Unit,
     repeatMode: RepeatMode,
     onRepeatToggle: () -> Unit,
-    /**
-     * Estado del aleatorio. NO trae un botón propio: lo MUESTRA el de la cola, que es lo que el
-     * aleatorio modifica. Así el estado se ve de un vistazo sin sumar un control más a una barra
-     * llena, y el toggle sigue viviendo donde se entiende —dentro de la hoja de la cola—, en vez
-     * de competir con el play por el color de acento (que fue lo que lo sacó del transporte).
-     */
-    isShuffleEnabled: Boolean,
     onShareSong: () -> Unit,
     config: List<ToolbarActionState>,
     modifier: Modifier = Modifier
@@ -822,18 +815,12 @@ internal fun BottomActionBar(
                         inactiveContent = toolbarContentColor,
                         isLoading = isLyricsLoading
                     )
-                    // El botón de la cola LLEVA el estado del aleatorio (ver [isShuffleEnabled]):
-                    // relleno activo e icono `shuffle` cuando la cola está barajada. El tap sigue
-                    // abriendo la hoja, que es donde está el toggle.
-                    PlayerToolbarAction.QUEUE -> ToolbarToggle(
-                        checked = isShuffleEnabled,
-                        onToggle = onShowQueue,
-                        icon = if (isShuffleEnabled) "shuffle" else "queue_music",
-                        description = if (isShuffleEnabled) stringResource(R.string.np_view_queue_shuffled)
-                        else stringResource(R.string.np_view_queue),
-                        checkedBg = checkedBg,
-                        activeContent = activeContent,
-                        inactiveContent = toolbarContentColor
+                    PlayerToolbarAction.QUEUE -> ExpressiveActionIcon(
+                        onClick = onShowQueue,
+                        icon = "queue_music",
+                        description = stringResource(R.string.np_view_queue),
+                        contentColor = toolbarContentColor,
+                        morph = false
                     )
                     PlayerToolbarAction.SHARE -> ExpressiveActionIcon(
                         onClick = onShareSong,
@@ -983,18 +970,8 @@ internal fun BottomActionBar(
                                     onClick = { showMenu = false; onLyricsToggle() }
                                 )
                                 PlayerToolbarAction.QUEUE -> DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            if (isShuffleEnabled) stringResource(R.string.np_view_queue_shuffled)
-                                            else stringResource(R.string.np_view_queue)
-                                        )
-                                    },
-                                    leadingIcon = {
-                                        MaterialSymbol(
-                                            if (isShuffleEnabled) "shuffle" else "queue_music",
-                                            fill = isShuffleEnabled
-                                        )
-                                    },
+                                    text = { Text(stringResource(R.string.np_view_queue)) },
+                                    leadingIcon = { MaterialSymbol("queue_music") },
                                     onClick = { showMenu = false; onShowQueue() }
                                 )
                                 PlayerToolbarAction.SHARE -> DropdownMenuItem(

@@ -268,7 +268,6 @@
     <string name="np_open_eq">Open equalizer</string>
     <string name="np_more_options">More options</string>
     <string name="np_download">Download</string>
-    <string name="np_view_queue_shuffled">View play queue, shuffled</string>
     <string name="np_seek_forward">Skip forward %1$d seconds</string>
     <string name="np_seek_back">Skip back %1$d seconds</string>
     <string name="np_album_art_options">Pick the theme colour</string>

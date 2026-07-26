@@ -39,8 +39,10 @@ internal fun NowPlayingPortrait(
     playbackState: PlaybackState,
     currentPositionFlow: StateFlow<Long>,
     durationFlow: StateFlow<Long>,
-    /** Búfer cargado: tercer nivel de la barra, solo con sentido en streaming. */
+    /** Búfer cargado: tercer nivel de la barra. */
     bufferedPositionFlow: StateFlow<Long>,
+    /** La canción se está streameando: fuera de ahí el búfer no informa de nada. */
+    showBuffer: Boolean,
     /** Gestos del reproductor (Ajustes → Reproducción). */
     gesturesEnabled: Boolean,
     /** Arrastre de cierre compartido: la carátula también lo alimenta. */
@@ -60,8 +62,6 @@ internal fun NowPlayingPortrait(
     eqEnabled: Boolean,
     sleepTimerActive: Boolean,
     onSleepTimerClick: () -> Unit,
-    /** Estado del aleatorio: lo enseña el botón de la cola del toolbar (ver [BottomActionBar]). */
-    isShuffleEnabled: Boolean,
     onShareSong: () -> Unit,
     toolbarConfig: List<ToolbarActionState>,
     hazeState: HazeState,
@@ -115,6 +115,7 @@ internal fun NowPlayingPortrait(
             currentPositionFlow = currentPositionFlow,
             durationFlow = durationFlow,
             bufferedPositionFlow = bufferedPositionFlow,
+            showBuffer = showBuffer,
             onSeek = playerActions.onSeek,
             trackColor = playButtonColor,
             inactiveTrackColor = playButtonColor.copy(alpha = 0.2f),
@@ -176,7 +177,6 @@ internal fun NowPlayingPortrait(
                     onSleepTimerClick = onSleepTimerClick,
                     repeatMode = repeatMode,
                     onRepeatToggle = playerActions.onRepeatToggle,
-                    isShuffleEnabled = isShuffleEnabled,
                     onShareSong = onShareSong,
                     config = toolbarConfig,
                     // Mismo margen sobre la navbar que la capa flotante del home (16dp). El Scaffold
@@ -206,8 +206,10 @@ internal fun NowPlayingLandscape(
     playbackState: PlaybackState,
     currentPositionFlow: StateFlow<Long>,
     durationFlow: StateFlow<Long>,
-    /** Búfer cargado: tercer nivel de la barra, solo con sentido en streaming. */
+    /** Búfer cargado: tercer nivel de la barra. */
     bufferedPositionFlow: StateFlow<Long>,
+    /** La canción se está streameando: fuera de ahí el búfer no informa de nada. */
+    showBuffer: Boolean,
     /** Gestos del reproductor (Ajustes → Reproducción). */
     gesturesEnabled: Boolean,
     /** Arrastre de cierre compartido: la carátula también lo alimenta. */
@@ -234,8 +236,6 @@ internal fun NowPlayingLandscape(
     eqEnabled: Boolean,
     sleepTimerActive: Boolean,
     onSleepTimerClick: () -> Unit,
-    /** Estado del aleatorio: lo enseña el botón de la cola del toolbar (ver [BottomActionBar]). */
-    isShuffleEnabled: Boolean,
     onShareSong: () -> Unit,
     toolbarConfig: List<ToolbarActionState>,
     hazeState: HazeState,
@@ -343,7 +343,6 @@ internal fun NowPlayingLandscape(
                 onSleepTimerClick = onSleepTimerClick,
                 repeatMode = repeatMode,
                 onRepeatToggle = playerActions.onRepeatToggle,
-                isShuffleEnabled = isShuffleEnabled,
                 onShareSong = onShareSong,
                 config = toolbarConfig
             )
@@ -373,6 +372,7 @@ internal fun NowPlayingLandscape(
                 currentPositionFlow = currentPositionFlow,
                 durationFlow = durationFlow,
                 bufferedPositionFlow = bufferedPositionFlow,
+                showBuffer = showBuffer,
                 onSeek = playerActions.onSeek,
                 trackColor = playButtonColor,
                 inactiveTrackColor = playButtonColor.copy(alpha = 0.2f),

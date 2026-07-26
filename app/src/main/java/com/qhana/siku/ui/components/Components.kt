@@ -17,7 +17,7 @@ internal object ComponentConfig {
     val SongItemIconSize = 56.dp
     val SongItemIconCorner = 28.dp
     val ThumbnailSize = 156
-    // --- Capa flotante del bottom (MiniPlayer + ShuffleFab), specs floating toolbar M3 Expressive ---
+    // --- Capa flotante del bottom (solo el MiniPlayer), specs floating toolbar M3 Expressive ---
     // ContainerHeight del floating toolbar del spec (FloatingToolbarTokens). Lo usa la barra de
     // acciones del NowPlaying, que DEBE forzarlo (la alpha18 no lo respeta sola). Vivía pegado a
     // MiniPlayerHeight por coincidencia de valor: son cosas distintas y ya divergen.
@@ -32,13 +32,9 @@ internal object ComponentConfig {
     val MiniPlayerArtSize = MiniPlayerHeight - 16.dp
     // Diámetro/lado de los controles de transporte. 48dp = mínimo táctil recomendado.
     val MiniPlayerButtonSize = 48.dp
-    // El FAB acompañante es más bajo que el container (56 vs 64): centrado, deja aire arriba/abajo.
-    val FloatingFabSize = 56.dp
     // Padding interno del container y gap entre sus botones de acción.
     val FloatingBarInnerPadding = 8.dp
     val FloatingBarItemGap = 4.dp
-    // Gap entre el container y el FAB de al lado.
-    val FloatingBarToFabGap = 8.dp
     // Márgenes de la capa respecto a la pantalla: 16dp sobre la navbar del sistema y a los lados.
     val FloatingBarBottomMargin = 16.dp
     val FloatingBarSideMargin = 16.dp

@@ -56,6 +56,13 @@ internal fun ProgressSlider(
     durationFlow: StateFlow<Long>,
     /** Hasta dónde hay audio cargado: tercer nivel del track, solo visible en streaming. */
     bufferedPositionFlow: StateFlow<Long>,
+    /**
+     * Si esta canción SE ESTÁ STREAMEANDO. El player reporta `bufferedPosition` para cualquier
+     * fuente —con un archivo en disco salta a la duración entera en cuanto abre—, así que sin
+     * esta puerta el nivel aparecería también en lo local y lo descargado, donde no informa de
+     * nada. Es el ORIGEN lo que decide, no el valor del búfer.
+     */
+    showBuffer: Boolean,
     onSeek: (Long) -> Unit,
     trackColor: Color,
     inactiveTrackColor: Color,
@@ -84,12 +91,11 @@ internal fun ProgressSlider(
         }
     }
 
-    // Fracción del búfer. Se anula cuando cubre TODA la canción (que es lo que devuelve el
-    // player con un archivo en disco): el nivel solo debe aparecer cuando dice algo, y una barra
-    // permanentemente llena de un tercer color sería ruido en la biblioteca descargada.
+    // Fracción del búfer: solo en streaming (ver [showBuffer]) y mientras quede algo por cargar
+    // —una vez descargada entera, el nivel lleno de un tercer color sería ruido permanente.
     val bufferedFraction by remember {
         derivedStateOf {
-            if (duration <= 0L) 0f
+            if (!showBuffer || duration <= 0L) 0f
             else (bufferedPosition.toFloat() / duration.toFloat())
                 .coerceIn(0f, 1f)
                 .takeIf { it < BUFFER_COMPLETE_FRACTION } ?: 0f
