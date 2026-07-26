@@ -101,15 +101,17 @@ class SongRepository @Inject constructor(
         songDao.getRediscoverFlow(before, limit).map { list -> list.map { it.toSong() } }
 
     override fun getTopGenres(minCount: Int, limit: Int): Flow<List<com.qhana.siku.data.local.GenreSummary>> =
-        songDao.getTopGenresFlow(minCount, limit)
+        songDao.getGenresFlow(minCount, limit, SongDao.ARTS_PER_GENRE, SongDao.ARTS_SEPARATOR)
 
-    override suspend fun getSongsByGenre(genre: String): List<Song> = withContext(Dispatchers.IO) {
-        songDao.getSongsByGenre(genre).map { it.toSong() }
-    }
-
-    override suspend fun getDownloadedSongsWithoutGenre(limit: Int): List<Song> = withContext(Dispatchers.IO) {
-        songDao.getDownloadedSongsWithoutGenre(limit).map { it.toSong() }
-    }
+    override suspend fun getSongsByGenre(genre: String, partialMatch: Boolean): List<Song> =
+        withContext(Dispatchers.IO) {
+            val entities = if (partialMatch) {
+                songDao.getSongsByGenreLike("%${SongDao.escapeLike(genre)}%")
+            } else {
+                songDao.getSongsByGenre(genre)
+            }
+            entities.map { it.toSong() }
+        }
 
     override suspend fun updateGenre(songId: String, genre: String?) = withContext(Dispatchers.IO) {
         songDao.updateGenre(songId, genre)
@@ -292,6 +294,11 @@ class SongRepository @Inject constructor(
     override suspend fun deleteSongs(idsToDelete: List<String>) = withContext(Dispatchers.IO) {
         if (idsToDelete.isEmpty()) return@withContext
         val songs = idsToDelete.chunked(SQLITE_VAR_LIMIT).flatMap { songDao.getSongsByIds(it) }
+
+        // Las FILAS primero: el borrado de carátulas pregunta a la BD quién sigue usando cada
+        // archivo, y esa respuesta solo es correcta cuando las que se van ya no cuentan.
+        idsToDelete.chunked(SQLITE_VAR_LIMIT).forEach { songDao.deleteSongsByIds(it) }
+
         songs.forEach { song ->
             if (song.uriString.startsWith("file://")) {
                 try {
@@ -302,17 +309,34 @@ class SongRepository @Inject constructor(
                 }
             }
             try {
-                // Covers se guardan en filesDir desde el cambio de ubicación;
-                // limpiamos también el legacy en cacheDir para instalaciones previas.
-                val cover = java.io.File(context.filesDir, "covers/${song.id}.jpg")
-                if (cover.exists()) cover.delete()
-                val legacyCover = java.io.File(context.cacheDir, "covers/${song.id}.jpg")
-                if (legacyCover.exists()) legacyCover.delete()
+                // La carátula se localiza por el URI que guarda la FILA, no reconstruyendo un
+                // nombre a partir del id: desde que el archivo se llama por su contenido, el id
+                // ya no lo determina.
+                // Vale igual para las carátulas guardadas por versiones anteriores (`<songId>.jpg`):
+                // la fila las referencia por URI, que es lo único que se consulta aquí. Y las que
+                // ya no referencie nadie las barre la poda del sync, así que no hace falta ningún
+                // caso especial por el esquema de nombres viejo.
+                song.albumArtUriString
+                    ?.takeIf { it.startsWith("file://") }
+                    ?.let { deleteCoverIfUnused(java.io.File(it.removePrefix("file://")), it) }
             } catch (e: Exception) {
                 Log.w("SongRepository", "Error deleting cover for song ${song.id}", e)
             }
         }
-        idsToDelete.chunked(SQLITE_VAR_LIMIT).forEach { songDao.deleteSongsByIds(it) }
+    }
+
+    /**
+     * Borra un archivo de carátula SOLO si ya no queda ninguna fila apuntando a él.
+     *
+     * Una portada se comparte: converge por contenido entre las canciones de un álbum y la
+     * metadata ligera la propaga con `setAlbumArt`, cruzando incluso fuentes distintas. Borrarla
+     * al retirar a la canción que la extrajo —dedupe entre fuentes, reconciliación, quitar una
+     * carpeta— dejaba al resto del álbum apuntando a un archivo muerto, y el healing lo traducía
+     * a "sin carátula" de forma permanente.
+     */
+    private suspend fun deleteCoverIfUnused(cover: java.io.File, uri: String) {
+        if (!cover.exists()) return
+        if (songDao.countSongsWithArt(uri) == 0) cover.delete()
     }
 
     override suspend fun countSongsNeedingWork(): Int = withContext(Dispatchers.IO) {
@@ -323,6 +347,8 @@ class SongRepository @Inject constructor(
         songDao.getTotalDownloadedBytes()
     }
 
+    override fun getTotalDownloadedBytesFlow(): Flow<Long> = songDao.getTotalDownloadedBytesFlow()
+
     override suspend fun getEvictionCandidates(excludeId: String): List<Pair<String, Long>> = withContext(Dispatchers.IO) {
         songDao.getEvictionCandidates(excludeId).map { it.id to it.size }
     }
@@ -331,12 +357,52 @@ class SongRepository @Inject constructor(
         songDao.updateSongMetadata(song.id, song.title, song.artist, song.album, song.duration, song.albumArtUri?.toString())
     }
 
+    override suspend fun getSongsNeedingLightMetadata(): List<Song> = withContext(Dispatchers.IO) {
+        songDao.getSongsNeedingLightMetadata(AppConfig.UNKNOWN_ARTIST).map { it.toSong() }
+    }
+
+    override suspend fun updateLightMetadata(
+        songId: String, title: String, artist: String, album: String, genre: String?, durationMs: Long
+    ) = withContext(Dispatchers.IO) {
+        songDao.updateLightMetadata(songId, title, artist, album, genre, durationMs)
+    }
+
+    override suspend fun getAlbumArtUri(album: String): String? = withContext(Dispatchers.IO) {
+        songDao.getAlbumArtUri(album)
+    }
+
+    override suspend fun setAlbumArt(album: String, uri: String) = withContext(Dispatchers.IO) {
+        songDao.setAlbumArt(album, uri)
+    }
+
     override suspend fun updateAlbumArtUri(songId: String, uri: String?) = withContext(Dispatchers.IO) {
         songDao.updateAlbumArtUri(songId, uri)
     }
 
     override suspend fun getSongsWithLocalArt(): List<Song> = withContext(Dispatchers.IO) {
         songDao.getSongsWithLocalArt().map { it.toSong() }
+    }
+
+    override suspend fun getSongsWithPendingArtwork(localOnly: Boolean): List<Song> = withContext(Dispatchers.IO) {
+        val pending = if (localOnly) {
+            songDao.getLocalSongsWithPendingArtwork()
+        } else {
+            songDao.getSongsWithPendingArtwork()
+        }
+        pending.map { it.toSong() }
+    }
+
+    override suspend fun markArtworkAttempted(songIds: List<String>): Unit = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        songIds.chunked(SQLITE_VAR_LIMIT).forEach { songDao.markArtworkAttempted(it, now) }
+    }
+
+    override suspend fun clearArtworkAttempted(songIds: List<String>): Unit = withContext(Dispatchers.IO) {
+        songIds.chunked(SQLITE_VAR_LIMIT).forEach { songDao.clearArtworkAttempted(it) }
+    }
+
+    override suspend fun getReferencedArtUris(): Set<String> = withContext(Dispatchers.IO) {
+        songDao.getReferencedArtUris().toHashSet()
     }
 
     override suspend fun getAllSongs(): List<Song> = withContext(Dispatchers.IO) {

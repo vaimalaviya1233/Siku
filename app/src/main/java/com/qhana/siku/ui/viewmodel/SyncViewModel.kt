@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.work.WorkManager
 import com.qhana.siku.R
+import com.qhana.siku.data.config.AppConfig.BYTES_PER_GB
 import com.qhana.siku.data.coordinator.SyncManager
 import com.qhana.siku.data.coordinator.SyncStatus
 import com.qhana.siku.data.model.DownloadControlState
@@ -33,6 +34,7 @@ class SyncViewModel @Inject constructor(
     private val musicRepository: IMusicRepository,
     private val musicPreferences: MusicPreferences,
     private val downloadScheduler: DownloadScheduler,
+    private val sourceRegistry: com.qhana.siku.data.source.MusicSourceRegistry,
     private val snackbarManager: com.qhana.siku.data.util.SnackbarManager
 ) : ViewModel() {
 
@@ -143,8 +145,29 @@ class SyncViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Encola un scan de todas las fuentes activas. La red solo es requisito si alguna de ellas
+     * es de NUBE: re-escanear una carpeta local es 100% offline y no tiene por qué quedarse
+     * esperando conexión (mismo criterio que `LibraryViewModel.onRefresh`). Se deriva acá y no
+     * en cada llamador para que ninguno tenga que adivinarlo.
+     */
     fun refreshSongs(force: Boolean = true) {
-        downloadScheduler.scheduleScan(force)
+        viewModelScope.launch {
+            val needsNetwork = sourceRegistry.activeSources().any { it.type.isCloud }
+            downloadScheduler.scheduleScan(force, requiresNetwork = needsNetwork)
+        }
+    }
+
+    /**
+     * Re-lista SOLO las fuentes locales (ver [SyncManager.refreshLocalSources]). Lo dispara la
+     * vuelta de la app a primer plano: es cuando el usuario acaba de copiar canciones al teléfono.
+     *
+     * Directo al SyncManager y NO por `DownloadScheduler`: un worker traería constraints, cola y
+     * reintentos para un listado local que dura lo que dura, no toca la red y no debe competir
+     * con el scan de verdad.
+     */
+    fun refreshLocalLibrary() {
+        viewModelScope.launch { syncManager.refreshLocalSources() }
     }
 
     // ==================== Control de descargas (pausa / stop / tope) ====================
@@ -154,6 +177,18 @@ class SyncViewModel @Inject constructor(
         musicPreferences.downloadControlStateFlow.stateIn(
             viewModelScope, SharingStarted.WhileSubscribed(5000), DownloadControlState.ACTIVE
         )
+
+    /**
+     * Consumo del audio descargado frente al tope, para el gestor de descargas. Reactivo por los
+     * DOS lados: Room reemite al entrar o desalojarse archivos, y DataStore al cambiar el tope.
+     * Arranca en null (= "aún no se sabe") para que la tarjeta no parpadee un "0 B" inicial.
+     */
+    val storageUsage: StateFlow<StorageUsage?> =
+        combine(
+            musicRepository.getTotalDownloadedBytesFlow(),
+            musicPreferences.storageLimitBytesFlow
+        ) { used, cap -> StorageUsage(usedBytes = used, capBytes = cap) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     /** Tope de almacenamiento en GB (0 = sin límite), para el diálogo de opciones. */
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -220,11 +255,27 @@ class SyncViewModel @Inject constructor(
         musicPreferences.saveStorageLimitBytes(bytes)
         viewModelScope.launch(Dispatchers.IO) { syncManager.enforceStorageLimit() }
     }
-
-    companion object {
-        private const val BYTES_PER_GB = 1024f * 1024f * 1024f
-    }
 }
 
 /** Estado del banner global de descargas (pausadas o detenidas) con pendientes. */
 data class DownloadBannerState(val control: DownloadControlState, val pending: Int)
+
+/**
+ * Cuánto ocupa el audio descargado de la nube y cuánto permite el tope. Las canciones de fuente
+ * LOCAL no cuentan: ya vivían en el dispositivo (ver `SongDao.getTotalDownloadedBytes`).
+ */
+data class StorageUsage(val usedBytes: Long, val capBytes: Long) {
+    /** Sin tope (0) no hay barra que llenar ni restante que calcular: solo el consumo. */
+    val hasCap: Boolean get() = capBytes > 0L
+
+    /** Fracción del tope ocupada, acotada a 1: el consumo puede pasarse temporalmente. */
+    val fraction: Float
+        get() = if (!hasCap) 0f else (usedBytes.toFloat() / capBytes).coerceIn(0f, 1f)
+
+    /**
+     * Bytes que faltan para el tope. Negativo si se está POR ENCIMA — ocurre de verdad: al bajar
+     * el tope desde Ajustes el desalojo respeta la canción en reproducción, y el sync masivo no
+     * desaloja. La UI lo distingue en vez de enseñar un "quedan -2 GB".
+     */
+    val remainingBytes: Long get() = capBytes - usedBytes
+}

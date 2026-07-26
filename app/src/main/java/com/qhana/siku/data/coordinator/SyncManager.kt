@@ -2,6 +2,7 @@ package com.qhana.siku.data.coordinator
 
 import android.content.Context
 import android.util.Log
+import com.qhana.siku.R
 import com.qhana.siku.data.manager.MusicDownloader
 import com.qhana.siku.data.model.DownloadControlState
 import com.qhana.siku.data.model.DuplicatePolicy
@@ -20,7 +21,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -42,7 +46,10 @@ class SyncManager @Inject constructor(
     private val requestCoordinator: RequestCoordinator,
     private val authManager: AuthManager,
     private val sourceRegistry: com.qhana.siku.data.source.MusicSourceRegistry,
-    private val artistImageRepository: com.qhana.siku.data.repository.ArtistImageRepository
+    private val artistImageRepository: com.qhana.siku.data.repository.ArtistImageRepository,
+    private val lightMetadataFetcher: LightMetadataFetcher,
+    private val artworkHealingManager: ArtworkHealingManager,
+    private val snackbarManager: com.qhana.siku.data.util.SnackbarManager
 ) {
     companion object {
         private const val TAG = "SyncManager"
@@ -83,11 +90,15 @@ class SyncManager @Inject constructor(
         private const val ACTIVE_DOWNLOADS_PUBLISH_MS = 300L
 
         // Espera por reconexión: la cola se PAUSA al perder red en vez de quemar canciones
-        // como fallidas. Los waits cuentan iteraciones (no wall-clock) para ser testeables
-        // con virtual time. 40 × 3s = ~2 min de gracia; WiFi 20 × 3s = ~1 min.
-        private const val NETWORK_POLL_MS = 3_000L
-        private const val NETWORK_WAIT_ATTEMPTS = 40
-        private const val WIFI_WAIT_ATTEMPTS = 20
+        // como fallidas. Son TECHOS de espera, no intervalos de sondeo: `awaitNetwork`
+        // despierta en el instante en que la red vuelve (ver NetworkManager.status), así que
+        // el margen solo decide cuánto se tolera antes de ceder el turno a WorkManager.
+        //
+        // Generoso a propósito: rendirse cuesta terminar el sync y reprogramar un worker,
+        // mientras que esperar de más no consume nada —no hay descargas en curso— y absorbe
+        // los cortes cotidianos (un ascensor, un cambio de AP, salir y volver a casa).
+        private const val NETWORK_WAIT_TIMEOUT_MS = 2 * 60_000L
+        private const val WIFI_WAIT_TIMEOUT_MS = 60_000L
 
         // Backoff persistido entre corridas (cola en BD, v18): una canción fallida queda
         // con nextRetryAt en el futuro y el productor la salta hasta entonces. Transitorio:
@@ -106,8 +117,8 @@ class SyncManager @Inject constructor(
         }
         Log.e(TAG, "Uncaught exception in SyncManager", exception)
         val className = exception.javaClass.simpleName
-        val details = exception.message ?: "no details"
-        _state.value = SyncStatus.Error("Unexpected error ($className): $details")
+        val details = exception.message ?: context.getString(R.string.sync_error_no_details)
+        _state.value = SyncStatus.Error(context.getString(R.string.sync_error_unexpected, className, details))
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + exceptionHandler)
@@ -136,6 +147,11 @@ class SyncManager @Inject constructor(
     val failedDownloads: kotlinx.coroutines.flow.Flow<List<com.qhana.siku.data.repository.FailedDownload>> =
         musicRepository.getFailedDownloadsFlow()
 
+    // Canciones recién descargadas (ver MusicDownloader.downloadedSongs). Se re-expone aquí para
+    // que el reproductor no tenga que conocer al downloader: habla con el coordinador, igual que
+    // con `activeDownloads` y `failedDownloads`.
+    val downloadedSongs: kotlinx.coroutines.flow.SharedFlow<Song> = musicDownloader.downloadedSongs
+
     // IDs marcados para reintento. processQueue los saca de su set local `attempted`
     // al inicio de cada iteración, permitiendo re-procesar fallidas sin reiniciar el sync.
     private val retryRequests = ConcurrentHashMap.newKeySet<String>()
@@ -146,7 +162,10 @@ class SyncManager @Inject constructor(
     private val priorityInFlight = ConcurrentHashMap.newKeySet<String>()
     private val syncMutex = Mutex()
     private val isScanning = AtomicBoolean(false)
-    private val stopSignal = AtomicBoolean(false)
+    // StateFlow y no AtomicBoolean: además de leerse en los chequeos cooperativos, es una de
+    // las señales que despiertan a `awaitNetwork`. Con una bandera opaca, un logout durante la
+    // espera de red dejaba al worker (y a su foreground service) vivo hasta agotar el timeout.
+    private val stopSignal = MutableStateFlow(false)
     private var priorityJob: Job? = null
     private val priorityMutex = Mutex()
 
@@ -184,7 +203,7 @@ class SyncManager @Inject constructor(
             if (isScanning.get()) return SyncOutcome.Skipped
 
             isScanning.set(true)
-            stopSignal.set(false)
+            stopSignal.value = false
             return try {
                 Log.d(TAG, "Starting sync (force=$force)")
                 executeSync(force)
@@ -197,6 +216,74 @@ class SyncManager @Inject constructor(
                 Log.e(TAG, "Sync Fatal Error", e)
                 SyncOutcome.Failed(e.message ?: e.javaClass.simpleName, e)
             }
+        }
+    }
+
+    /**
+     * Refresco de las fuentes LOCALES solamente: re-lista carpetas/dispositivo y aplica altas y
+     * bajas. Nada de red, descargas, healing ni delta de nube.
+     *
+     * Existe porque el escaneo completo solo corre al ARRANCAR la app, y una app de música
+     * prácticamente no vuelve a arrancar en frío: el servicio de reproducción mantiene vivo el
+     * proceso, así que volver a ella tras copiar canciones nuevas no disparaba nada y la
+     * biblioteca se quedaba vieja hasta un pull-to-refresh manual.
+     *
+     * Es barato justo porque el descubrimiento local NO es incremental: listar es un walk de
+     * directorios (o una consulta a MediaStore) y solo se ANALIZAN los archivos cuyo id no estaba
+     * ya en la BD, que es el trabajo caro. Sin novedades, esto no toca la BD.
+     *
+     * `tryLock` y no `withLock`: si hay un sync completo en marcha, ese ya cubre lo local y este
+     * refresco sobra — encolarse solo serviría para repetirlo justo después.
+     *
+     * @return canciones añadidas (0 también si no había fuentes locales o si se saltó).
+     */
+    suspend fun refreshLocalSources(): Int {
+        val localSources = sourceRegistry.activeSources().filter { !it.type.isCloud }
+        if (localSources.isEmpty()) return 0
+        if (!syncMutex.tryLock()) {
+            Log.d(TAG, "Refresco local omitido: ya hay un sync en marcha")
+            return 0
+        }
+
+        return try {
+            // Silencioso a propósito: no toca `_state`, así que no levanta el banner de sync.
+            // Lo normal es que no encuentre nada, y anunciar un escaneo en cada vuelta a la app
+            // sería ruido; lo que sí aparece —porque Room y Paging lo emiten solos— son las
+            // canciones nuevas en la lista.
+            // isStopped fijo en false, NO `stopSignal`: esa bandera la deja encendida `release()`
+            // (logout) hasta el siguiente `startSync`, así que un usuario que desconecta OneDrive
+            // y sigue con su música local se quedaría sin refrescos para siempre. Este trabajo se
+            // corta por cancelación de su corrutina, que es lo que le corresponde: dura lo que
+            // dura un listado.
+            val ctx = com.qhana.siku.data.source.DiscoverContext(
+                reportScanning = { _, _ -> },
+                isStopped = { false }
+            )
+            var added = 0
+            for (source in localSources) {
+                try {
+                    added += source.discover(force = false, ctx).added
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Refresco local de ${source.type} falló: ${e.message}")
+                }
+            }
+            if (added > 0) Log.d(TAG, "Refresco local: $added canciones nuevas")
+
+            // Carátulas locales pendientes. Sin esto, una biblioteca SOLO local no repara nunca
+            // sus portadas por su cuenta: `resolvePendingArtwork` vive en el sync completo, y el
+            // sync completo solo lo dispara el usuario (pull-to-refresh) o un cambio de fuentes
+            // — no hay ningún scan automático al arrancar. Es justo el caso que arrastra el
+            // fallo de escritura de la 1.0.1, así que dejarlo fuera equivalía a no repararlo.
+            //
+            // Acotado a lo local (`localOnly`) porque este refresco es offline: las pendientes de
+            // nube no se pueden resolver aquí y solo se cargarían para nada en cada vuelta a la
+            // app. Va después del discover, que es lo que exige la migración de ids locales.
+            artworkHealingManager.resolvePendingArtwork(localOnly = true)
+            added
+        } finally {
+            syncMutex.unlock()
         }
     }
 
@@ -215,17 +302,10 @@ class SyncManager @Inject constructor(
         var fatal: Exception? = null
         queueStopReason.set(null)
         try {
-            // Bootstrap v23 (una vez): forzar un full scan para que la nube reporte sus
-            // relativePath (el delta incremental no re-envía items sin cambios).
-            if (!musicPreferences.loadRelPathBackfillDone()) {
-                musicPreferences.clearDeltaToken()
-                musicPreferences.saveRelPathBackfillDone()
-            }
-
-            _state.value = SyncStatus.Scanning(0, "Scanning for changes...")
+            _state.value = SyncStatus.Scanning(0, context.getString(R.string.sync_looking_for_changes))
             val discoverCtx = com.qhana.siku.data.source.DiscoverContext(
                 reportScanning = { found, message -> _state.value = SyncStatus.Scanning(found, message) },
-                isStopped = { stopSignal.get() }
+                isStopped = { stopSignal.value }
             )
             // Sólo las fuentes CONFIGURADAS (OneDrive con sesión, local con carpeta elegida).
             // Resiliencia multi-fuente: si una falla (p.ej. OneDrive sin red), las demás siguen.
@@ -234,7 +314,7 @@ class SyncManager @Inject constructor(
             var succeeded = 0
             var sourceFailure: Exception? = null
             for (source in sourceRegistry.activeSources()) {
-                if (stopSignal.get()) break
+                if (stopSignal.value) break
                 try {
                     val res = source.discover(force, discoverCtx)
                     changesCount += res.added
@@ -242,14 +322,26 @@ class SyncManager @Inject constructor(
                     succeeded++
                 } catch (e: CancellationException) {
                     throw e
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     Log.e(TAG, "Fuente ${source.type} falló en discover: ${e.message}")
                     if (sourceFailure == null) sourceFailure = e
+                    // Una carpeta que no existe es un error de CONFIGURACIÓN, no un tropiezo de
+                    // red: hay que decirlo aunque otra fuente haya funcionado. Si no, quien tenga
+                    // música local además de la nube ve "sincronizado" para siempre mientras su
+                    // OneDrive no aporta una sola canción.
+                    if (e is com.qhana.siku.data.source.SourceFolderMissingException) {
+                        snackbarManager.show(
+                            context.getString(R.string.sync_err_folder_missing, e.folder),
+                            length = com.qhana.siku.data.util.SnackbarLength.LONG
+                        )
+                    }
                 }
             }
             if (succeeded == 0 && sourceFailure != null) throw sourceFailure
 
-            if (!stopSignal.get()) {
+            if (!stopSignal.value) {
                 // Healing: canciones ya descargadas cuyo análisis de metadata falló en su
                 // momento (duration=0 con needsMetadata=0 — p. ej. el bug de setDataSource
                 // con ':' en el nombre). Se re-encolan y el pipeline las repara EN LOCAL:
@@ -257,23 +349,46 @@ class SyncManager @Inject constructor(
                 val requeued = musicRepository.requeueDownloadedSongsWithoutMetadata()
                 if (requeued > 0) Log.i(TAG, "Healing: $requeued canciones descargadas sin metadata re-encoladas")
 
-                // Backfill de géneros (v24, una vez): re-lee el tag GENRE de lo ya descargado en
-                // local para poblar los chips de género del inicio. No re-descarga nada.
-                if (!musicPreferences.loadGenreBackfillDone()) {
-                    val tagged = musicDownloader.backfillGenres()
-                    musicPreferences.saveGenreBackfillDone()
-                    Log.i(TAG, "Backfill de géneros: $tagged canciones con género leído")
-                }
-
                 // Duplicados entre fuentes (v23, política del usuario): ANTES de descargar.
                 // Con política elegida se fusionan las perdedoras (re-apunte incluido); sin
                 // política y con duplicados presentes, se dispara el diálogo de decisión y
                 // las copias de nube en disputa no se descargan todavía.
                 handleCrossSourceDuplicates()
 
+                // Metadata ligera: rellena artista/álbum/portada leyendo solo la cabecera remota,
+                // ANTES de descargar. Así la biblioteca se ve entera y con carátulas en minutos,
+                // sin esperar a que el pipeline de audio (lento, acotado por el tope) termine.
+                // Solo en WiFi: pedir cabeceras de cientos de canciones no debe gastar datos.
+                if (!stopSignal.value && networkManager.isWifi()) {
+                    try {
+                        lightMetadataFetcher.run(isStopped = { stopSignal.value })
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Metadata ligera falló: ${e.message}")
+                    }
+                }
+
                 val (dl, fl) = processQueue()
                 downloaded = dl
                 failed = fl
+
+                // Carátulas pendientes: las que la indexación dejó sin portada. Normalmente no
+                // hay ninguna y esto es una consulta vacía.
+                //
+                // AQUÍ, y no justo después del discover: antes de la metadata ligera las
+                // canciones de nube recién descubiertas llevan todavía el centinela de álbum y
+                // su audio no está en el dispositivo, así que no habría nada que mirar y el
+                // único efecto sería sellarlas sin haberlas podido intentar. Después de las
+                // descargas, en cambio, cada fila tiene su álbum real y las que se bajaron
+                // traen su portada — que es justo lo que las demás pueden heredar.
+                if (!stopSignal.value) artworkHealingManager.resolvePendingArtwork()
+
+                // Poda de carátulas huérfanas: AQUÍ y no antes. Es el primer punto en el que ya
+                // no queda nada escribiendo portadas (el escaneo flusheó sus lotes, la metadata
+                // ligera terminó y la cola de descargas también), así que "sin referencias"
+                // significa de verdad "sobra". Ver ArtworkHealingManager.pruneCovers.
+                if (!stopSignal.value) artworkHealingManager.pruneCovers()
 
                 // Fotos de artista (Deezer) pendientes: mismo rol que los healings de arriba
                 // (reparación post-scan), pero fire-and-forget en el scope — no retrasa el
@@ -290,7 +405,8 @@ class SyncManager @Inject constructor(
             authError = true
             fatal = e
             Log.e(TAG, "Auth token error: ${e.message}")
-            _state.value = SyncStatus.Error(e.message ?: "Authentication failed")
+            // El detalle técnico ya quedó en el log; al banner va el texto localizado.
+            _state.value = SyncStatus.Error(context.getString(R.string.sync_error_auth))
         } catch (e: CancellationException) {
             // Cancelación cooperativa (worker reemplazado por pull-to-refresh, logout,
             // restricción de batería/red por WorkManager). No es un error visible.
@@ -299,14 +415,30 @@ class SyncManager @Inject constructor(
             throw e
         } catch (e: Exception) {
             fatal = e
-            _state.value = SyncStatus.Error("Critical error: ${e.message}")
+            _state.value = SyncStatus.Error(
+                context.getString(
+                    R.string.sync_error_critical,
+                    e.message ?: context.getString(R.string.sync_error_no_details)
+                )
+            )
         } finally {
-            if (wasCancelled || stopSignal.get()) {
+            if (wasCancelled || stopSignal.value) {
                 _state.value = SyncStatus.Idle
             } else if (_state.value !is SyncStatus.Error) {
-                val complete = SyncStatus.Complete(changesCount, downloaded, failed, deletedCount)
-                _state.value = complete
-                _completedEvents.tryEmit(complete)
+                // Una cola detenida NO es un sync terminado. Antes este bloque publicaba
+                // `Complete` mirando solo si hubo excepción, así que un sync que se quedó a
+                // medias esperando WiFi se anunciaba con el mismo "Biblioteca al día" que uno
+                // que agotó su trabajo — y el único sitio donde constaba el motivo era el
+                // `SyncOutcome`, que lo lee `ScanWorker` y no llega jamás a la pantalla.
+                val stoppedBy = queueStopReason.get()
+                val pausedMessage = stoppedBy?.let { pausedMessageRes(it) }
+                if (stoppedBy != null && pausedMessage != null) {
+                    _state.value = SyncStatus.Paused(stoppedBy, context.getString(pausedMessage))
+                } else {
+                    val complete = SyncStatus.Complete(changesCount, downloaded, failed, deletedCount)
+                    _state.value = complete
+                    _completedEvents.tryEmit(complete)
+                }
             }
             isScanning.set(false)
         }
@@ -315,7 +447,7 @@ class SyncManager @Inject constructor(
         return when {
             authError -> SyncOutcome.Failed(fatal?.message ?: "Authentication failed", fatal, isAuthError = true)
             fatal != null -> SyncOutcome.Failed(fatal.message ?: fatal.javaClass.simpleName, fatal)
-            stopSignal.get() -> SyncOutcome.Incomplete(IncompleteReason.CANCELLED)
+            stopSignal.value -> SyncOutcome.Incomplete(IncompleteReason.CANCELLED)
             reason != null -> {
                 Log.w(TAG, "Sync incompleto: $reason (downloaded=$downloaded, failed=$failed)")
                 SyncOutcome.Incomplete(reason)
@@ -565,7 +697,7 @@ class SyncManager @Inject constructor(
      * dejar descargas/sync corriendo con un token que va a invalidarse.
      */
     fun release() {
-        stopSignal.set(true)
+        stopSignal.value = true
         scope.coroutineContext.cancelChildren()
         // El publicador se canceló junto con el scope; garantizamos el estado final vacío.
         activeDownloadsMap.clear()
@@ -725,7 +857,7 @@ class SyncManager @Inject constructor(
         val finalizers = List(FINALIZE_PARALLELISM) {
             launch {
                 for ((song, file) in finalizeChannel) {
-                    if (stopSignal.get()) continue // logout: drenar sin tocar BD
+                    if (stopSignal.value) continue // logout: drenar sin tocar BD
                     val res = musicDownloader.finalizeDownload(song, file)
                     if (res is MusicDownloader.Result.Success) {
                         downloadedCount.incrementAndGet()
@@ -747,13 +879,20 @@ class SyncManager @Inject constructor(
                     // consumiendo sin descargar para no dejar al productor bloqueado en
                     // send(). Las canciones drenadas siguen "needing work" en BD y las
                     // retoma el próximo sync.
-                    if (stopSignal.get() || queueStopReason.get() != null) continue
+                    if (stopSignal.value || queueStopReason.get() != null) continue
 
                     // Pausa/stop del usuario: drenar los temas YA en el buffer del canal sin
                     // descargarlos (siguen "needing work"; se retoman al reanudar). Sin este
                     // check, la pausa solo frenaba al productor y los ~parallelism*2 temas ya
                     // bufferizados seguían bajando ("le puse pausa y sigue descargando").
                     if (!musicPreferences.loadDownloadControlState().allowsMassDownload) continue
+
+                    // Mismo razonamiento para la red medida, y por el mismo motivo: el gate de
+                    // WiFi vivía SOLO en el productor, así que al salir de casa las canciones ya
+                    // bufferizadas (hasta parallelism*2) se seguían bajando con datos móviles
+                    // durante todo el plazo de gracia. Aquí no hay prioritarias que respetar:
+                    // esas nunca pasan por el canal (ver handlePrioritySong).
+                    if (!networkManager.isWifi()) continue
 
                     val onProgress: (Float) -> Unit = {
                         activeDownloadsMap[song.id] = ActiveDownload(song, it)
@@ -808,14 +947,16 @@ class SyncManager @Inject constructor(
             // Es decir: cada vuelta extra hace trabajo real y luego rompe, así que esperar un
             // intervalo fijo solo añadiría latencia a la canción que el usuario acaba de
             // pulsar. `yield` cede el dispatcher (y es punto de cancelación) sin esa latencia.
-            while (!stopSignal.get() && queueStopReason.get() == null) {
+            while (!stopSignal.value && queueStopReason.get() == null) {
                 // Espera por SEÑAL (StateFlow), no polling: despierta en cuanto termina la
                 // descarga prioritaria. El `continue` re-evalúa stopSignal/queueStopReason.
                 if (requestCoordinator.shouldPauseScan()) { requestCoordinator.awaitScanResumed(); continue }
 
                 // Red caída: pausar y esperar reconexión en vez de quemar la cola.
                 if (!networkManager.isAvailable()) {
-                    if (!waitFor(NETWORK_WAIT_ATTEMPTS) { networkManager.isAvailable() }) {
+                    if (!awaitPaused(IncompleteReason.NETWORK_LOST, NETWORK_WAIT_TIMEOUT_MS,
+                            current, total, failedCount) { networkManager.isAvailable() }
+                    ) {
                         queueStopReason.compareAndSet(null, IncompleteReason.NETWORK_LOST)
                     }
                     continue
@@ -847,7 +988,9 @@ class SyncManager @Inject constructor(
                 // vuelve; si no vuelve, terminamos con NO_WIFI y ScanWorker encadena una
                 // continuación con constraint UNMETERED.
                 if (!networkManager.isWifi()) {
-                    if (!waitFor(WIFI_WAIT_ATTEMPTS) { networkManager.isWifi() }) {
+                    if (!awaitPaused(IncompleteReason.NO_WIFI, WIFI_WAIT_TIMEOUT_MS,
+                            current, total, failedCount) { networkManager.isWifi() }
+                    ) {
                         queueStopReason.compareAndSet(null, IncompleteReason.NO_WIFI)
                     }
                     continue
@@ -865,7 +1008,7 @@ class SyncManager @Inject constructor(
                 offset = 0
                 var budgetExhausted = false
                 for (song in pending) {
-                    if (stopSignal.get() || queueStopReason.get() != null || prioritySongId.value != null) break
+                    if (stopSignal.value || queueStopReason.get() != null || prioritySongId.value != null) break
                     // Las YA descargadas (solo les falta metadata, p.ej. healing) no consumen
                     // presupuesto: sus bytes ya están dentro de getTotalDownloadedBytes() y
                     // volver a sumarlos frenaba el productor antes de tiempo ("tope alcanzado"
@@ -939,12 +1082,12 @@ class SyncManager @Inject constructor(
         while (attempt < MAX_SONG_ATTEMPTS &&
             stage is MusicDownloader.DownloadStage.Error &&
             stage.kind == MusicDownloader.ErrorKind.TRANSIENT &&
-            !stopSignal.get() && queueStopReason.get() == null
+            !stopSignal.value && queueStopReason.get() == null
         ) {
             Log.w(TAG, "Transient error for ${song.title} (attempt $attempt/$MAX_SONG_ATTEMPTS): ${stage.message}")
             delay(SONG_RETRY_BACKOFF_MS * attempt)
             if (!networkManager.isAvailable() &&
-                !waitFor(NETWORK_WAIT_ATTEMPTS) { networkManager.isAvailable() }
+                !awaitNetwork(NETWORK_WAIT_TIMEOUT_MS) { networkManager.isAvailable() }
             ) {
                 queueStopReason.compareAndSet(null, IncompleteReason.NETWORK_LOST)
                 return stage
@@ -956,21 +1099,76 @@ class SyncManager @Inject constructor(
     }
 
     /**
-     * Espera hasta que [condition] sea true, sondeando cada NETWORK_POLL_MS. Cuenta
-     * iteraciones (no wall-clock) a propósito: con virtual time en tests el deadline
-     * sigue funcionando. Retorna false si se agotan los intentos o llega stopSignal.
+     * Espera hasta que [condition] se cumpla, con [timeoutMs] como techo. Retorna false si se
+     * agota el plazo o si llega el stop cooperativo.
+     *
+     * Espera por SEÑAL y no por intervalo: despierta con cada cambio real de la red y con el
+     * stop, en vez de sondear. La diferencia se nota en las dos direcciones — al recuperar el
+     * WiFi la cola reanuda en el acto (sondeando se perdía hasta un ciclo entero), y al pasar
+     * a datos el productor deja de encolar de inmediato en lugar de seguir sirviendo canciones
+     * hasta el siguiente sondeo.
+     *
+     * La condición se evalúa contra `NetworkManager`, no contra el valor emitido: las dos
+     * señales tienen tipos distintos y lo que interesa es el estado resultante, no cuál de
+     * ellas despertó la espera.
      */
-    private suspend fun waitFor(attempts: Int, condition: () -> Boolean): Boolean {
-        repeat(attempts) {
-            if (stopSignal.get()) return false
-            delay(NETWORK_POLL_MS)
-            if (condition()) return true
+    private suspend fun awaitNetwork(timeoutMs: Long, condition: () -> Boolean): Boolean {
+        if (condition()) return true
+        withTimeoutOrNull(timeoutMs) {
+            merge(
+                networkManager.status.map { },
+                stopSignal.map { }
+            ).first { condition() || stopSignal.value }
         }
-        return condition()
+        return condition() && !stopSignal.value
+    }
+
+    /**
+     * [awaitNetwork] con estado visible: anuncia el motivo mientras dura la espera y repone el
+     * progreso de descarga si la red vuelve.
+     *
+     * Anunciar AL ENTRAR, y no al terminar, es el punto entero. El contador de progreso solo
+     * avanza cuando una descarga completa o falla, así que al perder la red se quedaba clavado
+     * en "Descargando X de N" durante minutos —los que tardan las conexiones muertas en morir
+     * por el watchdog más el plazo de gracia— sin una sola pista de lo que estaba pasando. El
+     * usuario lo leía como que la app se había colgado, y tenía razón en leerlo así: el banner
+     * afirmaba un progreso que ya no existía.
+     */
+    private suspend fun awaitPaused(
+        reason: IncompleteReason,
+        timeoutMs: Long,
+        current: AtomicInteger,
+        total: Int,
+        failed: AtomicInteger,
+        condition: () -> Boolean
+    ): Boolean {
+        publishPaused(reason)
+        val resumed = awaitNetwork(timeoutMs, condition)
+        if (resumed) updateProgress(current.get(), total, failed.get())
+        return resumed
+    }
+
+    private fun publishPaused(reason: IncompleteReason) {
+        val messageRes = pausedMessageRes(reason) ?: return
+        _state.value = SyncStatus.Paused(reason, context.getString(messageRes))
+    }
+
+    /**
+     * Texto del banner para una cola detenida. null = no hay nada que anunciar:
+     * [IncompleteReason.CANCELLED] es un logout o un pull-to-refresh que reemplaza al sync, y
+     * ahí el estado correcto es `Idle` —lo pone el `finally` de [executeSync]—, no un aviso.
+     */
+    private fun pausedMessageRes(reason: IncompleteReason): Int? = when (reason) {
+        IncompleteReason.NO_WIFI -> R.string.sync_paused_no_wifi
+        IncompleteReason.NETWORK_LOST -> R.string.sync_paused_no_network
+        IncompleteReason.LOW_BATTERY -> R.string.sync_paused_low_battery
+        IncompleteReason.CANCELLED -> null
     }
 
     private fun updateProgress(current: Int, total: Int, failed: Int = 0) {
-        _state.value = SyncStatus.Downloading(min(current, total), total, failed, "Syncing library...")
+        _state.value = SyncStatus.Downloading(
+            min(current, total), total, failed, context.getString(R.string.notif_syncing_title)
+        )
     }
 
     /**
@@ -1118,8 +1316,21 @@ enum class IncompleteReason {
 
 sealed class SyncStatus(val message: String, val isRunning: Boolean) {
     object Idle : SyncStatus("Idle", false)
-    data class Scanning(val found: Int, val currentMessage: String = "Syncing...") : SyncStatus(currentMessage, true)
-    data class Downloading(val current: Int, val total: Int, val failed: Int, val currentMessage: String = "Downloading...") : SyncStatus(currentMessage, true)
+    // Sin defaults a propósito: `currentMessage` acaba en el banner de la biblioteca, así que
+    // debe venir SIEMPRE de recursos (un default literal se colaba en inglés en la UI en español).
+    data class Scanning(val found: Int, val currentMessage: String) : SyncStatus(currentMessage, true)
+    data class Downloading(val current: Int, val total: Int, val failed: Int, val currentMessage: String) : SyncStatus(currentMessage, true)
+    /**
+     * La cola dejó de avanzar por una condición del entorno (sin WiFi, sin red, batería baja)
+     * y no por un error. Se publica DOS veces con el mismo aspecto y distinto significado:
+     * mientras se espera a que la condición se resuelva, y como estado final si no se resolvió
+     * —ahí el trabajo pendiente queda en manos de la continuación que encadena `ScanWorker`.
+     *
+     * Que ambos casos se vean igual es deliberado: para quien mira la pantalla la situación es
+     * la misma (las descargas están detenidas y se reanudarán solas), y distinguirlas obligaría
+     * a explicar una diferencia que solo existe dentro de WorkManager.
+     */
+    data class Paused(val reason: IncompleteReason, val currentMessage: String) : SyncStatus(currentMessage, false)
     data class Complete(val newSongs: Int, val downloaded: Int, val failed: Int, val deleted: Int = 0) : SyncStatus("Complete", false)
     data class Error(val errorMessage: String) : SyncStatus(errorMessage, false)
 }

@@ -7,9 +7,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.qhana.siku.data.model.PlaybackOrigin
 import com.qhana.siku.data.model.PlaybackState
 import com.qhana.siku.data.model.RepeatMode
@@ -34,7 +32,6 @@ internal fun NowPlayingPortrait(
     // Acento TARGET sin animar: lo consume AccentRevealGroup (la ventana es la transición).
     revealAccent: Color,
     isFavorite: Boolean,
-    isShuffleEnabled: Boolean,
     repeatMode: RepeatMode,
     keepScreenOn: Boolean,
     showLyrics: Boolean,
@@ -42,7 +39,16 @@ internal fun NowPlayingPortrait(
     playbackState: PlaybackState,
     currentPositionFlow: StateFlow<Long>,
     durationFlow: StateFlow<Long>,
-    formatText: String,
+    /** Búfer cargado: tercer nivel de la barra, solo con sentido en streaming. */
+    bufferedPositionFlow: StateFlow<Long>,
+    /** Gestos del reproductor (Ajustes → Reproducción). */
+    gesturesEnabled: Boolean,
+    /** Arrastre de cierre compartido: la carátula también lo alimenta. */
+    dismiss: PlayerDismissState?,
+    format: AudioFormatInfo,
+    /** Chip de formato con ficha técnica (bitrate/bits + frecuencia) en vez de solo el contenedor. */
+    detailedFormat: Boolean,
+    onToggleDetailedFormat: () -> Unit,
     /** Ajustes → Reproducción: barra de progreso ondulada (Expressive). */
     wavyProgress: Boolean,
     playerActions: PlayerActions,
@@ -54,6 +60,9 @@ internal fun NowPlayingPortrait(
     eqEnabled: Boolean,
     sleepTimerActive: Boolean,
     onSleepTimerClick: () -> Unit,
+    /** Estado del aleatorio: lo enseña el botón de la cola del toolbar (ver [BottomActionBar]). */
+    isShuffleEnabled: Boolean,
+    onShareSong: () -> Unit,
     toolbarConfig: List<ToolbarActionState>,
     hazeState: HazeState,
     glassTint: Color,
@@ -74,6 +83,11 @@ internal fun NowPlayingPortrait(
             animatedVisibilityScope = animatedVisibilityScope,
             isPlaying = isPlayingOrBuffering,
             onTap = onAlbumArtLongPress,
+            gesturesEnabled = gesturesEnabled,
+            onNext = playerActions.onNext,
+            onPrevious = playerActions.onPrevious,
+            onSeekBy = playerActions.onSeekBy,
+            dismiss = dismiss,
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
@@ -100,11 +114,14 @@ internal fun NowPlayingPortrait(
         ProgressSlider(
             currentPositionFlow = currentPositionFlow,
             durationFlow = durationFlow,
+            bufferedPositionFlow = bufferedPositionFlow,
             onSeek = playerActions.onSeek,
             trackColor = playButtonColor,
             inactiveTrackColor = playButtonColor.copy(alpha = 0.2f),
             textColor = variantColor,
-            formatText = formatText,
+            format = format,
+            detailedFormat = detailedFormat,
+            onToggleDetailedFormat = onToggleDetailedFormat,
             wavy = wavyProgress,
             isPlaying = isPlayingOrBuffering
         )
@@ -159,6 +176,8 @@ internal fun NowPlayingPortrait(
                     onSleepTimerClick = onSleepTimerClick,
                     repeatMode = repeatMode,
                     onRepeatToggle = playerActions.onRepeatToggle,
+                    isShuffleEnabled = isShuffleEnabled,
+                    onShareSong = onShareSong,
                     config = toolbarConfig,
                     // Mismo margen sobre la navbar que la capa flotante del home (16dp). El Scaffold
                     // ya mete el inset de la navbar en innerPadding, así que esto queda 16dp por
@@ -180,7 +199,6 @@ internal fun NowPlayingLandscape(
     playButtonColor: Color,
     playButtonContentColor: Color,
     isFavorite: Boolean,
-    isShuffleEnabled: Boolean,
     repeatMode: RepeatMode,
     keepScreenOn: Boolean,
     showLyrics: Boolean,
@@ -188,10 +206,21 @@ internal fun NowPlayingLandscape(
     playbackState: PlaybackState,
     currentPositionFlow: StateFlow<Long>,
     durationFlow: StateFlow<Long>,
+    /** Búfer cargado: tercer nivel de la barra, solo con sentido en streaming. */
+    bufferedPositionFlow: StateFlow<Long>,
+    /** Gestos del reproductor (Ajustes → Reproducción). */
+    gesturesEnabled: Boolean,
+    /** Arrastre de cierre compartido: la carátula también lo alimenta. */
+    dismiss: PlayerDismissState?,
     // Acento TARGET sin animar: lo consume AccentRevealGroup (la ventana es la transición).
     revealAccent: Color,
     origin: PlaybackOrigin,
-    formatText: String,
+    /** Fondo sólido vs degradado: el chip de origen lo necesita para no fundirse con el fondo. */
+    solidBackground: Boolean,
+    format: AudioFormatInfo,
+    /** Chip de formato con ficha técnica (bitrate/bits + frecuencia) en vez de solo el contenedor. */
+    detailedFormat: Boolean,
+    onToggleDetailedFormat: () -> Unit,
     /** Ajustes → Reproducción: barra de progreso ondulada (Expressive). */
     wavyProgress: Boolean,
     playerActions: PlayerActions,
@@ -205,6 +234,9 @@ internal fun NowPlayingLandscape(
     eqEnabled: Boolean,
     sleepTimerActive: Boolean,
     onSleepTimerClick: () -> Unit,
+    /** Estado del aleatorio: lo enseña el botón de la cola del toolbar (ver [BottomActionBar]). */
+    isShuffleEnabled: Boolean,
+    onShareSong: () -> Unit,
     toolbarConfig: List<ToolbarActionState>,
     hazeState: HazeState,
     glassTint: Color,
@@ -215,18 +247,23 @@ internal fun NowPlayingLandscape(
     // Sin statusBarsPadding/navigationBarsPadding: el Scaffold de NowPlayingScreen ya mete los
     // insets de las barras del sistema en innerPadding (aplicado por el Box padre). Aplicarlos de
     // nuevo acá duplicaba el espacio superior (la franja vacía bajo el status bar).
+    //
+    // El recorte de pantalla SÍ hay que pedirlo aparte: en horizontal la perforación cae en un
+    // COSTADO, que es justo donde el Scaffold no aporta inset, y el padding lateral fijo no
+    // alcanza para esquivarla.
     Row(
         modifier = Modifier
             .fillMaxSize()
+            .displayCutoutPadding()
             .padding(horizontal = 24.dp),
         horizontalArrangement = Arrangement.spacedBy(32.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // LEFT: info bar arriba (minimizar | chip | ambient) + carátula + toolbar de acciones.
+        // LEFT: barra superior + carátula + toolbar de acciones.
         // El toolbar vive ACÁ, no en la columna de controles: en landscape esa columna no tenía
         // altura para todo y el BottomActionBar (último hijo) se medía a ≈0 y se aplastaba.
         // Repartido así, cada columna cabe sin scroll.
-        // Sin verticalArrangement=Center: el info bar se ancla arriba y el toolbar abajo; la
+        // Sin verticalArrangement=Center: la barra se ancla arriba y el toolbar abajo; la
         // carátula se centra en el Box(weight) intermedio. Antes, weight(1f, fill=false) en la
         // carátula + Center dejaba TODO el aire sobrante como padding superior.
         Column(
@@ -236,29 +273,26 @@ internal fun NowPlayingLandscape(
                 .padding(vertical = 8.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Info bar arriba: minimizar | chip | ambient.
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                IconButton(onClick = onBackClick) {
-                    MaterialSymbol("keyboard_arrow_down", size = 28.sp, color = contentColor)
-                }
-
-                PlaybackSourceChip(
-                    origin = origin,
-                    contentColor = contentColor,
-                    accentColor = playButtonColor,
-                    hazeState = hazeState,
-                    glassTint = glassTint,
-                    compact = true
-                )
-
-                IconButton(onClick = onAmbientMode) {
-                    MaterialSymbol("expand_content", size = 24.sp, color = contentColor)
-                }
-            }
+            // La MISMA barra que en vertical (minimizar | chip | ambient). Antes se reimplementaba
+            // aquí con `IconButton` crudos y las dos copias ya habían divergido: en horizontal los
+            // botones se habían quedado sin el morph de forma al presionar ni la háptica que
+            // `ExpressiveActionIcon` da en vertical.
+            NowPlayingTopBar(
+                onBackClick = onBackClick,
+                contentColor = contentColor,
+                accentColor = playButtonColor,
+                hazeState = hazeState,
+                glassTint = glassTint,
+                origin = origin,
+                solidBackground = solidBackground,
+                onAmbientMode = onAmbientMode,
+                // El chip pierde su etiqueta: en esta columna el ancho es la mitad y con texto
+                // empujaba a los botones contra los bordes.
+                compactChip = true,
+                // Los insets ya vienen del Scaffold; repetir el del status bar aquí dejaría una
+                // franja vacía sobre la barra.
+                applyStatusBarPadding = false
+            )
 
             // Carátula: ocupa el alto sobrante entre info bar y toolbar, cuadrada y centrada.
             Box(
@@ -274,6 +308,11 @@ internal fun NowPlayingLandscape(
                     animatedVisibilityScope = animatedVisibilityScope,
                     isPlaying = isPlayingOrBuffering,
                     onTap = onAlbumArtLongPress,
+                    gesturesEnabled = gesturesEnabled,
+                    onNext = playerActions.onNext,
+                    onPrevious = playerActions.onPrevious,
+                    onSeekBy = playerActions.onSeekBy,
+                    dismiss = dismiss,
                     modifier = Modifier
                         .fillMaxHeight()
                         .aspectRatio(1f)
@@ -304,6 +343,8 @@ internal fun NowPlayingLandscape(
                 onSleepTimerClick = onSleepTimerClick,
                 repeatMode = repeatMode,
                 onRepeatToggle = playerActions.onRepeatToggle,
+                isShuffleEnabled = isShuffleEnabled,
+                onShareSong = onShareSong,
                 config = toolbarConfig
             )
         }
@@ -331,11 +372,14 @@ internal fun NowPlayingLandscape(
             ProgressSlider(
                 currentPositionFlow = currentPositionFlow,
                 durationFlow = durationFlow,
+                bufferedPositionFlow = bufferedPositionFlow,
                 onSeek = playerActions.onSeek,
                 trackColor = playButtonColor,
                 inactiveTrackColor = playButtonColor.copy(alpha = 0.2f),
                 textColor = variantColor,
-                formatText = formatText,
+                format = format,
+                detailedFormat = detailedFormat,
+                onToggleDetailedFormat = onToggleDetailedFormat,
                 wavy = wavyProgress,
                 isPlaying = isPlayingOrBuffering
             )

@@ -108,6 +108,29 @@ interface SongDao {
     fun hasSongsNotOfSourceFlow(sourceType: String): Flow<Boolean>
 
     companion object {
+        /** Carátulas distintas que se piden por género para el collage de su tarjeta. */
+        const val ARTS_PER_GENRE = 4
+
+        /**
+         * Separador de las carátulas concatenadas por [getGenresFlow]. Una barra vertical: no
+         * aparece ni en los `file://` de las carátulas (nombre = sha1 del contenido) ni en las
+         * URLs de Graph, mientras que una coma sí puede salir en una URL con parámetros.
+         */
+        const val ARTS_SEPARATOR = "|"
+
+        /** `LIMIT` de SQLite para "sin límite" (lo pide la pestaña Géneros, que los quiere todos). */
+        const val NO_LIMIT = -1
+
+        /**
+         * Escapa los comodines de LIKE (`%`, `_`) y la propia barra de escape, para que un
+         * nombre de género que los contenga se busque literal. Pareja del `ESCAPE '\'` de las
+         * consultas por coincidencia parcial.
+         */
+        fun escapeLike(value: String): String = value
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+
         /**
          * Construye una query dinámica para paging con búsqueda LIKE.
          *
@@ -396,43 +419,154 @@ interface SongDao {
     @Query("UPDATE songs SET title = :title, artist = :artist, album = :album, duration = :duration, albumArtUriString = :albumArtUri, needsMetadata = 0, lyricsAttemptedAt = NULL WHERE id = :songId")
     suspend fun updateSongMetadata(songId: String, title: String, artist: String, album: String, duration: Long, albumArtUri: String?)
 
+    // ==================== METADATA LIGERA (sin descargar el audio) ====================
+
+    /**
+     * Canciones de NUBE a las que la lectura de cabecera todavía tiene algo que aportar. Las
+     * locales quedan fuera (su archivo ya está en el dispositivo y se analiza directo).
+     *
+     * Son DOS condiciones y no una, porque esta fase escribe dos cosas independientes:
+     *  - el centinela de "sin tags" (artista desconocido), y
+     *  - una carátula pendiente que ningún otro camino puede resolver.
+     *
+     * Mirar solo el artista dejaba un agujero permanente. Los tags se escriben antes que la
+     * portada, y la portada suele costar una SEGUNDA petición (el bloque de imagen rara vez cabe
+     * en el primer trozo de cabecera). Si esa petición falla —basta con cambiar de WiFi a datos
+     * a mitad del sync— la fila se queda con su artista correcto y sin carátula: deja de cumplir
+     * el centinela, así que esta fase no la vuelve a mirar jamás, y `resolvePendingArtwork`
+     * tampoco puede hacer nada con ella porque su audio no está en el dispositivo. El resultado
+     * era una canción sin portada para siempre, salvo que llegara a descargarse entera.
+     *
+     * `artworkAttemptedAt` es lo que evita que esa segunda condición se vuelva trabajo perpetuo:
+     * un álbum que de verdad no trae imagen se sella al leerlo y sale de la lista (mismo
+     * criterio que en [getSongsWithPendingArtwork] — solo sella una lectura CONCLUYENTE).
+     */
+    @Query("""
+        SELECT * FROM songs
+        WHERE sourceType != 'LOCAL' AND isCorrupted = 0
+          AND (
+            artist = :unknownArtist
+            OR ((albumArtUriString IS NULL OR albumArtUriString = '') AND artworkAttemptedAt IS NULL)
+          )
+        ORDER BY dateAdded DESC
+    """)
+    suspend fun getSongsNeedingLightMetadata(unknownArtist: String): List<SongEntity>
+
+    /**
+     * Escribe los tags leídos de la cabecera. A diferencia de [updateSongMetadata] NO toca
+     * `needsMetadata` ni la carátula: esta fila sigue pendiente del análisis completo (duración
+     * exacta, ReplayGain) para cuando el archivo se descargue de verdad.
+     *
+     * `duration` solo se pisa si el lector la dedujo (FLAC la trae en STREAMINFO; ID3 no), de ahí
+     * el CASE: un 0 no debe borrar una duración ya conocida.
+     *
+     * `lyricsAttemptedAt = NULL` por el mismo motivo que en [updateSongMetadata]: un NotFound de
+     * letras sellado con el nombre de archivo como título ya no describe a esta canción.
+     */
+    @Query("""
+        UPDATE songs SET
+            title = :title,
+            artist = :artist,
+            album = :album,
+            genre = COALESCE(:genre, genre),
+            duration = CASE WHEN :durationMs > 0 THEN :durationMs ELSE duration END,
+            lyricsAttemptedAt = NULL
+        WHERE id = :songId
+    """)
+    suspend fun updateLightMetadata(
+        songId: String,
+        title: String,
+        artist: String,
+        album: String,
+        genre: String?,
+        durationMs: Long
+    )
+
+    /** ¿Algún tema de este álbum tiene ya carátula? Evita pedir la misma imagen una vez por canción. */
+    @Query("""
+        SELECT albumArtUriString FROM songs
+        WHERE album = :album AND albumArtUriString IS NOT NULL AND albumArtUriString != ''
+        LIMIT 1
+    """)
+    suspend fun getAlbumArtUri(album: String): String?
+
+    /** Aplica una carátula a todo el álbum, sin pisar las canciones que ya tuvieran la suya. */
+    @Query("""
+        UPDATE songs SET albumArtUriString = :uri
+        WHERE album = :album AND (albumArtUriString IS NULL OR albumArtUriString = '')
+    """)
+    suspend fun setAlbumArt(album: String, uri: String)
+
     /**
      * Persiste los tags ReplayGain leídos del archivo local tras la descarga.
      */
     @Query("UPDATE songs SET trackGainDb = :trackGainDb, trackPeak = :trackPeak, albumGainDb = :albumGainDb, albumPeak = :albumPeak WHERE id = :songId")
     suspend fun updateReplayGain(songId: String, trackGainDb: Float?, trackPeak: Float?, albumGainDb: Float?, albumPeak: Float?)
 
-    // ==================== GÉNERO (v24: chips de acciones rápidas del inicio) ====================
+    // ==================== GÉNERO (v24: chips del inicio + pestaña Géneros) ====================
 
     /** Persiste el tag GENRE leído del archivo. Escrito por el pipeline de análisis y el backfill. */
     @Query("UPDATE songs SET genre = :genre WHERE id = :songId")
     suspend fun updateGenre(songId: String, genre: String?)
 
     /**
-     * Top de géneros por cantidad de canciones (solo los que llegan a [minCount]). Reactivo:
-     * los chips se actualizan solos a medida que el backfill/análisis rellena la columna.
+     * Géneros con al menos [minCount] canciones, del más poblado al menos. [limit] negativo =
+     * todos (semántica de `LIMIT -1` en SQLite): la pestaña Géneros los quiere todos y los chips
+     * del inicio solo el top, y no vale la pena duplicar la consulta.
+     *
+     * **Agrupa sin distinguir mayúsculas** (`GROUP BY ... COLLATE NOCASE`): los tags reales traen
+     * "Rock" y "rock" en la misma biblioteca y como grupos separados se leen como un fallo. El
+     * nombre que se muestra es `MIN(genre)`, o sea la variante alfabéticamente menor del grupo —
+     * arbitraria pero DETERMINISTA (y en la práctica la capitalizada, que ordena antes en BINARY).
+     *
+     * `albumArts` trae hasta [ARTS_PER_GENRE] carátulas DISTINTAS del grupo, separadas por
+     * [ARTS_SEPARATOR], para el collage de la tarjeta. Va como subconsulta con su propio LIMIT
+     * (no un `GROUP_CONCAT` sobre el grupo entero) para que el coste no crezca con el tamaño del
+     * género: un "Rock" de 800 canciones concatenaría 800 URIs para mostrar cuatro.
      */
     @Query(
         """
-        SELECT genre AS name, COUNT(*) AS songCount
-        FROM songs WHERE genre IS NOT NULL AND genre != ''
-        GROUP BY genre HAVING COUNT(*) >= :minCount
-        ORDER BY songCount DESC, genre COLLATE NOCASE ASC
+        SELECT MIN(s.genre) AS name, COUNT(*) AS songCount,
+            (SELECT GROUP_CONCAT(art, :artsSeparator) FROM (
+                SELECT DISTINCT s2.albumArtUriString AS art FROM songs s2
+                WHERE s2.genre = s.genre COLLATE NOCASE AND s2.albumArtUriString IS NOT NULL
+                LIMIT :artsLimit
+            )) AS albumArts
+        FROM songs s WHERE s.genre IS NOT NULL AND s.genre != ''
+        GROUP BY s.genre COLLATE NOCASE HAVING COUNT(*) >= :minCount
+        ORDER BY songCount DESC, name COLLATE NOCASE ASC
         LIMIT :limit
         """
     )
-    fun getTopGenresFlow(minCount: Int, limit: Int): Flow<List<GenreSummary>>
+    fun getGenresFlow(
+        minCount: Int,
+        limit: Int,
+        artsLimit: Int,
+        artsSeparator: String
+    ): Flow<List<GenreSummary>>
 
-    /** Canciones de un género (para reproducir en aleatorio desde el chip). */
-    @Query("SELECT * FROM songs WHERE genre = :genre ORDER BY title COLLATE NOCASE ASC")
+    /**
+     * Canciones de un género por tag EXACTO (sin distinguir mayúsculas, igual que el GROUP BY de
+     * [getGenresFlow]).
+     */
+    @Query("SELECT * FROM songs WHERE genre = :genre COLLATE NOCASE ORDER BY title COLLATE NOCASE ASC")
     suspend fun getSongsByGenre(genre: String): List<SongEntity>
 
     /**
-     * Descargadas (archivo local) SIN género leído todavía: objetivo del backfill una-vez que
-     * re-lee el tag de los archivos ya en disco (sin re-descargar).
+     * Variante de coincidencia PARCIAL (ajuste del usuario): "Rock" trae también "Rock/Metal" y
+     * "Hard Rock". El `LIKE` de SQLite ya es case-insensitive para ASCII; el patrón lo arma el
+     * repositorio, que es quien escapa los comodines del nombre (ver `escapeLike`).
      */
-    @Query("SELECT * FROM songs WHERE genre IS NULL AND uriString LIKE 'file://%' LIMIT :limit")
-    suspend fun getDownloadedSongsWithoutGenre(limit: Int): List<SongEntity>
+    @Query("SELECT * FROM songs WHERE genre LIKE :pattern ESCAPE '\\' ORDER BY title COLLATE NOCASE ASC")
+    suspend fun getSongsByGenreLike(pattern: String): List<SongEntity>
+
+    /** [getSongsByGenre] reactivo, para la pantalla de detalle de género. */
+    @Query("SELECT * FROM songs WHERE genre = :genre COLLATE NOCASE ORDER BY title COLLATE NOCASE ASC")
+    fun getSongsByGenreFlow(genre: String): Flow<List<SongEntity>>
+
+    /** [getSongsByGenreLike] reactivo, para la pantalla de detalle de género. */
+    @Query("SELECT * FROM songs WHERE genre LIKE :pattern ESCAPE '\\' ORDER BY title COLLATE NOCASE ASC")
+    fun getSongsByGenreLikeFlow(pattern: String): Flow<List<SongEntity>>
 
     /**
      * Devuelve canciones cuyo URI de carátula apunta a un archivo local (`file://`).
@@ -444,10 +578,86 @@ interface SongDao {
     suspend fun getSongsWithLocalArt(): List<SongEntity>
 
     /**
+     * Canciones cuya carátula está PENDIENTE: sin portada y sin un intento CONCLUYENTE previo.
+     *
+     * `artworkAttemptedAt IS NULL` es lo que hace la fase repetible sin ser cara. Sin esa
+     * condición habría que elegir entre re-analizar en cada sync las canciones que simplemente
+     * no tienen portada, o no reintentar nunca y depender de un backfill con fecha de caducidad.
+     * El sello lo pone SOLO una lectura que contestó (ver `ArtworkHealingManager.Extraction`),
+     * así que una canción cuyo audio aún no está en el dispositivo sigue apareciendo aquí: es la
+     * diferencia entre "no tiene carátula" y "todavía no he podido mirarla".
+     *
+     * Incluye las de nube todavía sin descargar: aunque su audio no se pueda leer, sí pueden
+     * HEREDAR la portada de una hermana del mismo álbum que sí esté en el dispositivo — es como
+     * se comparten las carátulas desde la metadata ligera (`setAlbumArt`).
+     *
+     * El ORDER BY es load-bearing: agrupadas por álbum, se resuelve cada disco con una sola
+     * consulta (y, como mucho, un análisis de archivo) en vez de repetir el trabajo por canción.
+     */
+    @Query("""
+        SELECT * FROM songs
+        WHERE (albumArtUriString IS NULL OR albumArtUriString = '')
+          AND artworkAttemptedAt IS NULL
+        ORDER BY album COLLATE NOCASE
+    """)
+    suspend fun getSongsWithPendingArtwork(): List<SongEntity>
+
+    /**
+     * [getSongsWithPendingArtwork] limitado a la fuente local. Lo usa el refresco en primer
+     * plano, que es offline: las pendientes de nube no se pueden resolver ahí y solo se
+     * cargarían para nada en cada vuelta a la app.
+     *
+     * Dos queries y no un parámetro-interruptor en el WHERE: la condición extra es una línea, y
+     * a cambio cada consulta es SQL literal que Room valida entera en compilación, sin depender
+     * de cómo se bindee un booleano.
+     */
+    @Query("""
+        SELECT * FROM songs
+        WHERE (albumArtUriString IS NULL OR albumArtUriString = '')
+          AND artworkAttemptedAt IS NULL
+          AND sourceType = 'LOCAL'
+        ORDER BY album COLLATE NOCASE
+    """)
+    suspend fun getLocalSongsWithPendingArtwork(): List<SongEntity>
+
+    /** Sella el intento concluyente: sin esto la canción se revisaría en cada sync. */
+    @Query("UPDATE songs SET artworkAttemptedAt = :now WHERE id IN (:songIds)")
+    suspend fun markArtworkAttempted(songIds: List<String>, now: Long)
+
+    /**
+     * Levanta el sello y devuelve la canción a la cola de pendientes. Lo usa el healing cuando
+     * una portada se pierde y no consigue reponerla: el sello describía un estado —"ya sé lo que
+     * hay que saber de esta carátula"— que dejó de ser cierto.
+     */
+    @Query("UPDATE songs SET artworkAttemptedAt = NULL WHERE id IN (:songIds)")
+    suspend fun clearArtworkAttempted(songIds: List<String>)
+
+    /**
      * Actualiza únicamente el URI de carátula sin tocar el resto de metadata.
      */
     @Query("UPDATE songs SET albumArtUriString = :uri WHERE id = :songId")
     suspend fun updateAlbumArtUri(songId: String, uri: String?)
+
+    /**
+     * Cuántas filas siguen apuntando a este archivo de carátula. Un cover NO es propiedad
+     * exclusiva de la canción cuyo id le da nombre: [setAlbumArt] lo comparte con todo el
+     * álbum, así que borrarlo al retirar a su "dueño" deja al resto apuntando a un archivo
+     * muerto. Se consulta DESPUÉS de borrar las filas, cuando el 0 significa de verdad
+     * "ya no lo usa nadie".
+     */
+    @Query("SELECT COUNT(*) FROM songs WHERE albumArtUriString = :uri")
+    suspend fun countSongsWithArt(uri: String): Int
+
+    /**
+     * Todas las carátulas en uso. Con el nombre derivado del contenido, una portada que cambia
+     * (tags reeditados en el origen) ya no se sobrescribe: se escribe con OTRO nombre y la
+     * anterior queda sin referencia. Esto es lo que permite barrerlas.
+     */
+    @Query("""
+        SELECT DISTINCT albumArtUriString FROM songs
+        WHERE albumArtUriString IS NOT NULL AND albumArtUriString != ''
+    """)
+    suspend fun getReferencedArtUris(): List<String>
 
     /**
      * Marca una canción como modificada en el origen (OneDrive): vacía la URI local
@@ -465,6 +675,14 @@ interface SongDao {
      */
     @Query("SELECT COALESCE(SUM(size), 0) FROM songs WHERE uriString LIKE 'file://%' AND sourceType != 'LOCAL'")
     suspend fun getTotalDownloadedBytes(): Long
+
+    /**
+     * La misma suma, observable: Room reemite en cada cambio de `songs`, así que el gestor de
+     * descargas ve subir el consumo conforme entran archivos y bajarlo con cada desalojo LRU,
+     * sin ningún refresco periódico.
+     */
+    @Query("SELECT COALESCE(SUM(size), 0) FROM songs WHERE uriString LIKE 'file://%' AND sourceType != 'LOCAL'")
+    fun getTotalDownloadedBytesFlow(): Flow<Long>
 
     /**
      * Candidatos a desalojo (audio descargado de la nube), ordenados de MENOS valioso a más:
@@ -609,8 +827,16 @@ data class AlbumSummary(
     val albumArtUri: String?
 )
 
-/** Proyección para los chips de género del inicio (nombre + cuántas canciones). */
+/**
+ * Proyección de un género: nombre representativo del grupo, cuántas canciones tiene y hasta
+ * [SongDao.ARTS_PER_GENRE] carátulas para el collage de su tarjeta.
+ */
 data class GenreSummary(
     val name: String,
-    val songCount: Int
-)
+    val songCount: Int,
+    /** Carátulas unidas por [SongDao.ARTS_SEPARATOR]; null si ninguna canción del género tiene. */
+    val albumArts: String?
+) {
+    val arts: List<String>
+        get() = albumArts?.split(SongDao.ARTS_SEPARATOR)?.filter { it.isNotBlank() } ?: emptyList()
+}

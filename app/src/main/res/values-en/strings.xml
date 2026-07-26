@@ -100,7 +100,11 @@
     <string name="download_tab_active">Active (%1$d)</string>
     <string name="download_tab_failed">Failed (%1$d)</string>
     <string name="download_global_progress">Overall progress</string>
-    <string name="download_queue_progress">%1$d/%2$d songs</string>
+    <string name="download_storage_section">Storage</string>
+    <string name="download_storage_used_of">%1$s of %2$s</string>
+    <string name="download_storage_used_only">%1$s downloaded</string>
+    <string name="download_storage_remaining">%1$s left before the cap</string>
+    <string name="download_storage_over_cap">%1$s over the cap</string>
     <string name="download_completed_progress">%1$d of %2$d completed</string>
     <string name="download_syncing">Syncing…</string>
     <string name="download_up_to_date">All up to date</string>
@@ -134,6 +138,7 @@
     <string name="download_storage_limit_title">Storage cap</string>
     <string name="download_storage_limit_desc">Limits how much audio is downloaded. Once the cap is reached, syncing stops and the least played songs are deleted to make room for new ones.</string>
     <string name="download_storage_limit_unlimited">No limit</string>
+    <string name="download_storage_free_space">%1$s free on this device</string>
     <string name="download_storage_limit_value">%1$s GB</string>
     <string name="download_storage_usage">%1$s of %2$s used</string>
     <string name="download_banner_pending_title">There are pending downloads</string>
@@ -207,6 +212,13 @@
     <string name="album_art_desc">Cover of %1$s</string>
     <string name="album_empty_detail">Empty album</string>
 
+    <!-- ==================== Genres (tab + detail) ==================== -->
+    <string name="common_genres">Genres</string>
+    <string name="genre_empty">No genres</string>
+    <string name="genre_empty_desc">The genre comes from the file tag. Cloud songs read it when they are downloaded.</string>
+    <string name="genre_empty_detail">Empty genre</string>
+    <string name="genre_partial_match">Compound genres</string>
+
     <!-- ==================== Plurals (counters) ==================== -->
     <plurals name="album_count">
         <item quantity="one">%d album</item>
@@ -219,6 +231,10 @@
     <plurals name="artist_count">
         <item quantity="one">%d artist</item>
         <item quantity="other">%d artists</item>
+    </plurals>
+    <plurals name="genre_count">
+        <item quantity="one">%d genre</item>
+        <item quantity="other">%d genres</item>
     </plurals>
 
     <!-- ==================== Now Playing / MiniPlayer / queue ==================== -->
@@ -252,6 +268,22 @@
     <string name="np_open_eq">Open equalizer</string>
     <string name="np_more_options">More options</string>
     <string name="np_download">Download</string>
+    <string name="np_view_queue_shuffled">View play queue, shuffled</string>
+    <string name="np_seek_forward">Skip forward %1$d seconds</string>
+    <string name="np_seek_back">Skip back %1$d seconds</string>
+    <string name="np_album_art_options">Pick the theme colour</string>
+    <string name="np_share">Share song</string>
+    <string name="np_share_text">I\'m listening to %1$s by %2$s</string>
+    <!-- Spoken progress for screen readers: without this the slider is announced as a percentage -->
+    <string name="np_progress_state">%1$s of %2$s</string>
+    <plurals name="np_spoken_minutes">
+        <item quantity="one">%d minute</item>
+        <item quantity="other">%d minutes</item>
+    </plurals>
+    <plurals name="np_spoken_seconds">
+        <item quantity="one">%d second</item>
+        <item quantity="other">%d seconds</item>
+    </plurals>
 
     <!-- ==================== Widgets ==================== -->
     <string name="widget_player_desc">Album art with play/pause and like</string>
@@ -299,6 +331,48 @@
     <string name="lyrics_refresh_notfound">No lyrics found</string>
     <string name="lyrics_no_metadata">The file has no artist tags: use manual search</string>
 
+    <!-- ==================== Saving lyrics ==================== -->
+    <string name="lyrics_save_desc">Save the lyrics</string>
+    <string name="lyrics_save_title">Save lyrics</string>
+    <string name="lyrics_save_subtitle">Choose where these lyrics will be kept</string>
+    <string name="lyrics_save_option_lrc">.lrc file</string>
+    <string name="lyrics_save_option_lrc_desc">A separate file, next to the song. Doesn\'t touch the music.</string>
+    <string name="lyrics_save_option_embedded">Inside the song</string>
+    <string name="lyrics_save_option_embedded_desc">In the file\'s tags. The lyrics travel with the music to any player.</string>
+    <string name="lyrics_save_dont_ask">Don\'t ask again</string>
+    <string name="lyrics_save_confirm">Save</string>
+    <string name="lyrics_save_warn_rewrites">The audio file will be rewritten.</string>
+    <string name="lyrics_save_warn_upload">%1$s will be uploaded to OneDrive.</string>
+    <string name="lyrics_save_warn_upload_small">It will be uploaded to OneDrive, next to the song.</string>
+    <string name="lyrics_save_warn_consent">You\'ll be asked for write permission on OneDrive.</string>
+    <string name="lyrics_save_blocked_format">This format doesn\'t support lyrics inside the file.</string>
+    <string name="lyrics_save_blocked_not_downloaded">Download the song to write inside it.</string>
+    <string name="lyrics_save_blocked_no_folder">Choose a folder for lyrics in Settings.</string>
+    <string name="lyrics_save_blocked_no_remote">The matching cloud file is unknown.</string>
+    <string name="lyrics_save_ok_lrc">Lyrics saved to an .lrc file</string>
+    <string name="lyrics_save_ok_embedded">Lyrics saved inside the song</string>
+    <string name="lyrics_save_err_empty">There are no lyrics to save</string>
+    <string name="lyrics_save_err_format">This format doesn\'t support lyrics inside the file</string>
+    <string name="lyrics_save_err_not_downloaded">Download the song first</string>
+    <string name="lyrics_save_err_no_folder">Choose a folder for lyrics in Settings</string>
+    <string name="lyrics_save_err_permission">No permission to modify the file</string>
+    <string name="lyrics_save_err_wifi">You need Wi‑Fi to upload the song</string>
+    <string name="lyrics_save_consent_denied">Without write permission the lyrics can\'t be saved to OneDrive</string>
+    <string name="lyrics_save_consent_title">OneDrive permission</string>
+    <string name="lyrics_save_consent_message">To keep the lyrics next to your song, Microsoft asks for write permission on your OneDrive. It\'s the only permission that allows it: there is no folder-scoped one.</string>
+    <string name="lyrics_save_consent_confirm">Grant</string>
+
+    <!-- Setting: lyrics save mode -->
+    <string name="settings_lyrics_save_title">Saving lyrics</string>
+    <string name="settings_lyrics_save_ask">Ask every time</string>
+    <string name="settings_lyrics_save_lrc">Always to an .lrc file</string>
+    <string name="settings_lyrics_save_embedded">Always inside the song</string>
+    <string name="settings_lyrics_folder_title">Lyrics folder</string>
+    <string name="settings_lyrics_folder_summary">Where to keep the .lrc files of the music on this device</string>
+    <string name="settings_lyrics_folder_none">No folder chosen</string>
+    <string name="settings_lyrics_folder_choose">Choose folder</string>
+    <string name="settings_lyrics_folder_clear">Remove</string>
+
     <!-- ==================== Equalizer ==================== -->
     <string name="eq_none_available">No equalizer available</string>
     <string name="eq_open_error">Error opening the equalizer</string>
@@ -335,6 +409,15 @@
     <string name="settings_eq_header">Equalizer</string>
     <string name="settings_use_system_eq">Use the system equalizer</string>
     <string name="settings_use_system_eq_desc">The player\'s equalizer button opens the system panel (MIUI/manufacturer) instead of the built-in equalizer. Turning this on switches off the built-in one.</string>
+
+    <!-- ==================== Library tabs ==================== -->
+    <string name="settings_tabs_header">Tabs</string>
+    <string name="settings_tabs_desc">Drag to reorder. Disabled tabs do not show up in the library.</string>
+    <string name="settings_tabs_min">At least one tab must stay on</string>
+
+    <!-- ==================== Player format chip ==================== -->
+    <string name="settings_detailed_format">Format details</string>
+    <string name="settings_detailed_format_desc">Shows the technical details in the player chip (FLAC · 16 bit · 44.1 kHz). You can also toggle it by tapping the chip.</string>
 
     <!-- ==================== Player bar (Now Playing toolbar) ==================== -->
     <string name="settings_player_bar_header">Player bar</string>
@@ -375,17 +458,42 @@
     <string name="settings_local_header">Local music</string>
     <string name="settings_local_desc">Scans a folder on the device (subfolders included). Its songs join the same library as OneDrive.</string>
     <string name="settings_local_pick">Pick a music folder</string>
-    <string name="settings_local_change">Change folder</string>
-    <string name="settings_local_remove">Remove local folder</string>
+    <string name="settings_local_add">Add folder</string>
+    <string name="settings_local_remove">Remove</string>
     <string name="settings_local_none">No folder selected</string>
-    <string name="local_folder_set">Local folder added. Scanning…</string>
-    <string name="local_folder_removed">Local folder removed</string>
+    <string name="local_folder_set">Folder added. Scanning…</string>
+    <string name="local_folder_removed">Folder removed from your library</string>
+    <string name="local_folder_remove_title">Stop scanning “%1$s”?</string>
+    <string name="local_folder_remove_body">Its songs will leave your library. The files are NOT deleted from your device.</string>
+    <string name="local_folder_remove_last_body">This is your only folder: your device music will leave the library. The files are NOT deleted.</string>
+    <string name="local_folder_remove_last_locked_body">This is your only music source. To stop scanning this folder, switch to scanning the whole device, or cancel to keep it.</string>
+    <string name="local_folder_remove_scan_all">Scan everything</string>
+    <string name="local_device_scan_enabled">Scanning all music on your device…</string>
+    <string name="local_device_scan_disabled">Stopped scanning the device</string>
+    <string name="local_folders_restored">Your music folders are back</string>
 
     <!-- Music sources: onboarding (Phase 4) + Settings section -->
-    <string name="onboarding_title">Welcome</string>
-    <string name="onboarding_subtitle">Connect at least one music source. You can add the other one later from Settings.</string>
+    <string name="onboarding_local_title">Your music</string>
+    <string name="onboarding_local_subtitle">Let\'s start with the music already on your phone. Pick either way, or skip it if all your music lives in the cloud.</string>
+    <string name="onboarding_cloud_title">OneDrive</string>
+    <string name="onboarding_cloud_subtitle">Connect your account to play your cloud music and download it for offline listening.</string>
     <string name="onboarding_start">Get started</string>
+    <string name="onboarding_skip">Skip</string>
     <string name="onboarding_need_source">Pick a source to continue</string>
+    <string name="onboarding_continue">Continue</string>
+    <string name="onboarding_step">Step %1$d of %2$d</string>
+    <string name="onboarding_storage_title">Storage</string>
+    <string name="onboarding_storage_subtitle">Your cloud music is downloaded to the phone so you can listen offline. Decide how much space it can use; you can change it anytime in Settings.</string>
+    <string name="onboarding_back_to_sources">Back to sources</string>
+    <string name="onboarding_notifications_title">Notifications</string>
+    <string name="onboarding_notifications_subtitle">Siku only uses them for this:</string>
+    <string name="onboarding_notif_player_title">Playback controls</string>
+    <string name="onboarding_notif_player_desc">Play, next and the album art on your status bar and lock screen.</string>
+    <string name="onboarding_notif_sync_title">Cloud progress</string>
+    <string name="onboarding_notif_sync_desc">How much is left of the scan and of your OneDrive downloads.</string>
+    <string name="onboarding_notif_note">You will never get promotional alerts. You can change this any time in your system settings.</string>
+    <string name="onboarding_notif_allow">Allow notifications</string>
+    <string name="onboarding_notif_skip">Not now</string>
 
     <string name="sources_header">Music sources</string>
     <string name="source_onedrive_title">OneDrive</string>
@@ -393,8 +501,38 @@
     <string name="source_onedrive_connected">Account connected</string>
     <string name="source_onedrive_connect">Connect</string>
     <string name="source_onedrive_disconnect">Disconnect</string>
-    <string name="source_local_title">Local music</string>
-    <string name="source_local_desc">A folder on the device, subfolders included.</string>
+    <!-- OneDrive folder being scanned. %1$s = chosen path -->
+    <string name="source_onedrive_folder">Folder: %1$s</string>
+    <string name="source_onedrive_folder_root">Whole account</string>
+    <string name="source_onedrive_change_folder">Change folder</string>
+    <string name="onedrive_folder_title">Music folder</string>
+    <string name="onedrive_folder_subtitle">Pick the OneDrive folder where your music lives. Its subfolders are included.</string>
+    <string name="onedrive_folder_empty">This folder has no subfolders</string>
+    <string name="onedrive_folder_up">Up</string>
+    <!-- %1$s = name of the folder the browser is currently in -->
+    <string name="onedrive_folder_use">Use “%1$s”</string>
+    <string name="onedrive_folder_use_root">Use the whole account</string>
+    <string name="onedrive_folder_change_title">Change the folder?</string>
+    <string name="onedrive_folder_change_body">OneDrive will be scanned again from scratch. Songs outside the new folder will be removed from your library, along with their history and colors, and will leave any playlists they were in.</string>
+    <string name="onedrive_folder_change_confirm">Change and scan</string>
+    <plurals name="onedrive_folder_items">
+        <item quantity="one">%1$d item</item>
+        <item quantity="other">%1$d items</item>
+    </plurals>
+    <string name="source_local_title">Music folders</string>
+    <string name="source_local_desc">Pick specific folders, subfolders included.</string>
+    <string name="source_device_title">Whole device</string>
+    <string name="source_device_desc">All the music stored on your phone, no folders to pick.</string>
+    <string name="source_device_active">Scanning all music on your device</string>
+    <string name="source_device_enable">Scan everything</string>
+    <string name="source_device_disable">Turn off</string>
+    <string name="source_device_disable_locked">Add a music folder before turning off the full scan, so you\'re not left with an empty library.</string>
+    <string name="source_device_permission_title">Permission needed</string>
+    <string name="source_device_permission_body">To scan all the music on your device, Siku needs permission to read your audio files. You can grant it from the app settings, or pick specific folders instead (that needs no permission).</string>
+    <string name="source_device_permission_settings">Open settings</string>
+    <!-- Single local-music card in onboarding (scan everything · add folder) -->
+    <string name="source_phone_music_title">Music on your phone</string>
+    <string name="source_phone_music_desc">All the music on your device, or just the folders you pick.</string>
     <string name="sources_rescan">Scan again</string>
     <string name="sources_rescan_desc">Full scan of every source and cleanup of songs that no longer exist.</string>
     <string name="sources_rescan_started">Scanning sources…</string>
@@ -426,6 +564,8 @@
     <string name="settings_solid_bg_desc">Uses a solid theme color instead of the album art gradient.</string>
     <string name="settings_wavy_progress">Wavy progress bar</string>
     <string name="settings_wavy_progress_desc">Uses the animated Material 3 wave in the player. The mini player keeps the thin bar.</string>
+    <string name="settings_player_gestures">Player gestures</string>
+    <string name="settings_player_gestures_desc">Swipe the album art to change songs, down to close the player and up on the mini player to open it. Double tap the sides of the album art to skip %1$d seconds.</string>
 
     <!-- Palette style: how the theme is generated from the album art color -->
     <string name="settings_palette_style">Color style</string>
@@ -472,11 +612,6 @@
     <string name="tab_all">Songs</string>
     <string name="tab_home">Home</string>
     <string name="tab_playlists">Playlists</string>
-    <plurals name="library_selected_count">
-        <item quantity="one">%d selected</item>
-        <item quantity="other">%d selected</item>
-    </plurals>
-    <string name="library_clear_selection">Exit selection</string>
 
     <!-- ==================== Home screen ==================== -->
     <string name="sort_chip_label">Sort: %1$s</string>
@@ -490,6 +625,7 @@
     <string name="home_section_continue">Keep listening</string>
     <string name="home_ctx_album">Album</string>
     <string name="home_ctx_artist">Artist</string>
+    <string name="home_ctx_genre">Genre</string>
     <string name="home_ctx_playlist">Playlist</string>
     <string name="home_ctx_favorites">Favorites</string>
     <string name="home_ctx_shuffle">Shuffle</string>
@@ -518,6 +654,12 @@
     <string name="sync_error">Sync error</string>
     <string name="sync_error_retry">%1$s · Tap to retry</string>
     <string name="sync_postponed_low_battery">Low battery: syncing will run when you charge the device</string>
+    <!-- Queue stopped by an environment condition, NOT an error: it resumes on its own, so the
+         text says what is missing and asks for nothing. -->
+    <string name="sync_paused">Downloads paused</string>
+    <string name="sync_paused_no_wifi">They\'ll resume once you\'re back on Wi-Fi</string>
+    <string name="sync_paused_no_network">No connection. They\'ll resume when it\'s back</string>
+    <string name="sync_paused_low_battery">Low battery. They\'ll resume while charging</string>
     <string name="sync_new">%1$d new</string>
     <string name="sync_downloaded">%1$d downloaded</string>
     <string name="sync_deleted">%1$d deleted</string>
@@ -525,6 +667,13 @@
     <string name="sync_failed_suffix">" · %1$d failed"</string>
     <string name="sync_up_to_date">Library up to date</string>
     <string name="sync_scanning">Scanning library</string>
+    <string name="sync_looking_for_changes">Looking for changes…</string>
+    <string name="sync_error_auth">Couldn\'t authenticate with the music source</string>
+    <!-- %1$s = configured folder that wasn't found on OneDrive -->
+    <string name="sync_err_folder_missing">Couldn\'t find the folder “%1$s” on OneDrive. Pick another one in Settings → Sources.</string>
+    <string name="sync_error_unexpected">Unexpected error (%1$s): %2$s</string>
+    <string name="sync_error_critical">Critical error: %1$s</string>
+    <string name="sync_error_no_details">no details</string>
     <string name="sync_found">%1$d found · %2$s</string>
     <string name="sort_title_asc">Title (A-Z)</string>
     <string name="sort_name_asc">Name (A-Z)</string>
@@ -536,6 +685,10 @@
     <string name="sort_most_played">Most played</string>
     <string name="sort_recently_played">Recently played</string>
 
+    <plurals name="source_local_count">
+        <item quantity="one">%1$d folder</item>
+        <item quantity="other">%1$d folders</item>
+    </plurals>
     <plurals name="scan_local_songs">
         <item quantity="one">%1$d local song</item>
         <item quantity="other">%1$d local songs</item>
@@ -569,8 +722,5 @@
     <string name="error_playback_generic">Playback error</string>
 
     <!-- ==================== Permissions ==================== -->
-    <string name="permission_required">Permission required</string>
-    <string name="permission_rationale">We need access to your audio files.</string>
-    <string name="grant_permission">Grant permission</string>
 
 </resources>

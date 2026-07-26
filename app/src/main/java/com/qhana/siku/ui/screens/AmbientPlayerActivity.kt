@@ -28,6 +28,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -170,24 +171,71 @@ private fun AmbientAlbumArt(song: Song?, modifier: Modifier = Modifier) {
     }
 }
 
+/**
+ * Botonera del modo ambiente. Los cinco botones tienen tamaño de REFERENCIA, no fijo: la fila
+ * mide lo que le den (una columna al 55% del ancho, y este modo vive en horizontal, donde ese
+ * 55% puede ser bastante menos de lo que suman los botones) y si no cabe se escala TODO en
+ * bloque —diámetros, glifos, separación y borde— con un mismo factor.
+ *
+ * Se escala en vez de envolver a dos filas o recortar botones porque el transporte tiene que
+ * leerse de un vistazo desde lejos, que es el sentido de la pantalla: cinco controles en una
+ * línea, siempre en el mismo sitio. El factor nunca pasa de 1, así que en pantallas anchas
+ * quedan exactamente en su tamaño de diseño.
+ */
 @Composable
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 private fun AmbientControls(isPlaying: Boolean, isBuffering: Boolean, isFavorite: Boolean, onPrevious: () -> Unit, onPlayPause: () -> Unit, onNext: () -> Unit, onToggleFavorite: () -> Unit, onExit: () -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(20.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = onExit, modifier = Modifier.size(64.dp)) { MaterialSymbol(icon = "exit_to_app", color = Color.White, modifier = Modifier.size(32.dp), size = 32.sp) }
-        IconButton(onClick = onPrevious, modifier = Modifier.size(64.dp)) { MaterialSymbol(icon = "skip_previous", color = Color.White, modifier = Modifier.size(40.dp), size = 40.sp) }
-        // OutlinedIconButton real (M3 Expressive: shape-morph al presionar) con el borde blanco.
-        OutlinedIconButton(
-            onClick = onPlayPause,
-            shapes = IconButtonDefaults.shapes(),
-            colors = IconButtonDefaults.outlinedIconButtonColors(contentColor = Color.White),
-            border = androidx.compose.foundation.BorderStroke(5.dp, Color.White),
-            modifier = Modifier.size(80.dp)
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val naturalWidth = AmbientPlayButtonSize +
+            AmbientSideButtonSize * AMBIENT_SIDE_BUTTON_COUNT +
+            AmbientControlsGap * AMBIENT_CONTROLS_GAP_COUNT
+        val scale = if (naturalWidth > maxWidth) maxWidth / naturalWidth else 1f
+        // Los glifos van en sp (MaterialSymbol es tipografía), pero su tamaño de referencia se
+        // declara en dp junto al del botón que los contiene: son la misma medida física.
+        fun glyph(base: Dp) = (base.value * scale).sp
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(AmbientControlsGap * scale, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            if (isBuffering) LoadingIndicator(modifier = Modifier.size(36.dp), color = Color.White)
-            else MaterialSymbol(icon = if (isPlaying) "pause" else "play_arrow", color = Color.White, size = 48.sp, fill = true)
+            val sideSize = AmbientSideButtonSize * scale
+            IconButton(onClick = onExit, modifier = Modifier.size(sideSize)) { MaterialSymbol(icon = "exit_to_app", color = Color.White, modifier = Modifier.size(AmbientExitIconSize * scale), size = glyph(AmbientExitIconSize)) }
+            IconButton(onClick = onPrevious, modifier = Modifier.size(sideSize)) { MaterialSymbol(icon = "skip_previous", color = Color.White, modifier = Modifier.size(AmbientSkipIconSize * scale), size = glyph(AmbientSkipIconSize)) }
+            // OutlinedIconButton real (M3 Expressive: shape-morph al presionar) con el borde blanco.
+            OutlinedIconButton(
+                onClick = onPlayPause,
+                shapes = IconButtonDefaults.shapes(),
+                colors = IconButtonDefaults.outlinedIconButtonColors(contentColor = Color.White),
+                border = androidx.compose.foundation.BorderStroke(AmbientPlayBorderWidth * scale, Color.White),
+                modifier = Modifier.size(AmbientPlayButtonSize * scale)
+            ) {
+                if (isBuffering) LoadingIndicator(modifier = Modifier.size(AmbientBufferingIndicatorSize * scale), color = Color.White)
+                else MaterialSymbol(icon = if (isPlaying) "pause" else "play_arrow", color = Color.White, size = glyph(AmbientPlayIconSize), fill = true)
+            }
+            IconButton(onClick = onNext, modifier = Modifier.size(sideSize)) { MaterialSymbol(icon = "skip_next", color = Color.White, modifier = Modifier.size(AmbientSkipIconSize * scale), size = glyph(AmbientSkipIconSize)) }
+            IconButton(onClick = onToggleFavorite, modifier = Modifier.size(sideSize)) { MaterialSymbol(icon = "favorite", fill = isFavorite, color = Color.White, modifier = Modifier.size(AmbientFavoriteIconSize * scale), size = glyph(AmbientFavoriteIconSize)) }
         }
-        IconButton(onClick = onNext, modifier = Modifier.size(64.dp)) { MaterialSymbol(icon = "skip_next", color = Color.White, modifier = Modifier.size(40.dp), size = 40.sp) }
-        IconButton(onClick = onToggleFavorite, modifier = Modifier.size(64.dp)) { MaterialSymbol(icon = "favorite", fill = isFavorite, color = Color.White, modifier = Modifier.size(28.dp), size = 28.sp) }
     }
 }
+
+// --- Geometría de referencia de [AmbientControls] (se escala en bloque si no cabe) ---
+/** Diámetro del play: el botón mayor de la fila. */
+private val AmbientPlayButtonSize = 80.dp
+/** Diámetro de los cuatro secundarios: salir, anterior, siguiente y favorito. */
+private val AmbientSideButtonSize = 64.dp
+/** Cuántos secundarios hay; entra en el cálculo del ancho natural de la fila. */
+private const val AMBIENT_SIDE_BUTTON_COUNT = 4
+/** Separación entre botones. */
+private val AmbientControlsGap = 20.dp
+/** Huecos entre los cinco botones (uno menos que botones). */
+private const val AMBIENT_CONTROLS_GAP_COUNT = 4
+/** Grosor del aro del play. */
+private val AmbientPlayBorderWidth = 5.dp
+/** Diámetro del indicador de carga que sustituye al glifo del play mientras bufferea. */
+private val AmbientBufferingIndicatorSize = 36.dp
+// Glifos: manda el del play, los saltos van un peldaño por debajo, y salir/favorito cierran.
+private val AmbientPlayIconSize = 48.dp
+private val AmbientSkipIconSize = 40.dp
+private val AmbientExitIconSize = 32.dp
+private val AmbientFavoriteIconSize = 28.dp

@@ -55,10 +55,12 @@ interface ISongRepository {
     fun getRediscover(before: Long, limit: Int): Flow<List<Song>>
     /** Top de géneros (≥ [minCount] canciones) para los chips de acciones rápidas del inicio. */
     fun getTopGenres(minCount: Int, limit: Int): Flow<List<com.qhana.siku.data.local.GenreSummary>>
-    /** Canciones de un género (para reproducir en aleatorio desde el chip). */
-    suspend fun getSongsByGenre(genre: String): List<Song>
+    /**
+     * Canciones de un género. [partialMatch] = ajuste del usuario "incluir géneros compuestos":
+     * con él, "Rock" trae además "Rock/Metal" y "Hard Rock" (LIKE en vez de tag exacto).
+     */
+    suspend fun getSongsByGenre(genre: String, partialMatch: Boolean): List<Song>
     /** Descargadas sin género leído (objetivo del backfill una-vez). */
-    suspend fun getDownloadedSongsWithoutGenre(limit: Int): List<Song>
     /** Persiste el tag GENRE de una canción (pipeline de análisis + backfill). */
     suspend fun updateGenre(songId: String, genre: String?)
     /**
@@ -109,6 +111,8 @@ interface ISongRepository {
     // Tope de almacenamiento (caché LRU): bytes ocupados por audio descargado de la nube y
     // candidatos a desalojo ordenados de menos a más valiosos.
     suspend fun getTotalDownloadedBytes(): Long
+    /** Los mismos bytes, observables (gestor de descargas: consumo frente al tope). */
+    fun getTotalDownloadedBytesFlow(): Flow<Long>
     /** Pares (id, size) de descargas de la nube ordenados LRU-first, excluyendo [excludeId]. */
     suspend fun getEvictionCandidates(excludeId: String): List<Pair<String, Long>>
 
@@ -122,8 +126,41 @@ interface ISongRepository {
     /** Menor nextRetryAt futuro entre canciones pendientes, o null si no hay backoff activo. */
     suspend fun getEarliestRetryAt(): Long?
     suspend fun updateSongMetadata(song: Song)
+
+    // Metadata ligera (tags leídos de la cabecera remota, sin descargar el audio).
+
+    /** Canciones de nube que siguen con el centinela de "sin tags". */
+    suspend fun getSongsNeedingLightMetadata(): List<Song>
+
+    /** Escribe los tags de cabecera SIN marcar la fila como analizada (ver [SongDao.updateLightMetadata]). */
+    suspend fun updateLightMetadata(
+        songId: String,
+        title: String,
+        artist: String,
+        album: String,
+        genre: String?,
+        durationMs: Long
+    )
+
+    /** URI de la carátula ya conocida para ese álbum, o null si ninguna canción suya tiene. */
+    suspend fun getAlbumArtUri(album: String): String?
+
+    /** Aplica una carátula a todo el álbum sin pisar las canciones que ya tuvieran la suya. */
+    suspend fun setAlbumArt(album: String, uri: String)
     suspend fun updateAlbumArtUri(songId: String, uri: String?)
     suspend fun getSongsWithLocalArt(): List<Song>
+
+    /** Canciones sin carátula cuya resolución sigue pendiente, agrupadas por álbum. */
+    suspend fun getSongsWithPendingArtwork(localOnly: Boolean): List<Song>
+
+    /** Sella el intento de resolver carátula: solo tras una lectura que contestó. */
+    suspend fun markArtworkAttempted(songIds: List<String>)
+
+    /** Devuelve las canciones a la cola de pendientes (su portada se perdió). */
+    suspend fun clearArtworkAttempted(songIds: List<String>)
+
+    /** URIs de carátula en uso; lo que no esté aquí es basura que se puede barrer. */
+    suspend fun getReferencedArtUris(): Set<String>
     suspend fun getAllSongs(): List<Song>
     suspend fun updateSongUrl(songId: String, newUrl: String)
     suspend fun updateReplayGain(songId: String, trackGainDb: Float?, trackPeak: Float?, albumGainDb: Float?, albumPeak: Float?)

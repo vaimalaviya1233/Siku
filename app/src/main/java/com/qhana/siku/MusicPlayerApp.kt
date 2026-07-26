@@ -15,7 +15,7 @@ import android.content.Context
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import com.qhana.siku.data.coordinator.ArtworkHealingManager
-import com.qhana.siku.data.repository.IMusicRepository
+import com.qhana.siku.data.lyrics.RetagJournal
 import com.qhana.siku.data.repository.IPlaylistRepository
 import androidx.glance.appwidget.updateAll
 import com.qhana.siku.data.util.AppLogger
@@ -38,9 +38,9 @@ class MusicPlayerApp : Application(), Configuration.Provider, SingletonImageLoad
     @Inject lateinit var appLogger: AppLogger
     @Inject lateinit var imageLoader: ImageLoader
     @Inject lateinit var playlistRepository: IPlaylistRepository
-    @Inject lateinit var musicRepository: IMusicRepository
     @Inject lateinit var artworkHealingManager: ArtworkHealingManager
     @Inject lateinit var widgetBridge: WidgetBridge
+    @Inject lateinit var retagJournal: RetagJournal
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -57,11 +57,13 @@ class MusicPlayerApp : Application(), Configuration.Provider, SingletonImageLoad
         // Garantizar que la playlist de favoritos exista (idempotente).
         appScope.launch { playlistRepository.ensureFavoritesPlaylist() }
 
-        // Migración one-time: filesDir/music_cache/ → filesDir/music/. Tras unificar las
-        // descargas (un solo MusicDownloader / SyncManager.downloadSong), todos los archivos
-        // viven en music/ con el patrón "${id}.${ext}". Movemos lo que quedó en music_cache/
-        // (con patrón "${id}_${titulo_saneado}.${ext}" del worker antiguo) renombrándolo.
-        appScope.launch { migrateMusicCacheToMusic() }
+        // Reescrituras de archivos que quedaron a medias (guardar la letra dentro de una canción
+        // local). Va PRIMERO y antes de cualquier reproducción: si el proceso murió durante el
+        // volcado, el archivo del usuario está partido y la única copia buena es la de trabajo.
+        appScope.launch {
+            val recovered = retagJournal.recoverPending()
+            if (recovered > 0) appLogger.lifecycle("Reescrituras de letras recuperadas: $recovered")
+        }
 
         // Healing de carátulas huérfanas: tras "limpiar caché" del sistema (o cualquier
         // pérdida del directorio de covers), re-extrae del audio local o limpia el URI.
@@ -109,49 +111,4 @@ class MusicPlayerApp : Application(), Configuration.Provider, SingletonImageLoad
     // Usar el ImageLoader inyectado (configurado en AppModule)
     override fun newImageLoader(context: Context): ImageLoader = imageLoader
 
-    /**
-     * Migración idempotente de archivos descargados desde la convención vieja
-     * (`filesDir/music_cache/${id}_${titulo}.${ext}`) a la nueva
-     * (`filesDir/music/${id}.${ext}`). Actualiza `uriString` en BD para cada movido.
-     */
-    private suspend fun migrateMusicCacheToMusic() {
-        try {
-            val oldDir = java.io.File(filesDir, "music_cache")
-            if (!oldDir.exists() || !oldDir.isDirectory) return
-            val files = oldDir.listFiles() ?: return
-            if (files.isEmpty()) { oldDir.delete(); return }
-
-            val newDir = java.io.File(filesDir, "music").also { if (!it.exists()) it.mkdirs() }
-            var moved = 0
-            for (file in files) {
-                try {
-                    if (!file.isFile || file.length() == 0L) { file.delete(); continue }
-                    val nameWithoutExt = file.nameWithoutExtension
-                    // Patrones: "<id>" (nuevo) o "<id>_<titulo_saneado>" (worker antiguo).
-                    val id = if ('_' in nameWithoutExt) nameWithoutExt.substringBefore('_') else nameWithoutExt
-                    val ext = file.extension.ifBlank { "mp3" }
-                    val target = java.io.File(newDir, "$id.$ext")
-                    if (target.exists() && target.length() > 0L) {
-                        // Ya existe en el nuevo lugar — el viejo es duplicado.
-                        file.delete()
-                        continue
-                    }
-                    val ok = file.renameTo(target) || run {
-                        // renameTo puede fallar entre filesystems → fallback copy + delete.
-                        runCatching { file.copyTo(target, overwrite = true); file.delete() }.isSuccess
-                    }
-                    if (ok) {
-                        musicRepository.updateSongUrl(id, "file://${target.absolutePath}")
-                        moved++
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.w("MusicPlayerApp", "Migración: error procesando ${file.name}: ${e.message}")
-                }
-            }
-            if (oldDir.listFiles()?.isEmpty() == true) oldDir.delete()
-            if (moved > 0) android.util.Log.i("MusicPlayerApp", "Migración music_cache → music: $moved archivos movidos")
-        } catch (e: Exception) {
-            android.util.Log.w("MusicPlayerApp", "Migración: error general", e)
-        }
-    }
 }

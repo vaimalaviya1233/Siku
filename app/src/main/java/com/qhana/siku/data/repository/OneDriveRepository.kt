@@ -4,7 +4,6 @@ import android.content.Context
 import android.net.Uri
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
-import java.io.FileOutputStream
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
@@ -125,21 +124,13 @@ class OneDriveRepository @Inject constructor(
         }
 
         if (analysis != null && analysis.isValid) {
-            // Guardar cover art si existe
-            var artUri = song.albumArtUri
-            if (analysis.embeddedArt != null) {
-                try {
-                    val coversDir = File(context.filesDir, "covers")
-                    if (!coversDir.exists()) coversDir.mkdirs()
-                    val file = File(coversDir, "${song.id}.jpg")
-                    FileOutputStream(file).use { fos ->
-                        fos.write(analysis.embeddedArt)
-                    }
-                    artUri = Uri.fromFile(file)
-                } catch (e: Exception) {
-                    android.util.Log.w(TAG, "Error guardando carátula: ${e.message}")
-                }
-            }
+            // Una sola vía de escritura para las carátulas (nombre por contenido, deduplicado):
+            // aquí había una copia a mano de la misma lógica, y fue la que se quedó atrás cuando
+            // el esquema de nombres cambió.
+            val artUri = analysis.embeddedArt
+                ?.let { audioFileAnalyzer.persistArtwork(it) }
+                ?.let { Uri.parse(it) }
+                ?: song.albumArtUri
 
             song.copy(
                 title = analysis.title ?: song.title,

@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.util.Log
+import com.qhana.siku.data.config.AppConfig
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.repository.IMusicRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -79,15 +80,9 @@ class AudioFileAnalyzer @Inject constructor(
         }
     }
 
-    /**
-     * Re-extrae únicamente la carátula embebida del audio local, sin tocar el resto de
-     * metadata. Pensado para el healing tras pérdida del directorio de covers.
-     * Devuelve el URI `file://` recién escrito o null si el audio no contiene arte.
-     */
-    suspend fun reExtractEmbeddedArt(songId: String, audioFile: File): String? {
-        val analysis = analyzeFile(audioFile)
-        return analysis.embeddedArt?.let { saveEmbeddedArt(songId, it) }
-    }
+    // El healing NO usa un atajo "re-extrae y devuelve el URI": necesita distinguir "el archivo
+    // no trae portada" de "no pude leer el archivo", y un String? colapsa los dos en null. Llama
+    // a [analyzeFile]/[analyzeContentUri] y mira `isValid` (ver ArtworkHealingManager.Extraction).
 
     suspend fun analyzeFile(file: File): FileAnalysisResult {
         return analyzePath(file.absolutePath, file.name)
@@ -122,8 +117,41 @@ class AudioFileAnalyzer @Inject constructor(
         }
     }
 
-    /** Persiste la carátula embebida y devuelve su URI `file://` (o null). */
-    fun persistEmbeddedArt(songId: String, artData: ByteArray): String? = saveEmbeddedArt(songId, artData)
+    /**
+     * Persiste una carátula y devuelve su URI `file://` (o null si la escritura falla).
+     *
+     * NO recibe la canción a propósito: el archivo se identifica por su contenido, así que la
+     * misma portada extraída de doce pistas de un álbum converge en UN archivo, escrito la
+     * primera vez y reutilizado las once siguientes.
+     */
+    fun persistArtwork(artData: ByteArray): String? = saveArtwork(artData)
+
+    /**
+     * Borra las carátulas que ya no referencia ninguna canción y devuelve cuántas.
+     *
+     * Hace falta porque el nombre lo da el contenido: una portada que cambia (tags reeditados en
+     * el origen) no sobrescribe a la anterior, se escribe al lado, y la vieja se queda.
+     *
+     * El ORDEN es la garantía, y por eso las referencias llegan como lambda en vez de como dato
+     * ya resuelto: primero se fotografía el directorio y DESPUÉS se consulta la BD. Así, una
+     * carátula escrita mientras esto corre no está en la foto (a salvo), y una cuya fila se
+     * inserta mientras esto corre sí aparece entre las referencias (a salvo también). Al revés
+     * —referencias primero— existiría una ventana en la que un archivo nuevo parece basura.
+     *
+     * Llamarlo cuando no haya un escaneo a medias sigue siendo lo correcto: sus lotes escriben
+     * la carátula antes de insertar la fila, y esa ventana no la cierra ningún orden de lectura.
+     */
+    suspend fun pruneUnreferencedCovers(fetchReferencedUris: suspend () -> Set<String>): Int {
+        val files = coversDir.listFiles() ?: return 0
+        if (files.isEmpty()) return 0
+        val referenced = fetchReferencedUris()
+        var deleted = 0
+        for (file in files) {
+            if (Uri.fromFile(file).toString() in referenced) continue
+            if (file.delete()) deleted++
+        }
+        return deleted
+    }
 
     private suspend fun analyzePath(path: String, fileName: String): FileAnalysisResult = retrieverSemaphore.withPermit {
         val isRemote = path.startsWith("http")
@@ -235,11 +263,8 @@ class AudioFileAnalyzer @Inject constructor(
     ) {
         try {
             // Guardar carátula si existe
-            val artUriString = if (analysis.embeddedArt != null) {
-                saveEmbeddedArt(originalSong.id, analysis.embeddedArt)
-            } else {
-                originalSong.albumArtUriString
-            }
+            val freshArtUri = analysis.embeddedArt?.let { saveArtwork(it) }
+            val artUriString = freshArtUri ?: originalSong.albumArtUriString
 
             val updatedSong = originalSong.copy(
                 path = localUri,
@@ -250,19 +275,30 @@ class AudioFileAnalyzer @Inject constructor(
                 albumArtUri = if (artUriString != null) Uri.parse(artUriString) else originalSong.albumArtUri
             )
             musicRepository.updateSongMetadata(updatedSong)
+
+            // La portada recién salida del archivo vale para todo el disco, igual que en la
+            // metadata ligera. Sin esto, de un álbum del que el tope de almacenamiento solo deja
+            // bajar unas pocas pistas, únicamente esas mostraban carátula: las hermanas se
+            // quedaban con el placeholder teniendo el jpg ya en disco.
+            if (freshArtUri != null && !AppConfig.isUnknownAlbum(updatedSong.album)) {
+                musicRepository.setAlbumArt(updatedSong.album, freshArtUri)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Error updating metadata after download: ${e.message}")
         }
     }
 
     /**
-     * Guarda la carátula embebida en el directorio de covers.
+     * Guarda la carátula en el directorio de covers, bajo el nombre que le da su contenido.
+     *
+     * Si el archivo ya existe no se reescribe: mismo nombre ⇒ mismos bytes, así que copiarlos
+     * otra vez solo gastaría I/O. Es lo que hace que un álbum entero cueste una escritura.
      */
-    private fun saveEmbeddedArt(songId: String, artData: ByteArray): String? {
+    private fun saveArtwork(artData: ByteArray): String? {
         return try {
-            val coverFile = File(coversDir, "$songId.jpg")
-            FileOutputStream(coverFile).use { fos ->
-                fos.write(artData)
+            val coverFile = File(coversDir, coverFileName(artData))
+            if (!coverFile.exists() || coverFile.length() != artData.size.toLong()) {
+                FileOutputStream(coverFile).use { fos -> fos.write(artData) }
             }
             Uri.fromFile(coverFile).toString()
         } catch (e: Exception) {

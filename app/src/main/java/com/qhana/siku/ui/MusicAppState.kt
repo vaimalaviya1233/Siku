@@ -58,6 +58,10 @@ class MusicAppState(
         navController.navigate(Screen.AlbumDetail.createRoute(name)) { launchSingleTop = true }
     }
 
+    fun navigateToGenre(name: String) {
+        navController.navigate(Screen.GenreDetail.createRoute(name)) { launchSingleTop = true }
+    }
+
     fun navigate(route: String) {
         navController.navigate(route) { launchSingleTop = true }
     }

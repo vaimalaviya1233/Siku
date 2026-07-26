@@ -65,6 +65,11 @@ internal object ComponentConfig {
     // Diámetro del stop indicator del final del riel (y del punto de contraste en la punta del
     // fill, que es su espejo). Mismo valor que el grosor de la onda: se leen del mismo peso.
     val ProgressStopIndicatorSize = 4.dp
+    // Diámetro del thumb REDONDO que remata la onda (solo modo wavy). Igual al alto del track,
+    // que es lo que hace que se lea como el mismo objeto y no como un adorno pegado encima.
+    // Viaja con la cresta (±ProgressWaveAmplitude), así que puede asomar unos dp por fuera del
+    // track: los absorbe la caja de 24dp en la que vive el Slider, no hay recorte.
+    val ProgressWaveThumbSize = ProgressTrackHeight
 }
 
 // ============== EXTENSIONES DE COLOR ==============

@@ -59,6 +59,15 @@ data class SongEntity(
     val colorSecondary: Int? = null,
     val lyrics: String? = null,
     val lyricsAttemptedAt: Long? = null,
+    /**
+     * Cuándo se intentó resolver la carátula por última vez (null = nunca).
+     *
+     * Mismo papel que [lyricsAttemptedAt]: sin él, "sin carátula" no distingue entre una canción
+     * que aún no se ha mirado y una que simplemente no tiene portada, y la resolución tendría que
+     * elegir entre re-analizar la biblioteca entera en cada sync o no reintentar nunca. Es lo que
+     * permite que la reparación sea una regla permanente del sistema en vez de un backfill.
+     */
+    val artworkAttemptedAt: Long? = null,
     val needsMetadata: Boolean = false,
     val remoteId: String? = null,
     val isCorrupted: Boolean = false, // Nuevo campo para persistir fallos de reproducción

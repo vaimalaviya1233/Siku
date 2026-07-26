@@ -39,6 +39,17 @@ class AuthManager @Inject constructor(
      */
     private val backupScopes = readScopes + "Files.ReadWrite.AppFolder"
 
+    /**
+     * Escritura sobre TODO el drive del usuario. Es el único scope que permite tocar archivos
+     * fuera de la carpeta de la app: Microsoft no ofrece uno acotado a una carpeta concreta, así
+     * que guardar la letra junto a la canción cuesta este permiso o no se puede hacer.
+     *
+     * Deliberadamente FUERA de [scopes]: si el login lo pidiera, cualquiera que conecte su cuenta
+     * consentiría escritura total aunque nunca vaya a guardar una letra. Se pide aparte, la
+     * primera vez que el usuario activa esa función ([requestWriteConsent]).
+     */
+    private val writeScopes = readScopes + "Files.ReadWrite"
+
     /** El login pide todo de una: un usuario nuevo consiente los tres scopes en una pantalla. */
     private val scopes = backupScopes.toTypedArray()
 
@@ -131,6 +142,55 @@ class AuthManager @Inject constructor(
 
     /** Token de la operación normal (scan, descargas). */
     fun getAccessToken(): Flow<AuthResult> = acquireTokenSilent(readScopes)
+
+    /**
+     * Token para escribir en la carpeta de música del usuario (guardar letras junto a la canción).
+     * Devuelve error mientras `Files.ReadWrite` no esté consentido — el llamador debe entonces
+     * pasar por [requestWriteConsent], que es interactivo y necesita una Activity.
+     */
+    fun getWriteAccessToken(): Flow<AuthResult> = acquireTokenSilent(writeScopes)
+
+    /**
+     * Pide el consentimiento de escritura sobre el drive. Es un **consentimiento incremental**
+     * sobre la cuenta ya conectada: MSAL muestra la pantalla de Microsoft con el permiso nuevo y,
+     * al aceptarlo, queda en su caché para los refrescos silenciosos posteriores.
+     *
+     * Solo debe llamarse desde una acción explícita del usuario, nunca en un arranque o un sync.
+     */
+    fun requestWriteConsent(activity: android.app.Activity): Flow<AuthResult> = callbackFlow {
+        val app = publicClientApplication
+        if (app == null) {
+            trySend(AuthResult.Error("MSAL not initialized"))
+            close()
+            return@callbackFlow
+        }
+
+        val params = AcquireTokenParameters.Builder()
+            .startAuthorizationFromActivity(activity)
+            .withScopes(writeScopes)
+            .withCallback(object : AuthenticationCallback {
+                override fun onSuccess(authenticationResult: IAuthenticationResult) {
+                    Log.d(TAG, "Consentimiento de escritura concedido")
+                    trySend(AuthResult.Success(authenticationResult.accessToken))
+                    close()
+                }
+
+                override fun onError(exception: MsalException) {
+                    Log.e(TAG, "Consentimiento de escritura rechazado o fallido", exception)
+                    trySend(AuthResult.Error(exception.message ?: "Consent failed"))
+                    close()
+                }
+
+                override fun onCancel() {
+                    trySend(AuthResult.Cancelled)
+                    close()
+                }
+            })
+            .build()
+
+        app.acquireToken(params)
+        awaitClose()
+    }
 
     private fun acquireTokenSilent(requestedScopes: List<String>): Flow<AuthResult> = callbackFlow {
         val app = publicClientApplication

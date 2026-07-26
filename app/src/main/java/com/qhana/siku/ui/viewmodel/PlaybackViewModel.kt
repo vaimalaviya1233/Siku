@@ -10,10 +10,15 @@ import coil3.imageLoader
 import com.qhana.siku.R
 import coil3.request.CachePolicy
 import coil3.request.ImageRequest
+import com.qhana.siku.data.auth.AuthManager
+import com.qhana.siku.data.auth.AuthResult
 import com.qhana.siku.data.config.AppConfig
 import com.qhana.siku.data.coordinator.RequestCoordinator
 import com.qhana.siku.data.coordinator.WorkerStatus
+import com.qhana.siku.data.lyrics.FailureReason
+import com.qhana.siku.data.lyrics.LyricsSaveResult
 import com.qhana.siku.data.model.EqCustomPreset
+import com.qhana.siku.data.model.LyricsSaveMode
 import com.qhana.siku.data.model.PlaybackContext
 import com.qhana.siku.data.model.PlaybackErrorInfo
 import com.qhana.siku.data.model.PlaybackState
@@ -39,6 +44,7 @@ import com.qhana.siku.player.PlaybackCoordinator
 import com.qhana.siku.player.audio.EqualizerAudioProcessor
 import com.qhana.siku.ui.components.EqPresets
 import com.qhana.siku.ui.state.LyricsFailure
+import com.qhana.siku.ui.state.LyricsSaveUiState
 import com.qhana.siku.ui.state.NowPlayingUiState
 import com.qhana.siku.worker.DownloadScheduler
 import com.qhana.siku.worker.WorkerTags
@@ -63,6 +69,8 @@ class PlaybackViewModel @Inject constructor(
     val musicController: MusicController,
     private val artworkRepository: ArtworkRepository,
     private val lyricsRepository: ILyricsRepository,
+    private val localLyricsReader: com.qhana.siku.data.lyrics.LocalLyricsReader,
+    private val lyricsWriter: com.qhana.siku.data.lyrics.LyricsWriter,
     private val repository: IMusicRepository,
     private val parseLyricsUseCase: ParseLyricsUseCase,
     private val playbackErrorRecoveryUseCase: PlaybackErrorRecoveryUseCase,
@@ -71,6 +79,7 @@ class PlaybackViewModel @Inject constructor(
     private val playbackCoordinator: PlaybackCoordinator,
     private val requestCoordinator: RequestCoordinator,
     private val networkManager: NetworkManager,
+    private val authManager: AuthManager,
     private val downloadScheduler: DownloadScheduler,
     private val snackbarManager: com.qhana.siku.data.util.SnackbarManager,
     private val syncManager: com.qhana.siku.data.coordinator.SyncManager,
@@ -118,6 +127,23 @@ class PlaybackViewModel @Inject constructor(
             .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadNowPlayingWavyProgress())
 
     /**
+     * Ficha técnica en el chip de formato. Se observa del DataStore (no un MutableStateFlow local)
+     * porque el ajuste tiene DOS escritores: este chip y el switch de Ajustes → Apariencia.
+     */
+    val nowPlayingDetailedFormat: StateFlow<Boolean> =
+        musicPreferences.nowPlayingDetailedFormatFlow
+            .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadNowPlayingDetailedFormat())
+
+    /** Tap sobre el chip de formato: conmuta la ficha técnica y lo persiste. */
+    fun toggleDetailedFormat() =
+        musicPreferences.saveNowPlayingDetailedFormat(!nowPlayingDetailedFormat.value)
+
+    /** Gestos del reproductor (mismo motivo de observación que el fondo: se cambian en Ajustes). */
+    val playerGestures: StateFlow<Boolean> =
+        musicPreferences.playerGesturesFlow
+            .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadPlayerGestures())
+
+    /**
      * Estilo de paleta del tema (nombre del enum `PaletteStyle`). Lo consume MainActivity, que
      * es quien monta `MusicPlayerTheme`; se observa del DataStore para que el cambio hecho en
      * Ajustes se vea al instante y sin recrear la Activity.
@@ -132,6 +158,7 @@ class PlaybackViewModel @Inject constructor(
     val repeatMode: StateFlow<RepeatMode> = musicController.repeatMode
     val currentPosition: StateFlow<Long> = musicController.currentPosition
     val duration: StateFlow<Long> = musicController.duration
+    val bufferedPosition: StateFlow<Long> = musicController.bufferedPosition
     val playlist: StateFlow<List<Song>> = musicController.playlist
     val currentIndex: StateFlow<Int> = musicController.currentIndex
     val sleepTimer: StateFlow<MusicController.SleepTimerState?> = musicController.sleepTimer
@@ -698,15 +725,18 @@ class PlaybackViewModel @Inject constructor(
     private var searchCandidatesJob: kotlinx.coroutines.Job? = null
 
     /**
-     * Decide si vale la pena pegarle a la red por las letras de esta canción:
-     * - Si no hay metadata REAL de tags, no (ver [hasRealMetadata]).
+     * Decide si vale la pena buscar las letras de esta canción:
      * - Si ya tenemos lyrics (incluyendo el sentinel "[INSTRUMENTAL]"), no.
      * - Si nunca intentamos, sí.
      * - Si intentamos hace menos de TTL, no (cacheamos el NotFound).
      * - Si pasaron más de TTL desde el último intento, reintentar.
+     *
+     * La exigencia de metadata REAL ya no vive aquí sino dentro de [prefetchLyrics], justo antes
+     * de la llamada a LrcLib: leer el `.lrc` o el tag del propio archivo no necesita tags buenos
+     * —no se busca por título/artista, se abre el archivo— y una canción sin metadata no debe
+     * quedarse sin su letra local por eso.
      */
     private fun shouldAttemptLyricsFetch(song: Song): Boolean {
-        if (!hasRealMetadata(song)) return false
         if (song.lyrics != null) return false
         val attempted = song.lyricsAttemptedAt ?: return true
         return (System.currentTimeMillis() - attempted) > LYRICS_NOT_FOUND_RETRY_TTL_MS
@@ -731,6 +761,20 @@ class PlaybackViewModel @Inject constructor(
         prefetchLyricsJob?.cancel()
         prefetchLyricsJob = viewModelScope.launch {
             try {
+                // La letra que ya viene con el archivo gana: es la que el usuario eligió (a veces
+                // corregida a mano) y se lee sin red. Solo lo que está en el dispositivo — lo
+                // remoto costaría peticiones y aquí nadie está esperando.
+                localLyricsReader.read(song)?.let { local ->
+                    if (currentSong.value?.id != song.id) return@launch
+                    repository.saveLyrics(song.id, local)
+                    if (!_nowPlayingUiState.value.isLyricsLoading) {
+                        _nowPlayingUiState.update { it.copy(lyrics = local, lyricLines = parseLyricsUseCase(local)) }
+                    }
+                    return@launch
+                }
+                // Sin tags reales el título es el nombre de archivo: preguntarle eso a LrcLib es
+                // basura y además sella el NotFound por 14 días (ver [hasRealMetadata]).
+                if (!hasRealMetadata(song)) return@launch
                 if (!isNetworkAvailable()) return@launch
                 val result = lyricsRepository.getLyricsWithResult(song.title, song.artist, song.album, song.duration / 1000.0)
                 if (currentSong.value?.id != song.id) return@launch
@@ -759,14 +803,6 @@ class PlaybackViewModel @Inject constructor(
         // solo (al volver a la canción), porque no dice nada sobre si la letra existe.
         if (!force && (currentState.isLyricsLoading || currentState.lyrics != null ||
                 currentState.lyricsFailure == LyricsFailure.NOT_FOUND)) return
-        // Sin tags reales no hay nada que preguntarle a LrcLib (el título sería el nombre de
-        // archivo). Empty state de "no encontrada" — desde ahí queda la búsqueda manual — y
-        // SIN persistir el intento: cuando la extracción traiga los tags, se buscará normal.
-        if (!hasRealMetadata(song)) {
-            _nowPlayingUiState.update { it.copy(lyricsFailure = LyricsFailure.NOT_FOUND, isLyricsLoading = false) }
-            if (force) snackbarManager.show(context.getString(R.string.lyrics_no_metadata))
-            return
-        }
         // Snapshot de la letra anterior (antes del reset a null) para que un refresh manual
         // pueda decirle al usuario si LrcLib devolvió contenido distinto o el mismo.
         val previousLyrics = currentState.lyrics ?: song.lyrics
@@ -783,6 +819,23 @@ class PlaybackViewModel @Inject constructor(
                         _nowPlayingUiState.update { it.copy(lyrics = cached, lyricLines = parseLyricsUseCase(cached), isLyricsLoading = false) }
                         return@launch
                     }
+                }
+                // Aquí SÍ se mira la nube: la espera es del usuario y explícita.
+                localLyricsReader.read(song, includeRemote = isNetworkAvailable())?.let { local ->
+                    if (currentSong.value?.id != song.id) return@launch
+                    _nowPlayingUiState.update {
+                        it.copy(lyrics = local, lyricLines = parseLyricsUseCase(local), isLyricsLoading = false)
+                    }
+                    repository.saveLyrics(song.id, local)
+                    return@launch
+                }
+                // Sin tags reales no hay nada que preguntarle a LrcLib (el título sería el nombre
+                // de archivo). Empty state de "no encontrada" — desde ahí queda la búsqueda
+                // manual — y SIN persistir el intento: cuando lleguen los tags, se buscará normal.
+                if (!hasRealMetadata(song)) {
+                    _nowPlayingUiState.update { it.copy(lyricsFailure = LyricsFailure.NOT_FOUND, isLyricsLoading = false) }
+                    if (force) snackbarManager.show(context.getString(R.string.lyrics_no_metadata))
+                    return@launch
                 }
                 if (!isNetworkAvailable()) {
                     val offlineMsg = context.getString(R.string.common_no_offline_connection)
@@ -886,10 +939,138 @@ class PlaybackViewModel @Inject constructor(
         }
     }
 
+    // --- Guardar la letra en el archivo -------------------------------------------------------
+
+    private val _lyricsSaveState = MutableStateFlow(LyricsSaveUiState())
+    val lyricsSaveState: StateFlow<LyricsSaveUiState> = _lyricsSaveState.asStateFlow()
+
+    /** Modo pendiente de reintento tras conceder un permiso (nube o sistema). */
+    private var pendingSaveMode: LyricsSaveMode? = null
+
+    /**
+     * Punto de entrada del botón de guardar. Con un modo ya elegido guarda directo; en
+     * [LyricsSaveMode.ASK] abre el diálogo, que necesita saber qué se le puede ofrecer a ESTA
+     * canción (no es lo mismo un FLAC local que un WAV o una canción que solo está en la nube).
+     */
+    fun requestSaveLyrics() {
+        val song = currentSong.value ?: return
+        val lyrics = _nowPlayingUiState.value.lyrics ?: song.lyrics ?: return
+        viewModelScope.launch {
+            when (val mode = musicPreferences.loadLyricsSaveMode()) {
+                LyricsSaveMode.ASK -> {
+                    val options = lyricsWriter.optionsFor(song)
+                    _lyricsSaveState.update { it.copy(options = options) }
+                }
+                else -> performSave(song, lyrics, mode)
+            }
+        }
+    }
+
+    /** Confirmación del diálogo. [remember] fija el modo y deja de preguntar. */
+    fun confirmSaveLyrics(mode: LyricsSaveMode, remember: Boolean) {
+        val song = currentSong.value ?: return
+        val lyrics = _nowPlayingUiState.value.lyrics ?: song.lyrics ?: return
+        if (remember) musicPreferences.saveLyricsSaveMode(mode)
+        _lyricsSaveState.update { it.copy(options = null) }
+        viewModelScope.launch { performSave(song, lyrics, mode) }
+    }
+
+    fun dismissSaveLyricsDialog() {
+        _lyricsSaveState.update { it.copy(options = null) }
+    }
+
+    /**
+     * Reintenta el guardado después de que el usuario conceda el permiso que faltaba. Se llama
+     * tanto al volver del consentimiento de OneDrive como del diálogo de escritura del sistema.
+     */
+    fun retryPendingSave() {
+        val mode = pendingSaveMode ?: return
+        val song = currentSong.value ?: return
+        val lyrics = _nowPlayingUiState.value.lyrics ?: song.lyrics ?: return
+        pendingSaveMode = null
+        viewModelScope.launch { performSave(song, lyrics, mode) }
+    }
+
+    /**
+     * Limpia el `IntentSender` en cuanto la UI lo lanza. Sin esto seguiría en el estado y cada
+     * recomposición volvería a abrir el diálogo del sistema.
+     */
+    fun consumePendingPermission() {
+        _lyricsSaveState.update { it.copy(pendingPermission = null) }
+    }
+
+    fun cancelPendingSave() {
+        pendingSaveMode = null
+        _lyricsSaveState.update { it.copy(pendingPermission = null, needsCloudConsent = false) }
+    }
+
+    /** Consentimiento de escritura sobre OneDrive. Interactivo: exige la Activity visible. */
+    fun grantCloudWriteConsent(activity: android.app.Activity) {
+        viewModelScope.launch {
+            _lyricsSaveState.update { it.copy(needsCloudConsent = false) }
+            when (authManager.requestWriteConsent(activity).firstOrNull()) {
+                is AuthResult.Success -> retryPendingSave()
+                else -> {
+                    pendingSaveMode = null
+                    snackbarManager.show(context.getString(R.string.lyrics_save_consent_denied))
+                }
+            }
+        }
+    }
+
+    private suspend fun performSave(song: Song, lyrics: String, mode: LyricsSaveMode) {
+        _lyricsSaveState.update { it.copy(isSaving = true) }
+        val result = lyricsWriter.save(song, lyrics, mode)
+        _lyricsSaveState.update { it.copy(isSaving = false) }
+
+        when (result) {
+            is LyricsSaveResult.Success -> snackbarManager.show(
+                context.getString(
+                    if (mode == LyricsSaveMode.EMBEDDED) R.string.lyrics_save_ok_embedded
+                    else R.string.lyrics_save_ok_lrc
+                )
+            )
+            is LyricsSaveResult.NeedsCloudConsent -> {
+                pendingSaveMode = mode
+                _lyricsSaveState.update { it.copy(needsCloudConsent = true) }
+            }
+            is LyricsSaveResult.NeedsSystemPermission -> {
+                pendingSaveMode = mode
+                _lyricsSaveState.update { it.copy(pendingPermission = result.intentSender) }
+            }
+            is LyricsSaveResult.Failed -> snackbarManager.show(messageFor(result))
+        }
+    }
+
+    private fun messageFor(failure: LyricsSaveResult.Failed): String = when (failure.reason) {
+        FailureReason.NOTHING_TO_SAVE -> context.getString(R.string.lyrics_save_err_empty)
+        FailureReason.FORMAT_UNSUPPORTED -> context.getString(R.string.lyrics_save_err_format)
+        FailureReason.NOT_DOWNLOADED -> context.getString(R.string.lyrics_save_err_not_downloaded)
+        FailureReason.NO_LYRICS_FOLDER -> context.getString(R.string.lyrics_save_err_no_folder)
+        FailureReason.NO_PERMISSION -> context.getString(R.string.lyrics_save_err_permission)
+        FailureReason.NEEDS_WIFI -> context.getString(R.string.lyrics_save_err_wifi)
+        FailureReason.UNEXPECTED -> context.getString(
+            R.string.common_error_format,
+            failure.detail ?: context.getString(R.string.common_error)
+        )
+    }
+
     fun playPause() = musicController.playPause()
     fun next() = musicController.next()
     fun previous() = musicController.previous()
     fun seekTo(position: Long) = musicController.seekTo(position)
+
+    /**
+     * Salto RELATIVO del doble toque en la carátula. Se acota aquí y no en la UI porque el
+     * destino depende de la posición y la duración reales, que son de este ViewModel: pasarle un
+     * negativo o un valor más allá del final al player deja la reproducción en un estado raro.
+     * Con duración desconocida (streaming aún sin preparar) solo se protege el extremo inferior.
+     */
+    fun seekBy(deltaMs: Long) {
+        val total = duration.value
+        val target = (currentPosition.value + deltaMs).coerceAtLeast(0L)
+        seekTo(if (total > 0L) target.coerceAtMost(total) else target)
+    }
     fun toggleShuffle() = musicController.toggleShuffle()
     fun toggleRepeatMode() = musicController.toggleRepeatMode()
     fun skipToIndex(index: Int) = musicController.playAt(index)

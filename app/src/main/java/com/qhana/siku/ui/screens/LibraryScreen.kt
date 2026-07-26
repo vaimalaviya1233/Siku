@@ -37,9 +37,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.qhana.siku.R
 import androidx.compose.ui.unit.sp
@@ -47,6 +45,8 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.qhana.siku.data.local.AlbumSummary
 import com.qhana.siku.data.local.ArtistSummary
+import com.qhana.siku.data.model.LibraryTabId
+import com.qhana.siku.data.model.LibraryTabsConfig
 import com.qhana.siku.data.model.PlaybackContext
 import com.qhana.siku.data.model.PlaybackState
 import com.qhana.siku.data.model.Song
@@ -60,15 +60,9 @@ import com.qhana.siku.ui.viewmodel.SyncViewModel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
-/**
- * Pestañas del home. Desacoplado de [SongFilter] (core) a propósito: Artistas/Álbumes
- * no son filtros de canciones (ese enum sigue siendo solo para paging/sort persistido).
- */
-private enum class LibraryTab { HOME, SONGS, ARTISTS, ALBUMS, PLAYLISTS }
-
 @Immutable
 private data class TabInfo(
-    val tab: LibraryTab,
+    val tab: LibraryTabId,
     val titleRes: Int,
     val iconName: String
 )
@@ -92,13 +86,19 @@ private val SearchViewMotionSpec = spring<Float>(
  */
 private const val IconCrossfadeScale = 0.7f
 
-private val tabs = listOf(
-    TabInfo(LibraryTab.HOME, R.string.tab_home, "home"),
-    TabInfo(LibraryTab.SONGS, R.string.tab_all, "library_music"),
-    TabInfo(LibraryTab.ARTISTS, R.string.common_artists, "artist"),
-    TabInfo(LibraryTab.ALBUMS, R.string.common_albums, "album"),
-    TabInfo(LibraryTab.PLAYLISTS, R.string.tab_playlists, "playlist_play")
-)
+/**
+ * Presentación (etiqueta + glifo) de cada pestaña. El ORDEN y la VISIBILIDAD ya no viven aquí:
+ * los decide el usuario en Ajustes → Apariencia → Pestañas y llegan como
+ * [com.qhana.siku.data.model.LibraryTabState]. Este mapa solo traduce id → cómo se dibuja.
+ */
+private val tabInfo: Map<LibraryTabId, TabInfo> = listOf(
+    TabInfo(LibraryTabId.HOME, R.string.tab_home, "home"),
+    TabInfo(LibraryTabId.SONGS, R.string.tab_all, "library_music"),
+    TabInfo(LibraryTabId.ARTISTS, R.string.common_artists, "artist"),
+    TabInfo(LibraryTabId.ALBUMS, R.string.common_albums, "album"),
+    TabInfo(LibraryTabId.GENRES, R.string.common_genres, "genres"),
+    TabInfo(LibraryTabId.PLAYLISTS, R.string.tab_playlists, "playlist_play")
+).associateBy { it.tab }
 
 // ExperimentalMaterial3ExpressiveApi: la variante contained del search view expandido.
 @OptIn(
@@ -115,6 +115,7 @@ fun LibraryScreen(
     onFavoritesClick: () -> Unit,
     onArtistClick: (String) -> Unit,
     onAlbumClick: (String) -> Unit,
+    onGenreClick: (String) -> Unit,
     onNavigateToNowPlaying: () -> Unit,
     onNavigateToSettings: () -> Unit,
     // Notifica a MainActivity si la pestaña activa es Listas (el FAB flotante muta
@@ -192,10 +193,25 @@ fun LibraryScreen(
     var showLogoutDialog by remember { mutableStateOf(false) }
 
     // --- PAGER (antes de la búsqueda: el trailing de la píldora depende de currentTab) ---
+    // Las pestañas visibles, en el orden del usuario (Ajustes → Apariencia → Pestañas). El
+    // fallback al DEFAULT no es defensa de más: `tabInfo` podría no cubrir un id de una config
+    // guardada por una versión futura, y esta lista NUNCA puede quedar vacía (el pager exige
+    // pageCount ≥ 1 y sin pestañas no habría forma de volver).
+    val tabsConfig by libraryViewModel.libraryTabs.collectAsStateWithLifecycle()
+    val tabs = remember(tabsConfig) {
+        tabsConfig.filter { it.visible }.mapNotNull { tabInfo[it.tab] }
+            .ifEmpty { LibraryTabsConfig.DEFAULT.mapNotNull { tabInfo[it.tab] } }
+    }
     val pagerState = rememberPagerState(pageCount = { tabs.size })
     val currentTab = tabs.getOrNull(pagerState.currentPage) ?: tabs[0]
 
-    LaunchedEffect(currentTab) { onPlaylistsTabActive(currentTab.tab == LibraryTab.PLAYLISTS) }
+    // Ocultar la pestaña activa (o reordenar) deja al pager apuntando a una página que ya no
+    // existe o que ahora es otra: se lleva el foco a un índice válido en cuanto cambia la config.
+    LaunchedEffect(tabs.size) {
+        if (pagerState.currentPage >= tabs.size) pagerState.scrollToPage(tabs.lastIndex)
+    }
+
+    LaunchedEffect(currentTab) { onPlaylistsTabActive(currentTab.tab == LibraryTabId.PLAYLISTS) }
 
     // --- SCROLL & APPBAR ---
     // Va ANTES de la búsqueda: el color de la píldora depende del estado de scroll (ver
@@ -391,11 +407,6 @@ fun LibraryScreen(
     // El back de la búsqueda lo maneja el diálogo de ExpandedFullScreenSearchBar (predictive
     // back incluido): no hace falta BackHandler propio.
 
-    // BackHandler for Selection
-    BackHandler(enabled = uiState.isSelectionMode) {
-        libraryViewModel.clearSelection()
-    }
-
     // Decisión de duplicados entre fuentes: el sync la detecta (StateFlow del SyncManager,
     // sobrevive a navegación) y aquí se pregunta — el home es a donde se aterriza tras
     // conectar una fuente en onboarding o Ajustes.
@@ -418,54 +429,17 @@ fun LibraryScreen(
         // MiniPlayer flotante. Tener otro acá duplicaba el componente y solo mostraba los
         // snackbars pedidos a mano desde esta pantalla, no los del bus.
         topBar = {
-            // Izados: `transitionSpec` NO es un lambda composable y los tokens del MotionScheme
-            // sí son lectura composable (CompositionLocal). Resolverlos aquí, una vez.
-            val headerEnterSlide = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
-            val headerEnterFade = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
-            val headerExitSlide = MaterialTheme.motionScheme.fastSpatialSpec<IntOffset>()
-            val headerExitFade = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
-            AnimatedContent(
-                targetState = when {
-                    uiState.isSelectionMode -> "Selection"
-                    else -> "Normal"
-                },
-                // El header entrante (p. ej. el input de búsqueda) BAJA desde arriba mientras
-                // el saliente sube desvaneciéndose — en vez del crossfade seco por defecto de
-                // AnimatedContent. Los specs salen del MotionScheme (spatial para lo que se
-                // mueve, effects para lo que se desvanece; el que entra usa el ritmo "default"
-                // y el que sale el "fast", que es la asimetría del spec) en vez de duraciones
-                // sueltas en ms.
-                transitionSpec = {
-                    (slideInVertically(animationSpec = headerEnterSlide) { -it / 2 } +
-                        fadeIn(animationSpec = headerEnterFade))
-                        .togetherWith(
-                            slideOutVertically(animationSpec = headerExitSlide) { -it / 2 } +
-                                fadeOut(animationSpec = headerExitFade)
-                        )
-                },
-                label = "header"
-            ) { state ->
-                when (state) {
-                    "Selection" -> {
-                        SelectionHeader(
-                            selectedCount = uiState.selectedSongs.size,
-                            onClearSelection = { libraryViewModel.clearSelection() }
-                        )
-                    }
-                    else -> {
-                        // Search bar DOCKED como cabecera (sin título: la píldora activa de
-                        // las tabs ya dice dónde estás — el título era redundante). El
-                        // componente registra solo sus collapsedCoords como ancla del morph;
-                        // adiós al hack del Box de 56dp sobre la lupa.
-                        LibrarySearchHeader(
-                            searchBarState = searchBarState,
-                            searchInputField = searchInputField,
-                            searchBarColors = searchBarColors,
-                            containerColor = headerColor
-                        )
-                    }
-                }
-            }
+            // Search bar DOCKED como cabecera (sin título: la píldora activa de las tabs ya
+            // dice dónde estás — el título era redundante). El componente registra solo sus
+            // collapsedCoords como ancla del morph; adiós al hack del Box de 56dp sobre la lupa.
+            // Único header posible: al no haber selección múltiple, el AnimatedContent que
+            // alternaba con la barra de selección quedó sin segundo estado.
+            LibrarySearchHeader(
+                searchBarState = searchBarState,
+                searchInputField = searchInputField,
+                searchBarColors = searchBarColors,
+                containerColor = headerColor
+            )
 
             // Overlay de búsqueda. No ocupa alto en el slot topBar: internamente es un Dialog
             // que sólo se compone con el estado expandido.
@@ -551,7 +525,7 @@ fun LibraryScreen(
                 HorizontalPager(state = pagerState, key = { it }, beyondViewportPageCount = 1) { page ->
                     val tab = tabs[page]
                     when (tab.tab) {
-                        LibraryTab.HOME -> {
+                        LibraryTabId.HOME -> {
                             HomeScreen(
                                 mostPlayed = homeMostPlayed,
                                 recentlyAdded = homeRecentlyAdded,
@@ -599,7 +573,7 @@ fun LibraryScreen(
                                 animatedVisibilityScope = animatedVisibilityScope
                             )
                         }
-                        LibraryTab.SONGS -> {
+                        LibraryTabId.SONGS -> {
                             // Lista normal: la búsqueda ya no vive acá, sino en el overlay
                             // (ExpandedFullScreenSearchBar), que tapa la pantalla entera.
                             SongsScreen(
@@ -616,7 +590,7 @@ fun LibraryScreen(
                                 onToggleSourceFilter = libraryViewModel::toggleSourceFilter
                             )
                         }
-                        LibraryTab.ARTISTS -> {
+                        LibraryTabId.ARTISTS -> {
                             val artistPhotosPaused by browseViewModel.artistPhotosPausedOnMobile
                                 .collectAsStateWithLifecycle()
                             val artistSortOrder by browseViewModel.artistSortOrder
@@ -653,7 +627,7 @@ fun LibraryScreen(
                                 animatedVisibilityScope = animatedVisibilityScope
                             )
                         }
-                        LibraryTab.ALBUMS -> {
+                        LibraryTabId.ALBUMS -> {
                             val albumSortOrder by browseViewModel.albumSortOrder
                                 .collectAsStateWithLifecycle()
                             val albumSourceFilters by browseViewModel.albumSourceFilters
@@ -685,7 +659,34 @@ fun LibraryScreen(
                                 animatedVisibilityScope = animatedVisibilityScope
                             )
                         }
-                        LibraryTab.PLAYLISTS -> {
+                        LibraryTabId.GENRES -> {
+                            val genres by browseViewModel.genres.collectAsStateWithLifecycle()
+                            val partialMatch by browseViewModel.genrePartialMatch
+                                .collectAsStateWithLifecycle()
+                            GenresScreen(
+                                genres = genres,
+                                onGenreClick = onGenreClick,
+                                partialMatch = partialMatch,
+                                onPartialMatchChange = browseViewModel::setGenrePartialMatch,
+                                // Quick-play: reproduce el género sin navegar (el MiniPlayer
+                                // aparece como feedback), igual que Artistas/Álbumes.
+                                onPlayGenre = { name ->
+                                    scope.launch {
+                                        val genreSongs = browseViewModel.getGenreSongs(name).first()
+                                        if (genreSongs.isNotEmpty()) {
+                                            libraryViewModel.recordContext(
+                                                PlaybackContext.Genre(name, genreSongs.firstOrNull()?.albumArtUri?.toString())
+                                            )
+                                            playbackViewModel.playSongs(genreSongs, 0)
+                                        }
+                                    }
+                                },
+                                contentPadding = listInsets,
+                                sharedTransitionScope = sharedTransitionScope,
+                                animatedVisibilityScope = animatedVisibilityScope
+                            )
+                        }
+                        LibraryTabId.PLAYLISTS -> {
                             val coverMeta by libraryViewModel.playlistsCoverMeta.collectAsStateWithLifecycle()
                             PlaylistList(
                                 playlists = uiState.playlists,
@@ -711,6 +712,7 @@ fun LibraryScreen(
             // TopBar la dibuja el Scaffold, también por encima del body y del mismo color.
             Column(modifier = Modifier.padding(top = topBarInset)) {
                 LibraryTabsRow(
+                    tabs = tabs,
                     selectedIndex = pagerState.currentPage,
                     onTabSelected = { index -> scope.launch { pagerState.animateScrollToPage(index) } },
                     containerColor = headerColor,
@@ -740,6 +742,9 @@ fun LibraryScreen(
                         }
                         is LibraryBannerState.Complete -> {
                             SyncCompleteBanner(state.newSongs, state.downloaded, state.failed, state.deleted)
+                        }
+                        is LibraryBannerState.Paused -> {
+                            SyncPausedBanner(state.message)
                         }
                         // Idle: si hay descargas pausadas/detenidas con pendientes, mostramos el
                         // banner persistente (con opción de reanudar / cancelar).
@@ -856,6 +861,14 @@ private fun resumeContext(
                 onNavigateToNowPlaying()
             }
         }
+        is PlaybackContext.Genre -> scope.launch {
+            val songs = browseViewModel.getGenreSongs(ctx.name).first()
+            if (songs.isNotEmpty()) {
+                libraryViewModel.recordContext(ctx.copy(coverUri = songs.firstOrNull()?.albumArtUri?.toString()))
+                playbackViewModel.playSongs(songs, 0)
+                onNavigateToNowPlaying()
+            }
+        }
         is PlaybackContext.Playlist -> {
             libraryViewModel.playPlaylist(ctx.id)
             onNavigateToNowPlaying()
@@ -913,6 +926,8 @@ private val TabIconGap = 8.dp
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun LibraryTabsRow(
+    /** Pestañas visibles, ya en el orden del usuario. Nunca vacía (ver el caller). */
+    tabs: List<TabInfo>,
     selectedIndex: Int,
     onTabSelected: (Int) -> Unit,
     containerColor: Color,
@@ -926,7 +941,9 @@ private fun LibraryTabsRow(
     val textMeasurer = rememberTextMeasurer()
     // Token real del type scale Expressive (antes: labelLarge con un FontWeight a mano).
     val labelStyle = MaterialTheme.typography.labelLargeEmphasized
-    val activeLabel = stringResource(tabs[selectedIndex].titleRes)
+    // getOrNull: al ocultar la pestaña activa desde Ajustes, el pager recompone con el índice
+    // viejo un frame antes de que el LaunchedEffect lo corrija — con indexado directo, crash.
+    val activeLabel = stringResource((tabs.getOrNull(selectedIndex) ?: tabs.first()).titleRes)
 
     // Cuánto más ancha es la pestaña activa que una de solo icono. NO es una constante elegida
     // a ojo: se MIDE la etiqueta real con la fuente, el idioma y el fontScale vigentes y se
@@ -1112,6 +1129,13 @@ private fun bannerGreen() = if (isSystemInDarkTheme())
 private fun bannerRed() = if (isSystemInDarkTheme())
     BannerPalette(Color(0xFF3E1E1E), Color(0xFFE57373)) else BannerPalette(Color(0xFFFFEBEE), Color(0xFFC62828))
 
+// Ámbar y no rojo: quedarse sin WiFi no es un fallo de la app ni pide nada al usuario. Con la
+// paleta de error, un banner que solo dice "esto sigue solo cuando vuelvas a WiFi" se lee como
+// algo que hay que ir a arreglar.
+@Composable
+private fun bannerAmber() = if (isSystemInDarkTheme())
+    BannerPalette(Color(0xFF2A2114), Color(0xFFFFB74D)) else BannerPalette(Color(0xFFFFF3E0), Color(0xFFE65100))
+
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun DownloadSummaryBanner(active: Int, completed: Int, total: Int, failed: Int, onClick: () -> Unit) {
@@ -1201,6 +1225,32 @@ private fun SyncCompleteBanner(newSongs: Int, downloaded: Int, failed: Int, dele
             style = MaterialTheme.typography.bodySmall,
             color = palette.accent.copy(alpha = 0.8f),
             maxLines = 1
+        )
+    }
+}
+
+/**
+ * Cola de descargas detenida por el entorno. SIN acción y sin barra de progreso: no hay nada
+ * que reintentar (se reanuda sola en cuanto vuelva la condición) y no hay avance que mostrar.
+ */
+@Composable
+private fun SyncPausedBanner(message: String) {
+    val palette = bannerAmber()
+    BannerCard(
+        icon = "pause_circle",
+        iconContainer = palette.accent,
+        containerColor = palette.container,
+        contentColor = palette.accent
+    ) {
+        Text(
+            stringResource(R.string.sync_paused),
+            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
+        )
+        Text(
+            message,
+            style = MaterialTheme.typography.bodySmall,
+            color = palette.accent.copy(alpha = 0.8f),
+            maxLines = 2
         )
     }
 }
@@ -1354,36 +1404,3 @@ private fun SearchResults(
     )
 }
 
-/**
- * Cabecera del modo selección múltiple: [TopAppBar] REAL (antes era un `Surface` + `Row` a
- * mano, con el texto hardcodeado en castellano y sin plural). Conserva el fondo de acento
- * `primaryContainer` que lo distingue de la cabecera normal.
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun SelectionHeader(selectedCount: Int, onClearSelection: () -> Unit) {
-    TopAppBar(
-        title = {
-            Text(
-                text = pluralStringResource(
-                    R.plurals.library_selected_count,
-                    selectedCount,
-                    selectedCount
-                ),
-                style = MaterialTheme.typography.titleMediumEmphasized
-            )
-        },
-        navigationIcon = {
-            val clearDesc = stringResource(R.string.library_clear_selection)
-            IconButton(
-                onClick = onClearSelection,
-                modifier = Modifier.semantics { contentDescription = clearDesc }
-            ) { MaterialSymbol("close") }
-        },
-        colors = TopAppBarDefaults.topAppBarColors(
-            containerColor = colorScheme.primaryContainer,
-            titleContentColor = colorScheme.onPrimaryContainer,
-            navigationIconContentColor = colorScheme.onPrimaryContainer
-        )
-    )
-}

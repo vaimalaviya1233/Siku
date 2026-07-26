@@ -59,6 +59,10 @@ class AuthViewModel @Inject constructor(
     fun signIn(activity: android.app.Activity) {
         viewModelScope.launch {
             _isLoading.value = true
+            // El error es de ESTE intento: se limpia al empezar uno nuevo. Sin esto, un fallo
+            // (red, cancelación de MSAL) dejaba el banner de error para siempre — el reintento
+            // podía tener éxito y el usuario seguía viendo el mensaje viejo bajo las tarjetas.
+            _error.value = null
             authManager.signIn(activity).collect { result ->
                 when (result) {
                     is AuthResult.Success -> {
@@ -90,6 +94,9 @@ class AuthViewModel @Inject constructor(
             authManager.signOut().collect { success ->
                 if (success) {
                     _isLoggedIn.value = false
+                    // Un error de un login anterior no describe el estado actual: sin sesión no
+                    // hay nada que hubiera fallado.
+                    _error.value = null
                     // Accedemos a las dependencias Lazy solo aquí, cuando son necesarias.
                     syncManager.get().release() // cancela sync/descargas en curso antes de borrar datos
                     // El delta token sobrevive al borrado (vive en DataStore): sin limpiarlo, al

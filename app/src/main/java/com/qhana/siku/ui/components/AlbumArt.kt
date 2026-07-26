@@ -1,5 +1,6 @@
 package com.qhana.siku.ui.components
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
@@ -27,6 +28,10 @@ import coil3.request.crossfade
 private val PlaceholderDark = Color(0xFF2A2A2A)
 private val PlaceholderLight = Color(0xFFE0E0E0)
 
+// Anillo de progreso (modo cola): traza y holgura entre el aro y la carátula.
+private val RingStroke = 3.dp
+private val RingGap = 2.dp
+
 // ============== ALBUM ART ==============
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
@@ -44,10 +49,26 @@ fun AlbumArt(
     requestSizePx: Int? = ComponentConfig.ThumbnailSize,
     downloadProgress: Float? = null,
     isDownloading: Boolean = false,
-    useFillAnimation: Boolean = false // New parameter
+    /**
+     * Modo ANILLO: durante la descarga la carátula se deja INTACTA (levemente encogida) y un aro
+     * de progreso la rodea, en vez de dibujar el indicador ENCIMA. Desde la metadata ligera la
+     * portada existe antes de bajar el audio, y superponerle un icono la ensuciaba. Lo usa la cola
+     * de descargas; el resto de la app mantiene el indicador centrado (velo + spinner).
+     */
+    useRingProgress: Boolean = false
 ) {
     val isDarkTheme = isSystemInDarkTheme()
     val primaryColor = MaterialTheme.colorScheme.primary
+    // Velo sobre la carátula durante la descarga (M3 scrim token, no negro fijo).
+    val scrimColor = MaterialTheme.colorScheme.scrim
+    val ringTrackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f)
+
+    val isDownloadState = isDownloading ||
+        (downloadProgress != null && downloadProgress > 0f && downloadProgress < 1f)
+    // En modo anillo, la carátula cede sitio al aro exterior (traza + holgura). Solo mientras
+    // descarga; como los ítems de la cola están SIEMPRE descargando, no hay salto visible.
+    val ringActive = useRingProgress && isDownloadState && albumArtUri != null
+    val artInset = if (ringActive) RingStroke + RingGap else 0.dp
 
     val colors = remember(isDarkTheme) {
         AlbumArtColors(
@@ -59,112 +80,114 @@ fun AlbumArt(
     val density = LocalDensity.current
     val iconSizeSp = remember(size, density) { with(density) { (size / 2).toSp() } }
 
+    // Contenedor transparente del tamaño pedido. La carátula vive en un Box INTERNO que se
+    // encoge en modo anillo para dejar sitio al aro; así el footprint total no cambia y el aro
+    // no se dibuja sobre la imagen.
     Box(
-        modifier = modifier
-            .size(size)
-            .clip(shape ?: RoundedCornerShape(cornerRadius))
-            .background(colors.placeholderColor),
+        modifier = modifier.size(size),
         contentAlignment = Alignment.Center
     ) {
-        // ... (AsyncImage logic) ...
-        if (albumArtUri != null) {
-            val context = LocalContext.current
-            val imageRequest = remember(albumArtUri, cacheKey, requestSizePx) {
-                ImageRequest.Builder(context)
-                    .data(albumArtUri)
-                    .apply {
-                        // requestSizePx != null → tamaño fijo (thumbnails de listas). null → sin
-                        // .size(), Coil resuelve al tamaño medido del composable (tarjetas grandes).
-                        if (requestSizePx != null) size(requestSizePx)
-                        if (cacheKey != null) {
-                            memoryCacheKey(cacheKey)
-                            diskCacheKey(cacheKey)
+        Box(
+            modifier = Modifier
+                .size(size - artInset * 2)
+                .clip(shape ?: RoundedCornerShape(cornerRadius))
+                .background(colors.placeholderColor),
+            contentAlignment = Alignment.Center
+        ) {
+            if (albumArtUri != null) {
+                val context = LocalContext.current
+                val imageRequest = remember(albumArtUri, cacheKey, requestSizePx) {
+                    ImageRequest.Builder(context)
+                        .data(albumArtUri)
+                        .apply {
+                            // requestSizePx != null → tamaño fijo (thumbnails de listas). null → sin
+                            // .size(), Coil resuelve al tamaño medido del composable (tarjetas grandes).
+                            if (requestSizePx != null) size(requestSizePx)
+                            if (cacheKey != null) {
+                                memoryCacheKey(cacheKey)
+                                diskCacheKey(cacheKey)
+                            }
                         }
-                    }
-                    .crossfade(200)
-                    .build()
+                        .crossfade(200)
+                        .build()
+                }
+
+                AsyncImage(
+                    model = imageRequest,
+                    contentDescription = stringResource(R.string.common_album_art),
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
             }
 
-            AsyncImage(
-                model = imageRequest,
-                contentDescription = stringResource(R.string.common_album_art),
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
-        }
-
-        // LOGICA DE ESTADO (Spinner vs Animation)
-        if (isDownloading || (downloadProgress != null && downloadProgress > 0f && downloadProgress < 1f)) {
-
-             // A. FILLING ANIMATION (Solo si se solicita explícitamente y hay progreso)
-             if (useFillAnimation && downloadProgress != null && downloadProgress > 0f) {
-                 // Fondo transparente (Overlay directo)
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Transparent)
-                )
-
-                // Icono de relleno progresivo
-                Box(contentAlignment = Alignment.Center) {
-                    // Fondo del icono (Color sutil del tema para que sea visible en Dark Mode)
-                    MaterialSymbol("download", color = colors.iconTint.copy(alpha = 0.3f), size = iconSizeSp)
-
-                    // Frente del icono (Color primario) - Recortado (Top-to-Bottom)
-                    Box(
-                        modifier = Modifier
-                            .size(size)
-                            .clip(object : androidx.compose.ui.graphics.Shape {
-                                 override fun createOutline(
-                                    size: androidx.compose.ui.geometry.Size,
-                                    layoutDirection: androidx.compose.ui.unit.LayoutDirection,
-                                    density: androidx.compose.ui.unit.Density
-                                ): androidx.compose.ui.graphics.Outline {
-                                    return androidx.compose.ui.graphics.Outline.Rectangle(
-                                        androidx.compose.ui.geometry.Rect(
-                                            0f,
-                                            0f, // Start from Top
-                                            size.width,
-                                            size.height * downloadProgress // Fill downwards
-                                        )
-                                    )
-                                }
-                            })
-                    ) {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                             MaterialSymbol("download", color = primaryColor, size = iconSizeSp)
-                        }
+            when {
+                // MODO ANILLO: la carátula queda intacta; el progreso va en el aro exterior (ver
+                // abajo). Solo mientras "prepara" (sin progreso aún) se muestra un spinner breve
+                // centrado, para no dejar la portada sin ninguna señal de actividad.
+                ringActive -> {
+                    if (downloadProgress == null || downloadProgress <= 0f) {
+                        LoadingIndicator(modifier = Modifier.size(size / 3), color = primaryColor)
                     }
                 }
-             }
-             // B. SPINNER ESTÁNDAR (Default)
-             else {
-                 // Estado "En Cola", "Preparando" o "Descargando": LoadingIndicator expressive
-                 // (morfea entre MaterialShapes) en sus dos variantes — determinada cuando hay
-                 // progreso, indeterminada mientras se prepara. Mismo lenguaje que el resto de
-                 // los indicadores de descarga de la app.
-                 if (downloadProgress != null && downloadProgress > 0f) {
-                     LoadingIndicator(
-                        progress = { downloadProgress },
-                        modifier = Modifier.size(size / 2),
-                        color = primaryColor
-                     )
-                 } else {
-                     LoadingIndicator(
-                        modifier = Modifier.size(size / 2),
-                        color = primaryColor
-                     )
-                 }
-             }
-        } else {
-             // Solo mostrar icono de nota musical si NO hay descarga activa ni en cola Y no hay carátula
-             if (albumArtUri == null) {
-                 MaterialSymbol(
-                    icon = "music_note",
-                    size = iconSizeSp,
-                    color = colors.iconTint
+                // Resto de la app: indicador CENTRADO sobre la carátula, con velo para contraste.
+                isDownloadState -> {
+                    if (albumArtUri != null) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(scrimColor.copy(alpha = 0.45f))
+                        )
+                    }
+                    // LoadingIndicator expressive (morfea entre MaterialShapes): determinado con
+                    // progreso, indeterminado mientras prepara. Mismo lenguaje que el resto de la app.
+                    if (downloadProgress != null && downloadProgress > 0f) {
+                        LoadingIndicator(
+                            progress = { downloadProgress },
+                            modifier = Modifier.size(size / 2),
+                            color = primaryColor
+                        )
+                    } else {
+                        LoadingIndicator(modifier = Modifier.size(size / 2), color = primaryColor)
+                    }
+                }
+                // Sin descarga y sin carátula: nota musical de relleno.
+                albumArtUri == null -> {
+                    MaterialSymbol(icon = "music_note", size = iconSizeSp, color = colors.iconTint)
+                }
+            }
+        }
+
+        // ANILLO DE PROGRESO alrededor de la carátula (modo cola). Traza tenue completa + arco
+        // primario = progreso, empezando arriba (−90°) en sentido horario. Circular aunque la
+        // carátula sea cookie: el aro circunscribe la forma sin tocarla.
+        if (ringActive) {
+            val stroke = with(density) { RingStroke.toPx() }
+            Canvas(modifier = Modifier.size(size)) {
+                val inset = stroke / 2f
+                val arcSize = androidx.compose.ui.geometry.Size(
+                    this.size.width - stroke, this.size.height - stroke
                 )
-             }
+                val topLeft = androidx.compose.ui.geometry.Offset(inset, inset)
+                drawArc(
+                    color = ringTrackColor,
+                    startAngle = 0f, sweepAngle = 360f, useCenter = false,
+                    topLeft = topLeft, size = arcSize,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(
+                        width = stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round
+                    )
+                )
+                val progress = downloadProgress
+                if (progress != null && progress > 0f) {
+                    drawArc(
+                        color = primaryColor,
+                        startAngle = -90f, sweepAngle = 360f * progress.coerceIn(0f, 1f),
+                        useCenter = false, topLeft = topLeft, size = arcSize,
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(
+                            width = stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round
+                        )
+                    )
+                }
+            }
         }
     }
 }

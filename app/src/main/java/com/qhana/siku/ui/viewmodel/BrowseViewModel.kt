@@ -7,6 +7,7 @@ import com.qhana.siku.R
 import com.qhana.siku.data.local.AlbumSummary
 import com.qhana.siku.data.local.ArtistEntity
 import com.qhana.siku.data.local.ArtistSummary
+import com.qhana.siku.data.local.GenreSummary
 import com.qhana.siku.data.model.AlbumSortOrder
 import com.qhana.siku.data.model.ArtistSortOrder
 import com.qhana.siku.data.model.Song
@@ -123,6 +124,44 @@ class BrowseViewModel @Inject constructor(
             .distinctUntilChanged()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    // --- Géneros ---
+
+    /**
+     * "Incluir géneros compuestos": persistido, y compartido con los chips de género del inicio
+     * (`LibraryViewModel`), para que un mismo género reproduzca lo mismo se toque donde se toque.
+     */
+    val genrePartialMatch: StateFlow<Boolean> = musicPreferences.genrePartialMatchFlow
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            musicPreferences.loadGenrePartialMatch()
+        )
+
+    fun setGenrePartialMatch(enabled: Boolean) = musicPreferences.saveGenrePartialMatch(enabled)
+
+    /**
+     * Géneros de la pestaña. Con la coincidencia parcial activa, el conteo de cada género SUMA
+     * el de los grupos cuyo tag lo contiene ("Rock" ← "Rock/Metal", "Hard Rock"): el número que
+     * se ve tiene que ser el de la lista que se abre al tocarlo. Se calcula en memoria y no con
+     * otra consulta porque cada canción cae en exactamente un grupo, así que sumar grupos da el
+     * mismo resultado que el LIKE del detalle — sin N consultas correlacionadas.
+     */
+    val genres: StateFlow<List<GenreSummary>> =
+        combine(browseRepository.getGenres(GENRE_MIN_COUNT), genrePartialMatch) { list, partial ->
+            if (!partial) list else list.map { genre ->
+                val total = list
+                    .filter { it.name.contains(genre.name, ignoreCase = true) }
+                    .sumOf { it.songCount }
+                genre.copy(songCount = total)
+            }
+        }
+            .distinctUntilChanged()
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Canciones de un género para su detalle; sigue en vivo el ajuste de coincidencia parcial. */
+    fun getGenreSongs(genre: String): Flow<List<Song>> =
+        genrePartialMatch.flatMapLatest { partial -> browseRepository.getSongsByGenre(genre, partial) }
+
     /** Álbumes del momento (por total de reproducciones) para la sección de la home. */
     val topAlbums: StateFlow<List<AlbumSummary>> = browseRepository.getTopAlbums(TOP_ALBUMS_LIMIT)
         .distinctUntilChanged()
@@ -233,5 +272,12 @@ class BrowseViewModel @Inject constructor(
 
     private companion object {
         const val TOP_ALBUMS_LIMIT = 12
+
+        /**
+         * Mínimo de canciones para que un género salga en la PESTAÑA: todos. A diferencia de los
+         * chips del inicio (que filtran a ≥5 para no llenarse de géneros anecdóticos), aquí una
+         * lista que esconde géneros se lee como biblioteca incompleta.
+         */
+        const val GENRE_MIN_COUNT = 1
     }
 }

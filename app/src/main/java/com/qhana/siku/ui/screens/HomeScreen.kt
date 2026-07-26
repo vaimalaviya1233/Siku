@@ -49,6 +49,7 @@ import coil3.request.crossfade
 import com.qhana.siku.R
 import com.qhana.siku.data.local.AlbumSummary
 import com.qhana.siku.data.model.Song
+import com.qhana.siku.ui.components.AdaptiveCollage
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.onContainerColor
 import com.qhana.siku.ui.components.vividAccentColor
@@ -408,6 +409,7 @@ private fun ContextCarousel(
 private fun PlaybackContext.coverUri(): String? = when (this) {
     is PlaybackContext.Album -> coverUri
     is PlaybackContext.Artist -> coverUri
+    is PlaybackContext.Genre -> coverUri
     is PlaybackContext.Playlist -> coverUri
     else -> null
 }
@@ -416,6 +418,7 @@ private fun PlaybackContext.coverUri(): String? = when (this) {
 private fun PlaybackContext.displayTitle(): String = when (this) {
     is PlaybackContext.Album -> name.ifBlank { stringResource(R.string.common_unknown_album) }
     is PlaybackContext.Artist -> name
+    is PlaybackContext.Genre -> name
     is PlaybackContext.Playlist -> name
     PlaybackContext.Favorites -> stringResource(R.string.home_ctx_favorites)
     PlaybackContext.LibraryShuffle -> stringResource(R.string.home_ctx_shuffle)
@@ -428,6 +431,7 @@ private fun PlaybackContext.displayTitle(): String = when (this) {
 private fun PlaybackContext.displaySubtitle(): String = when (this) {
     is PlaybackContext.Album -> stringResource(R.string.home_ctx_album)
     is PlaybackContext.Artist -> stringResource(R.string.home_ctx_artist)
+    is PlaybackContext.Genre -> stringResource(R.string.home_ctx_genre)
     is PlaybackContext.Playlist -> stringResource(R.string.home_ctx_playlist)
     else -> ""
 }
@@ -435,6 +439,7 @@ private fun PlaybackContext.displaySubtitle(): String = when (this) {
 private fun PlaybackContext.typeIcon(): String = when (this) {
     is PlaybackContext.Album -> "album"
     is PlaybackContext.Artist -> "artist"
+    is PlaybackContext.Genre -> "genres"
     is PlaybackContext.Playlist -> "playlist_play"
     PlaybackContext.Favorites -> "favorite"
     PlaybackContext.LibraryShuffle -> "shuffle"
@@ -505,31 +510,6 @@ private fun CarouselItemScope.labelAlpha(): () -> Float = {
     t * t
 }
 
-/** Collage 2×2 de carátulas (contextos de biblioteca sin carátula propia: aleatorio / biblioteca). */
-@Composable
-private fun CollageArt(covers: List<String>, modifier: Modifier = Modifier) {
-    Column(modifier = modifier) {
-        Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            CollageCell(covers[0], Modifier.weight(1f).fillMaxHeight())
-            CollageCell(covers[1], Modifier.weight(1f).fillMaxHeight())
-        }
-        Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            CollageCell(covers[2], Modifier.weight(1f).fillMaxHeight())
-            CollageCell(covers[3], Modifier.weight(1f).fillMaxHeight())
-        }
-    }
-}
-
-@Composable
-private fun CollageCell(uri: String, modifier: Modifier) {
-    AsyncImage(
-        model = uri,
-        contentDescription = null,
-        contentScale = ContentScale.Crop,
-        modifier = modifier.background(colorScheme.surfaceContainerHighest)
-    )
-}
-
 /**
  * Tarjeta de carrusel del inicio: carátula a sangre con degradado inferior y etiqueta superpuesta.
  * [modifier] llega con el recorte del carrusel ([maskClip]); [artModifier] es para el shared element
@@ -548,8 +528,8 @@ private fun HomeCarouselCard(
     isCurrent: Boolean = false,
     badgeIcon: String? = null,
     placeholderIcon: String = "music_note",
-    // Collage 2×2 de carátulas (contextos sin carátula propia: aleatorio / toda la biblioteca).
-    // Si trae 4+ URIs reemplaza a [art]/[placeholderIcon]; con menos cae al ícono.
+    // Collage de carátulas (contextos sin carátula propia: aleatorio / toda la biblioteca).
+    // Con al menos una URI reemplaza a [art]/[placeholderIcon]; se adapta a cuántas haya.
     collage: List<String>? = null,
     // Alfa de la etiqueta (título/subtítulo + degradado). Se lee en fase de dibujo para que en el
     // multi-browse solo el ítem GRANDE (el foco) muestre su label y los que asoman lo oculten.
@@ -564,7 +544,7 @@ private fun HomeCarouselCard(
             .background(colorScheme.surfaceContainerHighest)
     ) {
         when {
-            collage != null && collage.size >= 4 -> CollageArt(collage, Modifier.fillMaxSize())
+            !collage.isNullOrEmpty() -> AdaptiveCollage(collage, Modifier.fillMaxSize())
             art != null -> {
                 val context = LocalContext.current
                 val request = ImageRequest.Builder(context)

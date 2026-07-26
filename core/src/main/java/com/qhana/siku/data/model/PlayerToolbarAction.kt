@@ -15,7 +15,8 @@ enum class PlayerToolbarAction {
     EQUALIZER,
     SLEEP_TIMER,
     ADD_TO_PLAYLIST,
-    DOWNLOAD
+    DOWNLOAD,
+    SHARE
 }
 
 /** Una acción con su ubicación: [inBar] = en la barra flotante; si no, en el overflow. */
@@ -40,7 +41,10 @@ object PlayerToolbarConfig {
         ToolbarActionState(PlayerToolbarAction.EQUALIZER, inBar = true),
         ToolbarActionState(PlayerToolbarAction.ADD_TO_PLAYLIST, inBar = false),
         ToolbarActionState(PlayerToolbarAction.SLEEP_TIMER, inBar = false),
-        ToolbarActionState(PlayerToolbarAction.DOWNLOAD, inBar = false)
+        ToolbarActionState(PlayerToolbarAction.DOWNLOAD, inBar = false),
+        // Compartir nace en el overflow: la barra ya viene llena hasta MAX_IN_BAR, y la
+        // reconciliación de [decode] mete esta acción ahí a quien ya tenga una config guardada.
+        ToolbarActionState(PlayerToolbarAction.SHARE, inBar = false)
     )
 
     /**

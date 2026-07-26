@@ -44,7 +44,7 @@ import com.qhana.siku.data.model.PlaybackState
 import com.qhana.siku.data.model.Playlist
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.ui.components.AddToPlaylistBottomSheet
-import com.qhana.siku.ui.components.AlbumGridCard
+import com.qhana.siku.ui.components.AlbumTileCard
 import com.qhana.siku.ui.components.ComponentConfig
 import com.qhana.siku.ui.components.ArtistPickerSheet
 import com.qhana.siku.ui.components.CreatePlaylistDialog
@@ -59,6 +59,14 @@ import com.qhana.siku.ui.viewmodel.ArtistPickerState
 import com.qhana.siku.ui.viewmodel.BrowseViewModel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+
+/**
+ * Ancho de cada álbum del carrusel. Algo más que los 140dp que llevaba con la tarjeta vieja:
+ * ahora el nombre y el play conviven en una fila DENTRO de la tarjeta, y con el ancho anterior
+ * al título le quedaban ~80dp útiles (todo elipsis). Sigue dejando ver el arranque del
+ * siguiente álbum, que es lo que invita a deslizar el carrusel.
+ */
+private val ArtistAlbumCardWidth = 168.dp
 
 /**
  * Detalle de artista, estilo INMERSIVO (referencia visual del usuario): foto grande
@@ -203,12 +211,14 @@ fun ArtistDetailScreen(
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         items(albums, key = { it.name }) { album ->
-                            AlbumGridCard(
+                            // MISMA tarjeta que la pestaña Álbumes. El artista se omite: acá
+                            // todos son del mismo y repetirlo bajo cada carátula es ruido.
+                            AlbumTileCard(
                                 album = album,
                                 showArtist = false,
                                 onClick = { onAlbumClick(album.name) },
                                 onPlayClick = { playAlbum(album.name) },
-                                modifier = Modifier.width(140.dp)
+                                modifier = Modifier.width(ArtistAlbumCardWidth)
                             )
                         }
                     }

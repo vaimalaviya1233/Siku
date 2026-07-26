@@ -7,6 +7,7 @@ import com.qhana.siku.data.preferences.MusicPreferences
 import com.qhana.siku.data.repository.IMusicRepository
 import com.qhana.siku.data.util.AudioFileAnalyzer
 import io.mockk.MockKAnnotations
+import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.impl.annotations.RelaxedMockK
@@ -37,28 +38,58 @@ class LocalMusicSourceTest {
     }
 
     @Test
-    fun `no esta configurada si no hay carpeta elegida`() = runTest {
-        every { musicPreferences.loadLocalFolderUri() } returns null
+    fun `no esta configurada sin carpetas ni escaneo del dispositivo`() = runTest {
+        every { musicPreferences.loadLocalFolderUris() } returns emptySet()
+        every { musicPreferences.loadScanWholeDevice() } returns false
 
         assertFalse(source.isConfigured())
     }
 
     @Test
-    fun `esta configurada cuando hay carpeta elegida`() = runTest {
-        every { musicPreferences.loadLocalFolderUri() } returns "content://tree/primary%3AMusic"
+    fun `esta configurada cuando hay al menos una carpeta`() = runTest {
+        every { musicPreferences.loadLocalFolderUris() } returns setOf("content://tree/primary%3AMusic")
+        every { musicPreferences.loadScanWholeDevice() } returns false
 
         assertTrue(source.isConfigured())
     }
 
     @Test
-    fun `sin carpeta configurada discover no toca la BD y devuelve cero`() = runTest {
-        every { musicPreferences.loadLocalFolderUri() } returns null
+    fun `esta configurada en modo dispositivo aunque no haya carpetas`() = runTest {
+        every { musicPreferences.loadLocalFolderUris() } returns emptySet()
+        every { musicPreferences.loadScanWholeDevice() } returns true
+
+        assertTrue(source.isConfigured())
+    }
+
+    @Test
+    fun `sin fuente local configurada discover no toca la BD y devuelve cero`() = runTest {
+        every { musicPreferences.loadLocalFolderUris() } returns emptySet()
+        every { musicPreferences.loadScanWholeDevice() } returns false
 
         val result = source.discover(force = false, ctx())
 
         assertEquals(0, result.added)
         assertEquals(0, result.deleted)
         coVerify(exactly = 0) { musicRepository.upsertSongs(any()) }
+        coVerify(exactly = 0) { musicRepository.deleteSongs(any()) }
+    }
+
+    /**
+     * El caso peligroso: en modo dispositivo, si no se puede listar (permiso revocado, proveedor
+     * caído → cursor null), NO se puede interpretar como "el usuario borró toda su música". La
+     * reconciliación tiene que dejar la biblioteca intacta.
+     */
+    @Test
+    fun `modo dispositivo sin poder listar no borra la biblioteca existente`() = runTest {
+        every { musicPreferences.loadLocalFolderUris() } returns emptySet()
+        every { musicPreferences.loadScanWholeDevice() } returns true
+        every { context.contentResolver.query(any(), any(), any(), any(), any()) } returns null
+        coEvery { musicRepository.getSongIdsBySourceType(SourceType.LOCAL) } returns
+            listOf(SourceType.LOCAL.buildId("primary/music/tema.flac"))
+
+        val result = source.discover(force = false, ctx())
+
+        assertEquals(0, result.deleted)
         coVerify(exactly = 0) { musicRepository.deleteSongs(any()) }
     }
 

@@ -334,7 +334,7 @@ private fun AlbumImmersiveHeader(
     onTitlePositioned: (Offset, Int) -> Unit = { _, _ -> }
 ) {
     // La carátula llega volando desde la celda de la pestaña Álbumes (sharedBounds,
-    // misma key que AlbumGridCard).
+    // misma key que AlbumTileCard).
     val sharedModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
         with(sharedTransitionScope) {
             Modifier.sharedBounds(

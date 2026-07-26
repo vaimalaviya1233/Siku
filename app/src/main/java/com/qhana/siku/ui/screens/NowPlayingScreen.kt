@@ -14,12 +14,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.ColorUtils
 import android.media.MediaMetadataRetriever
+import android.os.Build
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import com.qhana.siku.data.model.PlaybackOrigin
@@ -31,6 +33,7 @@ import com.qhana.siku.data.model.SourceType
 import com.qhana.siku.data.model.ToolbarActionState
 import com.qhana.siku.ui.components.*
 import com.qhana.siku.ui.model.toUiModel
+import com.qhana.siku.ui.util.shareSong
 import com.qhana.siku.ui.state.NowPlayingUiState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
@@ -57,6 +60,8 @@ data class PlayerActions(
     val onNext: () -> Unit,
     val onPrevious: () -> Unit,
     val onSeek: (Long) -> Unit,
+    /** Salto RELATIVO (doble toque en la carátula); el destino lo acota el ViewModel. */
+    val onSeekBy: (Long) -> Unit,
     val onShuffleToggle: () -> Unit,
     val onRepeatToggle: () -> Unit,
     val onSkipToIndex: (Int) -> Unit,
@@ -69,6 +74,8 @@ data class PlayerActions(
     val onOpenEqualizer: () -> Unit,
     val onFetchLyrics: (Boolean) -> Unit,
     val onSearchLyricsManually: () -> Unit,
+    /** Guardar la letra en el archivo (`.lrc` o embebida, según la preferencia). */
+    val onSaveLyrics: () -> Unit,
     val onSelectLyricsCandidate: (com.qhana.siku.data.repository.LyricsCandidate) -> Unit,
     val onDismissLyricsSearch: () -> Unit,
     val onUpdatePosition: () -> Unit,
@@ -97,6 +104,8 @@ fun NowPlayingScreen(
     playbackState: PlaybackState,
     currentPositionFlow: StateFlow<Long>,
     durationFlow: StateFlow<Long>,
+    /** Búfer cargado: tercer nivel de la barra, solo con sentido en streaming. */
+    bufferedPositionFlow: StateFlow<Long>,
     isShuffleEnabled: Boolean,
     repeatMode: RepeatMode,
     playlist: List<Song>,
@@ -106,10 +115,17 @@ fun NowPlayingScreen(
     solidBackground: Boolean,
     /** Ajustes → Reproducción: barra de progreso ondulada (Expressive) en vez de la píldora. */
     wavyProgress: Boolean,
+    /** Chip de formato con ficha técnica; se conmuta desde Ajustes O tocando el propio chip. */
+    detailedFormat: Boolean,
+    onToggleDetailedFormat: () -> Unit,
+    /** Ajustes → Reproducción: deslizar para cambiar/cerrar y doble toque para saltar. */
+    gesturesEnabled: Boolean,
     playlists: List<com.qhana.siku.data.model.Playlist>,
     sleepTimer: com.qhana.siku.player.MusicController.SleepTimerState?,
     /** Estado del EQ propio para el fondo activo de su botón en el toolbar. */
     eqEnabled: Boolean,
+    /** Guardado de letra en curso: apaga el botón para no dispararlo dos veces. */
+    isSavingLyrics: Boolean = false,
     playerActions: PlayerActions,
     navigationActions: NavigationActions,
     toolbarConfig: List<ToolbarActionState> = PlayerToolbarConfig.DEFAULT,
@@ -217,9 +233,18 @@ fun NowPlayingScreen(
     } else {
         song.playbackOrigin
     }
-    val formatText = rememberAudioFormat(song.path, song.title)
+    val formatInfo = rememberAudioFormat(song.path, song.title)
 
     val onAlbumArtLongPress = { navigationActions.onShowDebugInfo() }
+    // Compartir: el texto se arma acá porque los recursos solo se leen desde la composición, y
+    // el artista en blanco tiene que caer en la misma etiqueta que muestra la UI.
+    val shareChooserTitle = stringResource(R.string.np_share)
+    val shareText = stringResource(
+        R.string.np_share_text,
+        song.title,
+        song.artist.ifBlank { stringResource(R.string.common_unknown_artist) }
+    )
+    val onShareSong = { shareSong(context, song, shareText, shareChooserTitle) }
     val onLyricsToggle = { showLyrics = !showLyrics }
     val onShowQueue = { showQueueSheet = true }
     val onAmbientMode = { showAmbientModeDialog = true }
@@ -250,8 +275,23 @@ fun NowPlayingScreen(
     // Se reactiva al terminar la animación (currentState == targetState).
     val glassBlurEnabled = animatedVisibilityScope?.transition?.let { it.currentState == it.targetState } ?: true
 
+    // Arrastre hacia abajo para cerrar. El estado se crea SIEMPRE (crearlo dentro de un `if`
+    // ataría su `remember` a la rama y perdería el arrastre en curso si el ajuste cambiara a
+    // mitad del gesto); lo que se apaga con el ajuste es quién lo alimenta.
+    val dismissState = rememberPlayerDismissState { navigationActions.onBackClick() }
+    val activeDismiss = dismissState.takeIf { gesturesEnabled }
+
     CompositionLocalProvider(LocalGlassBlurEnabled provides glassBlurEnabled) {
-    BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+    BoxWithConstraints(
+        modifier = modifier
+            .fillMaxSize()
+            // Se traslada y atenúa TODO el reproductor —fondo incluido— con el dedo. Mover solo
+            // el contenido dejaría el degradado quieto detrás y se vería el hueco por abajo.
+            .graphicsLayer {
+                translationY = dismissState.offsetY
+                alpha = 1f - (1f - PlayerGestureConfig.DismissMinAlpha) * dismissState.progress
+            }
+    ) {
         val isLandscape = maxWidth > maxHeight
 
         // Capa 1 (FONDO = hazeSource): el fondo gradiente en una capa DEDICADA detrás de todo.
@@ -279,6 +319,7 @@ fun NowPlayingScreen(
                         hazeState = hazeState,
                         glassTint = glassTint,
                         origin = origin,
+                        solidBackground = solidBackground,
                         onAmbientMode = onAmbientMode
                     )
                 }
@@ -288,6 +329,10 @@ fun NowPlayingScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding)
+                    // Arrastre de cierre desde CUALQUIER punto del reproductor. Va en el
+                    // contenedor, así que los hijos que gestionan su propio gesto (el slider, la
+                    // carátula) reciben antes y este solo ve lo que ninguno quiso.
+                    .playerDismissDrag(activeDismiss, gesturesEnabled)
             ) {
                 if (isLandscape) {
                     NowPlayingLandscape(
@@ -299,7 +344,6 @@ fun NowPlayingScreen(
                         playButtonContentColor = playButtonContentColor,
                         revealAccent = playButtonColor,
                         isFavorite = isFavorite,
-                        isShuffleEnabled = isShuffleEnabled,
                         repeatMode = repeatMode,
                         keepScreenOn = keepScreenOn,
                         showLyrics = showLyrics,
@@ -307,8 +351,14 @@ fun NowPlayingScreen(
                         playbackState = playbackState,
                         currentPositionFlow = currentPositionFlow,
                         durationFlow = durationFlow,
+                        bufferedPositionFlow = bufferedPositionFlow,
                         origin = origin,
-                        formatText = formatText,
+                        solidBackground = solidBackground,
+                        gesturesEnabled = gesturesEnabled,
+                        dismiss = activeDismiss,
+                        format = formatInfo,
+                        detailedFormat = detailedFormat,
+                        onToggleDetailedFormat = onToggleDetailedFormat,
                         wavyProgress = wavyProgress,
                         playerActions = playerActions,
                         onBackClick = navigationActions.onBackClick,
@@ -321,6 +371,8 @@ fun NowPlayingScreen(
                         eqEnabled = eqEnabled,
                         sleepTimerActive = sleepTimer != null,
                         onSleepTimerClick = onSleepTimerClick,
+                        isShuffleEnabled = isShuffleEnabled,
+                        onShareSong = onShareSong,
                         toolbarConfig = toolbarConfig,
                         hazeState = hazeState,
                         glassTint = glassTint,
@@ -338,7 +390,6 @@ fun NowPlayingScreen(
                         playButtonContentColor = playButtonContentColor,
                         revealAccent = playButtonColor,
                         isFavorite = isFavorite,
-                        isShuffleEnabled = isShuffleEnabled,
                         repeatMode = repeatMode,
                         keepScreenOn = keepScreenOn,
                         showLyrics = showLyrics,
@@ -346,7 +397,12 @@ fun NowPlayingScreen(
                         playbackState = playbackState,
                         currentPositionFlow = currentPositionFlow,
                         durationFlow = durationFlow,
-                        formatText = formatText,
+                        bufferedPositionFlow = bufferedPositionFlow,
+                        gesturesEnabled = gesturesEnabled,
+                        dismiss = activeDismiss,
+                        format = formatInfo,
+                        detailedFormat = detailedFormat,
+                        onToggleDetailedFormat = onToggleDetailedFormat,
                         wavyProgress = wavyProgress,
                         playerActions = playerActions,
                         onArtistClick = navigationActions.onArtistClick,
@@ -357,6 +413,8 @@ fun NowPlayingScreen(
                         eqEnabled = eqEnabled,
                         sleepTimerActive = sleepTimer != null,
                         onSleepTimerClick = onSleepTimerClick,
+                        isShuffleEnabled = isShuffleEnabled,
+                        onShareSong = onShareSong,
                         toolbarConfig = toolbarConfig,
                         hazeState = hazeState,
                         glassTint = glassTint,
@@ -446,6 +504,8 @@ fun NowPlayingScreen(
                                             val query = "${song.artist} ${song.title} lyrics"
                                             uriHandler.openUri("https://www.google.com/search?q=${android.net.Uri.encode(query)}")
                                         },
+                                        onSaveLyrics = playerActions.onSaveLyrics,
+                                        isSavingLyrics = isSavingLyrics,
                                         onSearchManually = playerActions.onSearchLyricsManually,
                                         onSelectCandidate = playerActions.onSelectLyricsCandidate,
                                         onDismissSearch = playerActions.onDismissLyricsSearch,
@@ -507,10 +567,27 @@ fun NowPlayingScreen(
     }
 }
 
+/**
+ * Ficha del audio que suena: contenedor + los datos que distinguen una copia buena de una mala.
+ * Los tres numéricos son OPCIONALES porque no siempre se pueden saber: en streaming no se abre el
+ * archivo (costaría red), y `SAMPLERATE`/`BITS_PER_SAMPLE` de `MediaMetadataRetriever` existen
+ * desde API 31 — por debajo, o si el contenedor no los declara, el chip simplemente muestra menos.
+ */
+@Immutable
+internal data class AudioFormatInfo(
+    val format: String,
+    val bitrateKbps: Int? = null,
+    val sampleRateHz: Int? = null,
+    val bitsPerSample: Int? = null
+) {
+    /** ¿Hay algo que enseñar además del contenedor? Si no, el modo detallado no cambia nada. */
+    val hasDetails: Boolean get() = bitrateKbps != null || sampleRateHz != null || bitsPerSample != null
+}
+
 @Composable
-private fun rememberAudioFormat(path: String, title: String): String {
+private fun rememberAudioFormat(path: String, title: String): AudioFormatInfo {
     val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
-    val format by produceState(initialValue = "AUDIO", key1 = path, key2 = title) {
+    val format by produceState(initialValue = AudioFormatInfo(UNKNOWN_FORMAT), key1 = path, key2 = title) {
         value = withContext(Dispatchers.IO) {
             try {
                 // 0. Fuente LOCAL (SAF): el content:// no tiene extensión, hay que leer el MIME
@@ -519,9 +596,9 @@ private fun rememberAudioFormat(path: String, title: String): String {
                     val retriever = MediaMetadataRetriever()
                     return@withContext try {
                         retriever.setDataSource(appContext, android.net.Uri.parse(path))
-                        mimeToFormat(retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE))
+                        retriever.readFormatInfo()
                     } catch (_: Exception) {
-                        "AUDIO"
+                        AudioFormatInfo(UNKNOWN_FORMAT)
                     } finally {
                         try { retriever.release() } catch (_: Exception) {}
                     }
@@ -534,26 +611,59 @@ private fun rememberAudioFormat(path: String, title: String): String {
                         // FD, no setDataSource(String): esa sobrecarga hace Uri.parse sin validar
                         // y los ':' de los ids namespaced en el nombre la rompen (EINVAL).
                         java.io.FileInputStream(filePath).use { retriever.setDataSource(it.fd) }
-                        val mime = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)
-                        mimeToFormat(mime)
+                        retriever.readFormatInfo()
                     } catch (_: Exception) {
                         // Fallback a extensión del archivo
-                        java.io.File(filePath).extension.uppercase().ifEmpty { "AUDIO" }
+                        AudioFormatInfo(java.io.File(filePath).extension.uppercase().ifEmpty { UNKNOWN_FORMAT })
                     } finally {
                         try { retriever.release() } catch (_: Exception) {}
                     }
                 }
-                // 2. Para streaming: extensión del path, luego del título (nombre original del archivo)
+                // 2. Para streaming: extensión del path, luego del título (nombre original del
+                // archivo). SIN abrir el recurso: el retriever sobre http descargaría cabeceras
+                // por red cada vez que cambia la canción, y el detalle no vale ese precio.
                 else {
-                    detectFormatByExtension(path) ?: detectFormatByExtension(title) ?: "AUDIO"
+                    AudioFormatInfo(
+                        detectFormatByExtension(path) ?: detectFormatByExtension(title) ?: UNKNOWN_FORMAT
+                    )
                 }
             } catch (_: Exception) {
-                "AUDIO"
+                AudioFormatInfo(UNKNOWN_FORMAT)
             }
         }
     }
     return format
 }
+
+/**
+ * Lee contenedor + ficha técnica de un retriever YA posicionado sobre el recurso. Las claves de
+ * frecuencia y profundidad son API 31+; por debajo se devuelven nulas y el chip enseña lo que hay.
+ */
+private fun MediaMetadataRetriever.readFormatInfo(): AudioFormatInfo {
+    val format = mimeToFormat(extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE))
+    // El bitrate viene en bits por segundo; el chip habla en kbps.
+    val bitrateKbps = extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)
+        ?.toIntOrNull()
+        ?.takeIf { it > 0 }
+        ?.let { (it + BPS_PER_KBPS / 2) / BPS_PER_KBPS }
+    val sampleRate: Int?
+    val bitsPerSample: Int?
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        sampleRate = extractMetadata(MediaMetadataRetriever.METADATA_KEY_SAMPLERATE)
+            ?.toIntOrNull()?.takeIf { it > 0 }
+        bitsPerSample = extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITS_PER_SAMPLE)
+            ?.toIntOrNull()?.takeIf { it > 0 }
+    } else {
+        sampleRate = null
+        bitsPerSample = null
+    }
+    return AudioFormatInfo(format, bitrateKbps, sampleRate, bitsPerSample)
+}
+
+/** Etiqueta cuando no se pudo determinar el contenedor. */
+private const val UNKNOWN_FORMAT = "AUDIO"
+
+private const val BPS_PER_KBPS = 1000
 
 private fun mimeToFormat(mime: String?): String = when {
     mime == null -> "AUDIO"

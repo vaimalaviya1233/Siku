@@ -1,7 +1,6 @@
 package com.qhana.siku.ui.screens
 
 import androidx.compose.animation.*
-// Explícito: el wildcard de animation trae la Animatable de COLOR; necesitamos la de Float.
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -14,14 +13,8 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -35,19 +28,13 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.graphics.shapes.CornerRounding
@@ -55,39 +42,29 @@ import androidx.graphics.shapes.Morph
 import androidx.graphics.shapes.RoundedPolygon
 import androidx.graphics.shapes.TransformResult
 import androidx.graphics.shapes.rectangle
-import androidx.core.graphics.ColorUtils
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import coil3.compose.AsyncImage
-import coil3.request.ImageRequest
-import coil3.request.crossfade
-import com.qhana.siku.data.model.PlaybackOrigin
 import com.qhana.siku.data.model.PlaybackState
 import com.qhana.siku.data.model.PlayerToolbarAction
 import com.qhana.siku.data.model.RepeatMode
-import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.model.ToolbarActionState
 import com.qhana.siku.ui.components.*
-import dev.chrisbanes.haze.HazeState
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.launch
-import kotlin.math.PI
-import kotlin.math.sin
 
-    // --- Extracted Section Composables ---
+/*
+ * TRANSPORTE y BARRA DE ACCIONES del NowPlaying: el grupo prev/play/next con sus formas
+ * animadas, el reveal de acento que comparten con el toolbar, y la barra flotante configurable.
+ *
+ * La carátula y la identidad de la canción viven en [NowPlayingArt]; la barra de progreso y el
+ * chip de formato, en [NowPlayingProgress].
+ */
 
 /**
  * Shape del botón de play: morph continuo píldora ↔ [MaterialShapes.Cookie9Sided].
@@ -130,452 +107,6 @@ internal class PlayButtonMorphShape(private val progress: Float) : Shape {
 internal fun cookieSpinDegrees(angle: Float, progress: Float): Float {
     val p = progress.coerceIn(0f, 1f)
     return if (p >= 1f) angle else (angle % 40f) * p
-}
-
-@Composable
-internal fun NowPlayingTopBar(
-    onBackClick: () -> Unit,
-    contentColor: Color,
-    accentColor: Color,
-    hazeState: HazeState,
-    glassTint: Color,
-    origin: PlaybackOrigin,
-    onAmbientMode: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .statusBarsPadding()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        // Icon buttons expressive: morph de forma al presionar (IconButtonDefaults.shapes)
-        // + háptica, vía ExpressiveActionIcon.
-        ExpressiveActionIcon(
-            onClick = onBackClick,
-            icon = "keyboard_arrow_down",
-            description = stringResource(R.string.np_close_desc),
-            contentColor = contentColor,
-            iconSize = 32.sp
-        )
-
-        PlaybackSourceChip(
-            origin = origin,
-            contentColor = contentColor,
-            accentColor = accentColor,
-            hazeState = hazeState,
-            glassTint = glassTint
-        )
-
-        ExpressiveActionIcon(
-            onClick = onAmbientMode,
-            icon = "expand_content",
-            description = stringResource(R.string.np_ambient_mode_desc),
-            contentColor = contentColor,
-            iconSize = 28.sp
-        )
-    }
-}
-
-/**
- * Chip de ORIGEN del NowPlaying (compartido portrait/landscape): de dónde sale el audio que
- * suena. Pastilla de VIDRIO ESMERILADO ([GlassSurface]) — informativa, no accionable — con
- * sello M3 Expressive: el icono va sentado en una forma orgánica de [MaterialShapes]
- * (cookie) del color del contenido, que además MORFA de forma al cambiar el origen.
- *
- * El FORMATO del archivo ya no vive acá: es otro dato (qué suena, no de dónde) y tiene su
- * propio chip centrado entre los tiempos del [ProgressSlider].
- *
- * Los tres orígenes de [PlaybackOrigin] tienen icono, forma y texto propios: una canción de la
- * nube ya descargada suena offline igual que una local, pero no es lo mismo, y antes ambas se
- * mostraban como "LOCAL".
- */
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
-@Composable
-internal fun PlaybackSourceChip(
-    origin: PlaybackOrigin,
-    contentColor: Color,
-    accentColor: Color,
-    hazeState: HazeState,
-    glassTint: Color,
-    compact: Boolean = false,
-    modifier: Modifier = Modifier
-) {
-    // OUTLINED: fill `secondaryContainer` (armónico con el gradiente) + BORDE `outline` que define el
-    // chip aunque el fill coincida con el fondo → se ve sin desentonar (tertiary) ni ser agresivo
-    // (inverseSurface). Content = onSecondaryContainer.
-    val chipContentColor = MaterialTheme.colorScheme.onSecondaryContainer
-
-    // Forma expressive del asiento del icono, una por origen: cookie de 9 lados en local (disco
-    // "dentado"), soft burst en descargado, sunny en stream (rayos). El cambio
-    // de forma es el acento expressive del chip. toShape() ya es @Composable y memoiza internamente.
-    val seatShape = when (origin) {
-        PlaybackOrigin.LOCAL -> MaterialShapes.Cookie7Sided
-        PlaybackOrigin.DOWNLOADED -> MaterialShapes.Cookie9Sided
-        PlaybackOrigin.STREAMING -> MaterialShapes.Sunny
-    }.toShape()
-    val seatSize = if (compact) 24.dp else 28.dp
-
-    val originIcon = when (origin) {
-        PlaybackOrigin.LOCAL -> "sd_card"
-        PlaybackOrigin.DOWNLOADED -> "cloud_done"
-        PlaybackOrigin.STREAMING -> "stream"
-    }
-    val originLabel = when (origin) {
-        PlaybackOrigin.LOCAL -> stringResource(R.string.np_chip_local)
-        PlaybackOrigin.DOWNLOADED -> stringResource(R.string.np_chip_downloaded)
-        PlaybackOrigin.STREAMING -> stringResource(R.string.np_chip_stream)
-    }
-
-    Surface(
-        shape = RoundedCornerShape(50),
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        modifier = modifier.height(if (compact) 36.dp else 40.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxHeight()
-                .padding(start = 6.dp, end = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
-        ) {
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .size(seatSize)
-                    .clip(seatShape)
-                    // Asiento con el ACENTO del álbum (mismo color que el botón de play):
-                    // ata el chip al tema de la carátula en vez del blanco/negro neutro.
-                    .background(accentColor)
-            ) {
-                MaterialSymbol(
-                    originIcon,
-                    color = onContainerColor(accentColor),
-                    size = if (compact) 13.sp else 15.sp,
-                    fill = true
-                )
-            }
-            Spacer(modifier = Modifier.width(if (compact) 8.dp else 10.dp))
-            Text(
-                text = originLabel,
-                style = (if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelMedium)
-                    .copy(fontWeight = FontWeight.Medium),
-                color = chipContentColor
-            )
-        }
-    }
-}
-
-@OptIn(ExperimentalSharedTransitionApi::class)
-@Composable
-internal fun AlbumArtSection(
-    song: Song,
-    variantColor: Color,
-    sharedTransitionScope: SharedTransitionScope?,
-    animatedVisibilityScope: AnimatedVisibilityScope?,
-    isPlaying: Boolean,
-    onTap: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    // "Respiración" al pausar: la carátula se encoge sutilmente y su forma morfea de
-    // MaterialShapes.Square a MaterialShapes.Circle (estado de reposo); al reproducir recupera
-    // plena presencia y vuelve a cuadrado. Springs suaves.
-    val artMorphProgress by animateFloatAsState(
-        targetValue = if (isPlaying) 0f else 1f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioLowBouncy,
-            stiffness = Spring.StiffnessLow
-        ),
-        label = "artMorph"
-    )
-    val artScale by animateFloatAsState(
-        targetValue = if (isPlaying) 1f else 0.93f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioLowBouncy,
-            stiffness = Spring.StiffnessLow
-        ),
-        label = "artScale"
-    )
-    Box(
-        modifier = modifier,
-        contentAlignment = Alignment.Center
-    ) {
-        val sharedElementModifier =
-            if (sharedTransitionScope != null && animatedVisibilityScope != null) {
-                with(sharedTransitionScope) {
-                    Modifier.sharedElement(
-                        sharedContentState = rememberSharedContentState(key = "album_art_${song.id}"),
-                        animatedVisibilityScope = animatedVisibilityScope
-                    )
-                }
-            } else Modifier
-
-        // Animación del CAMBIO DE CANCIÓN — SHAPE REVEAL (M3 Expressive, elegida tras
-        // probar variantes): la carátula nueva se revela desde el centro con una VENTANA
-        // MaterialShapes (cookie) que crece hasta cubrir el cuadrado; la imagen queda
-        // estática (escala inversa) — solo crece la ventana. La carátula MOSTRADA va por
-        // detrás del estado real para poder coreografiar el intercambio.
-        var displayedArt by remember { mutableStateOf(song.id to song.albumArtUriString) }
-        var incomingArt by remember { mutableStateOf<Pair<String, String?>?>(null) }
-        val reveal = remember { Animatable(0f) }
-
-        LaunchedEffect(song.id, song.albumArtUriString) {
-            val target = song.id to song.albumArtUriString
-            if (displayedArt == target) return@LaunchedEffect
-            incomingArt = target
-            reveal.snapTo(0f)
-            reveal.animateTo(
-                1f,
-                spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)
-            )
-            displayedArt = target
-            incomingArt = null
-        }
-
-        val revealShape = MaterialShapes.Cookie12Sided.toShape()
-        Surface(
-            modifier = Modifier
-                .aspectRatio(1f)
-                .then(sharedElementModifier)
-                .graphicsLayer {
-                    scaleX = artScale
-                    scaleY = artScale
-                }
-                .pointerInput(Unit) { detectTapGestures(onLongPress = { onTap() }) },
-            shape = AlbumArtMorphShape(artMorphProgress),
-            color = MaterialTheme.colorScheme.surfaceContainerHighest
-        ) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                // Carátula base (la mostrada).
-                NowPlayingArtImage(
-                    artId = displayedArt.first,
-                    artUri = displayedArt.second,
-                    albumName = song.album,
-                    variantColor = variantColor
-                )
-
-                // Capa entrante del reveal: ventana cookie creciente + escala
-                // inversa en la imagen para que solo se mueva la ventana.
-                val inc = incomingArt
-                if (inc != null) {
-                    Box(
-                        modifier = Modifier
-                            .matchParentSize()
-                            .graphicsLayer {
-                                val s = 0.08f + reveal.value * 1.55f
-                                scaleX = s
-                                scaleY = s
-                                clip = true
-                                shape = revealShape
-                            }
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .graphicsLayer {
-                                    val s = 0.08f + reveal.value * 1.55f
-                                    scaleX = 1f / s
-                                    scaleY = 1f / s
-                                }
-                        ) {
-                            NowPlayingArtImage(
-                                artId = inc.first,
-                                artUri = inc.second,
-                                albumName = song.album,
-                                variantColor = variantColor
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun NowPlayingArtImage(
-    artId: String,
-    artUri: String?,
-    albumName: String,
-    variantColor: Color
-) {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        if (artUri != null) {
-            val context = LocalContext.current
-            // memoryCacheKey/diskCacheKey por song.id: reusa bitmap decodificado entre
-            // navegaciones Library ↔ NowPlaying y con el MiniPlayer (misma canción).
-            val request = remember(artId, artUri) {
-                ImageRequest.Builder(context)
-                    .data(artUri)
-                    .crossfade(false)
-                    .size(800)
-                    .memoryCacheKey("song_art_$artId")
-                    .diskCacheKey("song_art_$artId")
-                    .build()
-            }
-            AsyncImage(
-                model = request,
-                contentDescription = stringResource(R.string.album_art_desc, albumName),
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            MaterialSymbol("music_note", size = 80.sp, color = variantColor)
-        }
-    }
-}
-
-@Composable
-internal fun SongInfoSection(
-    song: Song,
-    contentColor: Color,
-    variantColor: Color,
-    isFavorite: Boolean,
-    playButtonColor: Color,
-    onToggleFavorite: () -> Unit,
-    onArtistClick: (String) -> Unit,
-    onAlbumClick: (String) -> Unit
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        // 3 líneas (título / artista / álbum): artista y álbum son CLICKEABLES por separado
-        // y navegan a sus pantallas de detalle.
-        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-            Text(
-                text = song.title,
-                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Medium),
-                color = contentColor,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE)
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = song.artist.ifBlank { stringResource(R.string.common_unknown_artist) },
-                style = MaterialTheme.typography.titleMedium,
-                color = variantColor,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .clickable { onArtistClick(song.artist) }
-                    .padding(vertical = 2.dp)
-            )
-            if (song.album.isNotBlank()) {
-                Text(
-                    text = song.album,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = variantColor.copy(alpha = variantColor.alpha * 0.8f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { onAlbumClick(song.album) }
-                        .padding(vertical = 2.dp)
-                )
-            }
-        }
-
-        // Favorito: PÍLDORA VERTICAL (misma familia que los overflow de las listas) con
-        // rebote del corazón al marcar/desmarcar.
-        FavoriteHeartPill(
-            isFavorite = isFavorite,
-            onToggle = onToggleFavorite
-        )
-    }
-}
-
-/**
- * Botón de favorito en PÍLDORA VERTICAL: contenedor tonal translúcido inactivo que se
- * rellena con el acento del álbum al activarse, y el corazón da un pequeño REBOTE
- * (snap 0.7 → spring con overshoot) en cada cambio de estado.
- *
- * Tamaño de spec LARGE-narrow: 64×96 con icono de 32.
- */
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
-@Composable
-private fun FavoriteHeartPill(
-    isFavorite: Boolean,
-    onToggle: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val haptic = LocalHapticFeedback.current
-    val scope = rememberCoroutineScope()
-    val heartScale = remember { Animatable(1f) }
-    // TONAL toggle de M3 (tokens): activo = secondary/onSecondary; inactivo = secondaryContainer/
-    // onSecondaryContainer. El activo NO usa primary — ese es el color del PLAY, por eso antes el
-    // corazón activo se veía idéntico al play.
-    val activeContainer = MaterialTheme.colorScheme.secondary
-    val onActive = MaterialTheme.colorScheme.onSecondary
-    val tonalContainer = MaterialTheme.colorScheme.secondaryContainer
-    val onTonalContainer = MaterialTheme.colorScheme.onSecondaryContainer
-    val container by animateColorAsState(
-        targetValue = if (isFavorite) activeContainer else tonalContainer,
-        animationSpec = tween(durationMillis = 250),
-        label = "heartContainer"
-    )
-    val heartColor by animateColorAsState(
-        targetValue = if (isFavorite) onActive else onTonalContainer,
-        animationSpec = tween(durationMillis = 250),
-        label = "heartContent"
-    )
-    val favoriteDesc = if (isFavorite) stringResource(R.string.common_remove_from_favorites) else stringResource(R.string.common_add_to_favorites)
-    // FilledIconToggleButton REAL (M3 Expressive: shape-morph presionado/checked, como los
-    // toggles de la floating toolbar) en vez de Surface artesanal. Los colores animados del
-    // acento se pasan idénticos para ambos estados: la transición de color sigue siendo
-    // nuestra (tween 250), el componente aporta ripple/formas/semántica de toggle.
-    // Morph INVERTIDO a petición del usuario: squircle en reposo → redondo (píldora) activo.
-    FilledIconToggleButton(
-        checked = isFavorite,
-        onCheckedChange = {
-            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-            onToggle()
-            scope.launch {
-                heartScale.snapTo(0.7f)
-                heartScale.animateTo(
-                    1f,
-                    spring(
-                        dampingRatio = Spring.DampingRatioMediumBouncy,
-                        stiffness = Spring.StiffnessMedium
-                    )
-                )
-            }
-        },
-        shapes = IconButtonDefaults.toggleableShapes(
-            shape = RoundedCornerShape(percent = 30),
-            pressedShape = RoundedCornerShape(percent = 20),
-            checkedShape = RoundedCornerShape(percent = 50)
-        ),
-        colors = IconButtonDefaults.filledIconToggleButtonColors(
-            containerColor = container,
-            contentColor = heartColor,
-            checkedContainerColor = container,
-            checkedContentColor = heartColor
-        ),
-        modifier = modifier
-            .width(64.dp)
-            .height(96.dp)
-            .semantics {
-                contentDescription = favoriteDesc
-            }
-    ) {
-        Box(
-            modifier = Modifier.graphicsLayer {
-                scaleX = heartScale.value
-                scaleY = heartScale.value
-            }
-        ) {
-            MaterialSymbol("favorite", fill = isFavorite, color = heartColor, size = 32.sp)
-        }
-    }
 }
 
 /**
@@ -1217,6 +748,14 @@ internal fun BottomActionBar(
     onSleepTimerClick: () -> Unit,
     repeatMode: RepeatMode,
     onRepeatToggle: () -> Unit,
+    /**
+     * Estado del aleatorio. NO trae un botón propio: lo MUESTRA el de la cola, que es lo que el
+     * aleatorio modifica. Así el estado se ve de un vistazo sin sumar un control más a una barra
+     * llena, y el toggle sigue viviendo donde se entiende —dentro de la hoja de la cola—, en vez
+     * de competir con el play por el color de acento (que fue lo que lo sacó del transporte).
+     */
+    isShuffleEnabled: Boolean,
+    onShareSong: () -> Unit,
     config: List<ToolbarActionState>,
     modifier: Modifier = Modifier
 ) {
@@ -1283,10 +822,23 @@ internal fun BottomActionBar(
                         inactiveContent = toolbarContentColor,
                         isLoading = isLyricsLoading
                     )
-                    PlayerToolbarAction.QUEUE -> ExpressiveActionIcon(
-                        onClick = onShowQueue,
-                        icon = "queue_music",
-                        description = stringResource(R.string.np_view_queue),
+                    // El botón de la cola LLEVA el estado del aleatorio (ver [isShuffleEnabled]):
+                    // relleno activo e icono `shuffle` cuando la cola está barajada. El tap sigue
+                    // abriendo la hoja, que es donde está el toggle.
+                    PlayerToolbarAction.QUEUE -> ToolbarToggle(
+                        checked = isShuffleEnabled,
+                        onToggle = onShowQueue,
+                        icon = if (isShuffleEnabled) "shuffle" else "queue_music",
+                        description = if (isShuffleEnabled) stringResource(R.string.np_view_queue_shuffled)
+                        else stringResource(R.string.np_view_queue),
+                        checkedBg = checkedBg,
+                        activeContent = activeContent,
+                        inactiveContent = toolbarContentColor
+                    )
+                    PlayerToolbarAction.SHARE -> ExpressiveActionIcon(
+                        onClick = onShareSong,
+                        icon = "share",
+                        description = stringResource(R.string.np_share),
                         contentColor = toolbarContentColor,
                         morph = false
                     )
@@ -1356,20 +908,33 @@ internal fun BottomActionBar(
                             .size(48.dp)
                             .semantics { contentDescription = downloadingDesc }
                     ) {
-                        // LoadingIndicator expressive (morfea entre MaterialShapes) en sus dos
-                        // variantes: determinada con progreso, indeterminada al preparar. Antes
-                        // eran CircularProgressIndicator clásicos, el único indicador de
-                        // descarga que quedaba fuera del lenguaje Expressive.
+                        // Onda circular expressive en sus dos variantes: determinada con progreso,
+                        // indeterminada al preparar. Es el MISMO lenguaje que los indicadores
+                        // lineales de sync y del gestor de descargas (antes acá había un
+                        // LoadingIndicator, que morfea formas en vez de ondular).
+                        val density = LocalDensity.current
+                        val waveStroke = remember(density) {
+                            Stroke(
+                                width = with(density) { ToolbarDownloadStrokeWidth.toPx() },
+                                cap = StrokeCap.Round
+                            )
+                        }
                         if (downloadProgress != null && downloadProgress > 0f) {
-                            LoadingIndicator(
+                            CircularWavyProgressIndicator(
                                 progress = { downloadProgress },
                                 modifier = Modifier.size(ToolbarDownloadIndicatorSize),
-                                color = playButtonColor
+                                color = playButtonColor,
+                                trackColor = playButtonColor.copy(alpha = TOOLBAR_DOWNLOAD_TRACK_ALPHA),
+                                stroke = waveStroke,
+                                trackStroke = waveStroke
                             )
                         } else {
-                            LoadingIndicator(
+                            CircularWavyProgressIndicator(
                                 modifier = Modifier.size(ToolbarDownloadIndicatorSize),
-                                color = playButtonColor
+                                color = playButtonColor,
+                                trackColor = playButtonColor.copy(alpha = TOOLBAR_DOWNLOAD_TRACK_ALPHA),
+                                stroke = waveStroke,
+                                trackStroke = waveStroke
                             )
                         }
                         MaterialSymbol("download", size = 14.sp, color = toolbarContentColor)
@@ -1418,9 +983,24 @@ internal fun BottomActionBar(
                                     onClick = { showMenu = false; onLyricsToggle() }
                                 )
                                 PlayerToolbarAction.QUEUE -> DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.np_view_queue)) },
-                                    leadingIcon = { MaterialSymbol("queue_music") },
+                                    text = {
+                                        Text(
+                                            if (isShuffleEnabled) stringResource(R.string.np_view_queue_shuffled)
+                                            else stringResource(R.string.np_view_queue)
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        MaterialSymbol(
+                                            if (isShuffleEnabled) "shuffle" else "queue_music",
+                                            fill = isShuffleEnabled
+                                        )
+                                    },
                                     onClick = { showMenu = false; onShowQueue() }
+                                )
+                                PlayerToolbarAction.SHARE -> DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.np_share)) },
+                                    leadingIcon = { MaterialSymbol("share") },
+                                    onClick = { showMenu = false; onShareSong() }
                                 )
                                 PlayerToolbarAction.KEEP_SCREEN_ON -> DropdownMenuItem(
                                     text = { Text(if (keepScreenOn) stringResource(R.string.np_screen_off) else stringResource(R.string.np_screen_on)) },
@@ -1462,430 +1042,33 @@ internal fun BottomActionBar(
         }
     }
 }
-
-    // --- Helper Composables ---
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-internal fun ProgressSlider(
-    currentPositionFlow: StateFlow<Long>,
-    durationFlow: StateFlow<Long>,
-    onSeek: (Long) -> Unit,
-    trackColor: Color,
-    inactiveTrackColor: Color,
-    textColor: Color,
-    formatText: String,
-    /** Ajustes → Reproducción: track ONDULADO (Expressive) en vez de la píldora plana. */
-    wavy: Boolean = false,
-    /** Solo para [wavy]: en pausa la onda se APLANA (como el reproductor de Android 16). */
-    isPlaying: Boolean = true,
-    modifier: Modifier = Modifier
-) {
-    val currentPosition by currentPositionFlow.collectAsStateWithLifecycle()
-    val duration by durationFlow.collectAsStateWithLifecycle()
-
-    var sliderPosition by remember { mutableFloatStateOf(0f) }
-    var isDragging by remember { mutableStateOf(false) }
-
-    val displayPosition by remember {
-        derivedStateOf {
-            if (isDragging) sliderPosition
-            else if (duration > 0) currentPosition.toFloat() / duration.toFloat() else 0f
-        }
-    }
-
-    Column(modifier = modifier.fillMaxWidth()) {
-        // Decisión final del usuario tras iterar: barra de 12.dp SIN gap (thumbTrackGapSize
-        // del spec descartado — con la canción por terminar el hueco se veía raro) y con el
-        // fill en píldora de BORDE REDONDO superpuesta al riel + stop indicator, dibujados a
-        // mano en el track. AL ARRASTRAR aparece el handle de barra vertical como indicador.
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(24.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Slider(
-                value = displayPosition,
-                onValueChange = { newValue ->
-                    isDragging = true
-                    sliderPosition = newValue
-                },
-                onValueChangeFinished = {
-                    isDragging = false
-                    onSeek((sliderPosition * duration).toLong())
-                },
-                modifier = Modifier.fillMaxWidth(),
-                thumb = {
-                    // "Palo" vertical (handle del spec) + GOTA con el tiempo, ambos solo
-                    // mientras se arrastra. La gota es el pin clásico: cuadrado con 3 esquinas
-                    // al 50% rotado 45° (la esquina viva apunta al palo), texto contra-rotado.
-                    val thumbAlpha by animateFloatAsState(
-                        targetValue = if (isDragging) 1f else 0f,
-                        animationSpec = tween(durationMillis = 150, easing = FastOutSlowInEasing),
-                        label = "thumbAlpha"
-                    )
-                    Box(
-                        modifier = Modifier.size(width = 5.dp, height = 26.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .matchParentSize()
-                                .graphicsLayer { alpha = thumbAlpha }
-                                .background(Color.White, RoundedCornerShape(percent = 50))
-                        )
-                        // requiredSize + offset: flota sobre el palo sin alterar la medida
-                        // del thumb (que posiciona el gap/track del slider).
-                        Box(
-                            modifier = Modifier
-                                .requiredSize(46.dp)
-                                .offset(y = (-52).dp)
-                                .graphicsLayer {
-                                    alpha = thumbAlpha
-                                    rotationZ = 45f
-                                }
-                                .background(
-                                    trackColor,
-                                    RoundedCornerShape(
-                                        topStartPercent = 50, topEndPercent = 50,
-                                        bottomEndPercent = 0, bottomStartPercent = 50
-                                    )
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = formatTime((sliderPosition * duration).toLong()),
-                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                                color = onContainerColor(trackColor),
-                                modifier = Modifier.graphicsLayer { rotationZ = -45f }
-                            )
-                        }
-                    }
-                },
-                track = { sliderState ->
-                    val activeColor = trackColor
-                    val inactiveColor = inactiveTrackColor.copy(alpha = 0.25f)
-                    if (wavy) {
-                        WavyTrack(
-                            fraction = sliderState.value.coerceIn(0f, 1f),
-                            isPlaying = isPlaying,
-                            isDragging = isDragging,
-                            activeColor = activeColor,
-                            inactiveColor = inactiveColor
-                        )
-                    } else {
-                        // Track dibujado a mano: el fill es una PÍLDORA (borde redondo) superpuesta
-                        // al riel inactivo. El Track oficial no superpone segmentos: redondear su
-                        // borde interior (trackInsideCornerSize) con gap 0 deja muescas transparentes
-                        // donde las curvas del fill y del riel se separan.
-                        // Puntito de contraste dentro del fill (espejo del stop indicator del
-                        // otro extremo): marca la posición actual aunque no haya thumb visible.
-                        val fillDotColor = onContainerColor(activeColor)
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                // Mismo alto que la onda: si divergen, alternar el ajuste de
-                                // Apariencia movería el bloque de controles.
-                                .height(ComponentConfig.ProgressTrackHeight)
-                                .clip(RoundedCornerShape(percent = 50))
-                                .drawBehind {
-                                    val dotRadius = ComponentConfig.ProgressStopIndicatorSize.toPx() / 2f
-                                    drawRect(inactiveColor)
-                                    // Ancho mínimo = un círculo completo, para que la píldora no se
-                                    // deforme al inicio de la canción.
-                                    val fillWidth = (size.width * sliderState.value.coerceIn(0f, 1f))
-                                        .coerceAtLeast(size.height)
-                                    drawRoundRect(
-                                        color = activeColor,
-                                        size = Size(fillWidth, size.height),
-                                        cornerRadius = CornerRadius(size.height / 2)
-                                    )
-                                    // Punta del fill: inset media altura, misma geometría que el
-                                    // stop indicator pero en color de contraste.
-                                    drawCircle(
-                                        color = fillDotColor,
-                                        radius = dotRadius,
-                                        center = Offset(fillWidth - size.height / 2, size.height / 2)
-                                    )
-                                    // Stop indicator del spec: inset media altura, oculto cuando
-                                    // el progreso lo alcanza (igual que el oficial).
-                                    val indicatorX = size.width - size.height / 2
-                                    if (fillWidth < indicatorX) {
-                                        drawCircle(
-                                            color = activeColor,
-                                            radius = dotRadius,
-                                            center = Offset(indicatorX, size.height / 2)
-                                        )
-                                    }
-                                }
-                        )
-                    }
-                }
-            )
-        }
-
-        Spacer(modifier = Modifier.height(6.dp))
-
-        // Tiempos a los extremos y FORMATO al medio. Un Box (no una Row con SpaceBetween):
-        // así el chip de formato queda centrado con la barra de verdad, sin depender de que
-        // los dos tiempos midan lo mismo (no lo hacen: "0:07" vs "12:41").
-        Box(modifier = Modifier.fillMaxWidth()) {
-            TimeChip(
-                text = formatTime(if (isDragging) (sliderPosition * duration).toLong() else currentPosition),
-                textColor = textColor,
-                modifier = Modifier.align(Alignment.CenterStart)
-            )
-            FormatChip(
-                formatText = formatText,
-                textColor = textColor,
-                accentColor = trackColor,
-                modifier = Modifier.align(Alignment.Center)
-            )
-            TimeChip(
-                text = formatTime(duration),
-                textColor = textColor,
-                modifier = Modifier.align(Alignment.CenterEnd)
-            )
-        }
-    }
-}
-
-/**
- * Track ONDULADO del reproductor (Ajustes → Apariencia). Dibujado a mano A PROPÓSITO: el
- * `LinearWavyProgressIndicator` oficial anima el aplanado con `DecreasingAmplitudeAnimationSpec`,
- * una constante INTERNA FIJA (500 ms) que no expone por parámetro — al pausar terminaba
- * siempre después que el resto de las animaciones del reproductor y el desfase se notaba.
- * Aquí la amplitud usa el MISMO spring que el morph del botón play, así todo cierra a la vez.
- *
- * La FASE avanza solo mientras suena y se congela al pausar (un `Animatable` cancelado
- * conserva su valor): sin salto al reanudar y sin gastar frames con el audio detenido.
- * Geometría igual que la píldora plana (alto 12dp, stop indicator) para que alternar el
- * ajuste no mueva el layout.
- */
-@Composable
-private fun WavyTrack(
-    fraction: Float,
-    isPlaying: Boolean,
-    /** El usuario está arrastrando: el track debe seguir al dedo sin interpolar. */
-    isDragging: Boolean,
-    activeColor: Color,
-    inactiveColor: Color
-) {
-    val amplitudeFraction by animateFloatAsState(
-        targetValue = if (isPlaying) 1f else 0f,
-        // MISMA rigidez que el morph del botón play (ver rememberPlayButtonSpin) para que
-        // ambos cierren a la vez; sin rebote, que en la amplitud invertiría la onda.
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
-        label = "waveAmplitude"
-    )
-    // Fase en "número de ondas recorridas"; el LaunchedEffect se cancela al pausar y el
-    // Animatable se queda donde estaba.
-    val phase = remember { Animatable(0f) }
-    LaunchedEffect(isPlaying) {
-        // UN ciclo por vuelta, en bucle. Antes se animaba a un horizonte lejano (600 ciclos ≈
-        // 10 min) en una sola llamada, y al agotarse la onda SE CONGELABA: seguía moviéndose la
-        // punta (que depende del progreso) pero no la ondulación, y solo se recuperaba al salir
-        // y volver al reproductor, que recomponía el efecto. Con canciones largas —Dream
-        // Theater— eso pasaba dentro de la misma pista.
-        //
-        // El `% 1f` antes de cada tramo mantiene la fase acotada: como entra en un seno, es
-        // periódica en 1 vuelta, así que reencuadrarla no produce ningún salto visible y evita
-        // que el Float pierda precisión decimal tras horas de reproducción.
-        while (isPlaying) {
-            phase.snapTo(phase.value % 1f)
-            phase.animateTo(
-                targetValue = phase.value + 1f,
-                animationSpec = tween(
-                    durationMillis = WAVE_MS_PER_CYCLE.toInt(),
-                    easing = LinearEasing
-                )
-            )
-        }
-    }
-
-    // El progreso llega a TIRONES: la posición se refresca una vez por segundo (el bucle de
-    // MusicPlayerScreen, deliberadamente lento para no despertar el main thread cada frame).
-    // En la píldora plana ese escalón se nota poco, pero aquí estira la onda de golpe y se ve
-    // como un tropiezo — más aún porque el ciclo de la onda dura también 1s y el salto caía
-    // siempre en la misma fase. Se interpola entre ticks a velocidad constante.
-    val smoothFraction = remember { Animatable(fraction) }
-    LaunchedEffect(fraction, isPlaying, isDragging) {
-        val jump = kotlin.math.abs(fraction - smoothFraction.value)
-        // Un seek (o el cambio de canción) NO se interpola: sería un barrido de un segundo
-        // recorriendo toda la barra. Tampoco en pausa, donde no hay avance que suavizar, ni
-        // arrastrando: ahí el track tiene que ir pegado al dedo y no un segundo por detrás.
-        if (!isPlaying || isDragging || jump > PROGRESS_SNAP_THRESHOLD) {
-            smoothFraction.snapTo(fraction)
-        } else {
-            smoothFraction.animateTo(
-                targetValue = fraction,
-                animationSpec = tween(POSITION_TICK_MS, easing = LinearEasing)
-            )
-        }
-    }
-    val drawnFraction = smoothFraction.value
-
-    // Path reutilizado: este bloque se redibuja en cada frame mientras suena.
-    val wavePath = remember { Path() }
-    Canvas(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(ComponentConfig.ProgressTrackHeight)
-    ) {
-        val centerY = size.height / 2f
-        val stroke = ComponentConfig.ProgressWaveStroke.toPx()
-        val radius = stroke / 2f
-        // El trazo es redondeado: el recorrido útil va de radio a ancho-radio, así los
-        // extremos no se salen del contenedor.
-        val startX = radius
-        val endX = size.width - radius
-        val activeEndX = startX + (endX - startX) * drawnFraction
-
-        // Riel inactivo: recto siempre (solo la parte reproducida ondula, igual que el spec).
-        // El gap de un trazo lo separa del fill; cuando ya no cabe, el riel simplemente no se
-        // dibuja (la canción está por terminar).
-        val inactiveStartX = activeEndX + stroke
-        if (inactiveStartX < endX) {
-            drawLine(
-                color = inactiveColor,
-                start = Offset(inactiveStartX, centerY),
-                end = Offset(endX, centerY),
-                strokeWidth = stroke,
-                cap = StrokeCap.Round
-            )
-            // Stop indicator del final (desaparece cuando el progreso lo alcanza).
-            drawCircle(color = inactiveColor, radius = radius, center = Offset(endX, centerY))
-        }
-
-        // Tramo reproducido: sinusoide muestreada; con amplitud 0 queda una recta perfecta.
-        val amplitudePx = ComponentConfig.ProgressWaveAmplitude.toPx() * amplitudeFraction
-        val wavelengthPx = ComponentConfig.ProgressWaveLength.toPx()
-        val phaseTurns = phase.value
-        // Y de la sinusoide en una x dada (x = startX ⇒ solo la fase, así el ARRANQUE también
-        // ondula: anclarlo a centerY lo dejaba clavado mientras el resto se movía, además de
-        // meter un pico vertical en el primer segmento).
-        fun waveY(atX: Float): Float {
-            val theta = ((atX - startX) / wavelengthPx + phaseTurns) * FULL_TURN_RADIANS
-            return centerY + sin(theta) * amplitudePx
-        }
-        val step = WAVE_SAMPLE_STEP_PX
-        wavePath.reset()
-        wavePath.moveTo(startX, waveY(startX))
-        var x = startX + step
-        while (x < activeEndX) {
-            wavePath.lineTo(x, waveY(x))
-            x += step
-        }
-        // Punto final exacto: con el paso de muestreo la punta quedaría corta.
-        wavePath.lineTo(activeEndX, waveY(activeEndX))
-        drawPath(
-            path = wavePath,
-            color = activeColor,
-            style = Stroke(width = stroke, cap = StrokeCap.Round, join = StrokeJoin.Round)
-        )
-    }
-}
-
 /**
  * Diámetro del indicador de descarga de la barra del NowPlaying. Va dentro del hueco de 48dp
  * de una acción y por debajo rodea al glifo `download` centrado, sin tocarlo.
- */
-private val ToolbarDownloadIndicatorSize = 32.dp
-
-// --- Constantes de la onda del track (ver [WavyTrack]) ---
-/** Cuánto tarda la onda en recorrer un ciclo: marca la velocidad del desplazamiento. */
-private const val WAVE_MS_PER_CYCLE = 1000f
-
-/**
- * Periodo con el que la UI refresca la posición de reproducción (el bucle de
- * `MusicPlayerScreen`). La interpolación del track dura exactamente eso: cada tick llega
- * justo cuando el anterior terminó de dibujarse, así el avance se ve continuo.
- */
-private const val POSITION_TICK_MS = 1000
-
-/**
- * Salto de progreso (fracción de la barra) por encima del cual NO se interpola. Un tick normal
- * avanza `1s / duración` — con la canción más corta de una biblioteca típica (~1 min) eso es
- * ~0.017, así que 0.05 deja pasar el avance natural y ataja solo los seeks y los cambios de
- * pista, que deben ser instantáneos.
- */
-private const val PROGRESS_SNAP_THRESHOLD = 0.05f
-
-/**
- * Paso de muestreo del path en píxeles. La sinusoide se dibuja como polilínea: 2px da una
- * curva suave a cualquier densidad sin inflar el número de segmentos.
- */
-private const val WAVE_SAMPLE_STEP_PX = 2f
-
-/** Una vuelta completa en radianes (la fase se mide en ciclos, no en radianes). */
-private const val FULL_TURN_RADIANS = 2f * PI.toFloat()
-
-/**
- * Formatos SIN PÉRDIDA que la app puede reportar. `M4A` queda FUERA a propósito: el contenedor
- * MP4 lleva tanto AAC (con pérdida, el caso normal) como ALAC (sin pérdida), y el formato se
- * deduce del MIME/extensión, que no distingue el códec de adentro. Ante la duda, no se promete
- * lossless.
- */
-private val LOSSLESS_FORMATS = setOf("FLAC", "WAV", "ALAC", "AIFF", "APE", "WV")
-
-/**
- * Chip de FORMATO del archivo (FLAC / MP3 / …), centrado entre los dos tiempos del slider.
- * Se separó del chip de origen: son dos datos distintos (QUÉ suena vs DE DÓNDE sale) y juntos
- * hacían una pastilla larga. Lleva el acento del álbum (el mismo del track activo de la barra
- * que tiene justo encima) para leerse como parte de ella y no como un tercer tiempo.
  *
- * SOLO TEXTO, sin icono (decisión del usuario): el formato ya se lee en la etiqueta. La calidad
- * se distingue por el peso del contenedor —los formatos sin pérdida ([LOSSLESS_FORMATS]) llevan
- * el acento más marcado— y por la descripción de accesibilidad.
+ * Son 36dp y no los 32 que llevaba con el `LoadingIndicator`: la onda gasta radio en la
+ * amplitud, así que con el diámetro viejo los crestones rozaban el glifo y, sobre todo, a menos
+ * de ~32dp la ondulación deja de leerse como onda (el spec la dimensiona a 48). Sigue holgado
+ * dentro del hueco de 48dp.
  */
-@Composable
-private fun FormatChip(
-    formatText: String,
-    textColor: Color,
-    accentColor: Color,
-    modifier: Modifier = Modifier
-) {
-    val isLossless = formatText.uppercase() in LOSSLESS_FORMATS
-    val desc = stringResource(
-        if (isLossless) R.string.np_format_desc_lossless else R.string.np_format_desc,
-        formatText
-    )
-    Surface(
-        shape = RoundedCornerShape(50),
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        modifier = modifier.semantics { contentDescription = desc }
-    ) {
-        Text(
-            text = formatText,
-            style = MaterialTheme.typography.labelSmall.copy(
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = 0.5.sp
-            ),
-            color = MaterialTheme.colorScheme.onSecondaryContainer,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
-        )
-    }
-}
+private val ToolbarDownloadIndicatorSize = 36.dp
+
 
 /**
- * Chip de tiempo del slider: pastilla suave derivada del propio color del texto (translúcida),
- * así funciona sobre cualquier punto del gradiente/carátula sin plumbing de haze.
+ * Opacidad del track del anillo de descarga. Se deriva del MISMO color del indicador (en vez de
+ * un rol del esquema) porque la barra flotante es vibrant: cualquier `surface*` cae encima del
+ * `primaryContainer` del contenedor y el track desaparece. Atenuado lo justo para que el recorrido
+ * pendiente se lea sin competir con la onda activa ni con el glifo.
  */
-@Composable
-private fun TimeChip(text: String, textColor: Color, modifier: Modifier = Modifier) {
-    Surface(
-        shape = RoundedCornerShape(50),
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        modifier = modifier
-    ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
-            color = MaterialTheme.colorScheme.onSecondaryContainer,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-        )
-    }
-}
+private const val TOOLBAR_DOWNLOAD_TRACK_ALPHA = 0.3f
+
+/**
+ * Grosor del trazo de la onda de descarga (indicador y track). Por debajo del default del
+ * componente (4dp de `activeThickness`), que a este diámetro se veía macizo y comía el hueco
+ * interior donde va el glifo. No bajar mucho más: con un trazo demasiado fino la onda se
+ * desdibuja sobre el contenedor de la barra.
+ */
+private val ToolbarDownloadStrokeWidth = 2.5.dp
+
+
+

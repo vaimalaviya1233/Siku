@@ -341,6 +341,18 @@ object AppModule {
         return MusicPreferences(context)
     }
 
+    /**
+     * Lectores de tags parciales, en orden de consulta. Añadir un formato nuevo (Ogg, MP4…) es
+     * sumarlo a esta lista: quien no encuentre lector cae al análisis completo de siempre.
+     */
+    @Provides
+    @Singleton
+    fun providePartialTagReaders(
+        flac: com.qhana.siku.data.util.tags.FlacTagReader,
+        id3: com.qhana.siku.data.util.tags.Id3v2TagReader
+    ): com.qhana.siku.data.util.tags.PartialTagReaders =
+        com.qhana.siku.data.util.tags.PartialTagReaders(listOf(flac, id3))
+
     @Provides
     @Singleton
     fun provideArtworkRepository(

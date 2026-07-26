@@ -46,20 +46,29 @@ class PlaylistManager @Inject constructor() {
         }
     }
 
-    fun updateSong(newSong: Song): Boolean {
+    /**
+     * Reemplaza una canción de la cola conservando orden e índice actual.
+     *
+     * @return la posición que ocupa en la cola, o -1 si no está. El índice, y no un booleano,
+     *         porque quien actualiza la lista lógica tiene que replicar el cambio en la cola de
+     *         ExoPlayer —que es posicional— y volver a buscarlo sería repetir esta misma búsqueda.
+     */
+    fun updateSong(newSong: Song): Int {
         synchronized(lock) {
             val index = internalPlaylist.indexOfFirst { it.id == newSong.id }
-            if (index == -1) return false
+            if (index == -1) return -1
 
             val newList = internalPlaylist.toMutableList().also { it[index] = newSong }
             internalPlaylist = newList
             _playlist.value = newList
 
-            // Update original playlist if not shuffled
-            if (!_isShuffleEnabled.value) {
-                originalPlaylist = newList.toList()
+            // El orden original guarda los MISMOS objetos: si se actualiza solo la cola visible,
+            // apagar el aleatorio restauraría la versión vieja de la canción.
+            val originalIdx = originalPlaylist.indexOfFirst { it.id == newSong.id }
+            if (originalIdx >= 0) {
+                originalPlaylist = originalPlaylist.toMutableList().also { it[originalIdx] = newSong }
             }
-            return true
+            return index
         }
     }
 

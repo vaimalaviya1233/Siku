@@ -42,7 +42,9 @@ class OneDriveMusicSource @Inject constructor(
     private val musicPreferences: MusicPreferences,
     private val artworkHealingManager: ArtworkHealingManager,
     private val oneDriveRepository: OneDriveRepository,
-    private val urlCache: UrlCache
+    private val urlCache: UrlCache,
+    private val rangeFetcher: com.qhana.siku.data.util.tags.HttpRangeFetcher,
+    private val tagReaders: com.qhana.siku.data.util.tags.PartialTagReaders
 ) : MusicSource {
 
     override val type: SourceType = SourceType.ONEDRIVE
@@ -83,13 +85,56 @@ class OneDriveMusicSource @Inject constructor(
     override suspend fun extractMetadata(song: Song): Song = oneDriveRepository.extractMetadata(song)
 
     /**
+     * Lee los tags pidiendo solo la cabecera del archivo con `Range` (ver [PartialTagReader]).
+     * Devuelve `null` —y el orquestador sigue como siempre— si el formato no tiene lector, si no
+     * se pudo resolver la URL o si la respuesta no trajo tags reconocibles.
+     */
+    override suspend fun fetchLightMetadata(song: Song): com.qhana.siku.data.source.LightMetadata? {
+        val extension = (song.relativePath ?: song.title).substringAfterLast('.', "")
+        val reader = tagReaders.forExtension(extension) ?: return null
+        val url = resolveDownloadUrl(song) ?: return null
+
+        val fragment = rangeFetcher.fetch(url, 0L, reader.preferredFragmentBytes) ?: return null
+        val tags = reader.read(fragment) ?: return null
+        if (!tags.hasText && tags.pictureData == null && tags.pictureRange == null) return null
+
+        // La portada que no cabía en el fragmento se deja como FUNCIÓN: el orquestador la invoca
+        // solo si ese álbum aún no tiene imagen, así una portada cuesta una petición por álbum y
+        // no una por canción. La URL se resuelve de nuevo dentro por si expiró (viven ~1h).
+        val pictureRange = tags.pictureRange
+        val fetchArtwork: (suspend () -> ByteArray?)? = if (pictureRange == null) null else {
+            {
+                val fresh = resolveDownloadUrl(song, forceRefresh = true)
+                if (fresh == null) null
+                else rangeFetcher.fetch(
+                    fresh,
+                    pictureRange.first,
+                    (pictureRange.last - pictureRange.first + 1).toInt()
+                )
+            }
+        }
+
+        return com.qhana.siku.data.source.LightMetadata(
+            title = tags.title,
+            artist = tags.artist,
+            album = tags.album,
+            albumArtist = tags.albumArtist,
+            genre = tags.genre,
+            durationMs = tags.durationMs,
+            artwork = tags.pictureData,
+            fetchArtwork = fetchArtwork
+        )
+    }
+
+    /**
      * Incremental delta sync: detecta altas, modificaciones y bajas usando el delta token.
      * Devuelve (added, deleted). Movido tal cual desde SyncManager (Paso 2 de la abstracción).
      */
     private suspend fun syncWithDelta(token: String, ctx: DiscoverContext): DiscoverResult {
         // $top=999 reduce roundtrips en bibliotecas grandes (default ~200 items/página).
         // parentReference: carpeta de cada item, para la ruta relativa de duplicados (v23).
-        val initialUrl = "https://graph.microsoft.com/v1.0/me/drive/root:/Music:/delta?select=id,name,file,deleted,size,parentReference,@microsoft.graph.downloadUrl&\$top=999"
+        val folder = musicPreferences.loadOneDriveFolderPath()
+        val initialUrl = deltaUrlFor(folder)
         val savedToken = musicPreferences.loadDeltaToken()
         val isFullScan = savedToken == null
         var nextLink = savedToken ?: initialUrl
@@ -111,10 +156,16 @@ class OneDriveMusicSource @Inject constructor(
 
         while (hasMore && !ctx.isStopped()) {
             val response = try { oneDriveApi.getDelta(token, nextLink) } catch (e: HttpException) {
-                if (e.code() == 410) {
-                    musicPreferences.clearDeltaToken()
-                    oneDriveApi.getDelta(token, initialUrl)
-                } else throw e
+                when (e.code()) {
+                    410 -> {
+                        musicPreferences.clearDeltaToken()
+                        oneDriveApi.getDelta(token, initialUrl)
+                    }
+                    // La carpeta configurada no existe (o la renombraron). Sin esto el usuario
+                    // veía un "HTTP 404" sin pista de que el problema es la carpeta elegida.
+                    404 -> throw SourceFolderMissingException(folder)
+                    else -> throw e
+                }
             }
             val upsert = ArrayList<Song>()
             val delete = ArrayList<String>()
@@ -127,7 +178,7 @@ class OneDriveMusicSource @Inject constructor(
                     delete.add(id)
                 } else if (item.file != null && isAudioFile(item.name ?: "")) {
                     allRemoteIds?.add(id)
-                    val relPath = relativePathOf(item)
+                    val relPath = relativePathOf(item, folder)
                     // PREFER_LOCAL: existe copia local de esta ruta → no se importa. Va
                     // DESPUÉS de allRemoteIds.add: si una copia vieja sigue en la BD, la
                     // reconciliación no debe borrarla a lo bruto (el dedupe pass la retira
@@ -183,16 +234,31 @@ class OneDriveMusicSource @Inject constructor(
     }
 
     /**
-     * Ruta relativa a la raíz del scan (/Music), normalizada (ver [normalizeRelativePath]).
-     * parentReference.path llega como "/drive/root:/Music/Sub"; se recorta hasta "root:" y
-     * se descuenta el segmento "music" de la raíz. null si el item no trae carpeta.
+     * URL del delta para la carpeta elegida. Vacía = raíz del drive, que tiene otra sintaxis en
+     * Graph (`/root/delta`, sin los `:` del path). La ruta se codifica preservando las barras:
+     * un `Uri.encode` a secas convertiría `/` en `%2F` y Graph dejaría de ver la jerarquía.
      */
-    private fun relativePathOf(item: com.qhana.siku.data.remote.OneDriveItem): String? {
+    private fun deltaUrlFor(folder: String): String {
+        val clean = folder.trim().trim('/')
+        val root = if (clean.isEmpty()) "root" else "root:/${android.net.Uri.encode(clean, "/")}:"
+        return "$GRAPH_DRIVE/$root/delta?select=id,name,file,deleted,size,parentReference,@microsoft.graph.downloadUrl&\$top=999"
+    }
+
+    /**
+     * Ruta relativa a la raíz del scan, normalizada (ver [normalizeRelativePath]).
+     * parentReference.path llega como "/drive/root:/Music/Sub"; se recorta hasta "root:" y se
+     * descuenta la carpeta raíz configurada. null si el item no trae carpeta.
+     */
+    private fun relativePathOf(item: com.qhana.siku.data.remote.OneDriveItem, rootFolder: String): String? {
         val name = item.name ?: return null
         val parent = item.parentReference?.path ?: return null
         val fromRoot = parent.substringAfter("root:", "")
         val normalized = normalizeRelativePath("$fromRoot/$name")
-        return normalized.removePrefix("music/").takeIf { it.isNotBlank() }
+        // El prefijo se calcula con la MISMA normalización que la ruta (minúsculas, sin bordes):
+        // comparar contra la carpeta cruda fallaría con "Música" o con mayúsculas distintas.
+        val prefix = normalizeRelativePath(rootFolder)
+        val relative = if (prefix.isEmpty()) normalized else normalized.removePrefix("$prefix/")
+        return relative.takeIf { it.isNotBlank() }
     }
 
     private fun isAudioFile(name: String): Boolean {
@@ -202,5 +268,6 @@ class OneDriveMusicSource @Inject constructor(
 
     private companion object {
         private const val TAG = "OneDriveMusicSource"
+        private const val GRAPH_DRIVE = "https://graph.microsoft.com/v1.0/me/drive"
     }
 }

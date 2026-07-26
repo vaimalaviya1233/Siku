@@ -1,17 +1,13 @@
 package com.qhana.siku
 
-import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Color as AndroidColor
-import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.fillMaxSize
@@ -24,7 +20,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -32,7 +27,6 @@ import com.qhana.siku.data.util.AppLogger
 import com.qhana.siku.data.util.SnackbarManager
 import com.qhana.siku.service.MusicPlaybackService
 import com.qhana.siku.ui.MusicPlayerScreen
-import com.qhana.siku.ui.screens.PermissionScreen
 import com.qhana.siku.ui.theme.MusicPlayerTheme
 import com.qhana.siku.ui.theme.paletteStyleFromName
 import com.qhana.siku.ui.viewmodel.AuthViewModel
@@ -42,10 +36,16 @@ import javax.inject.Inject
 
 /**
  * Única Activity de la app. Se limita a lo que SOLO una Activity puede hacer: splash,
- * edge-to-edge, permisos de runtime, window flags (keep-screen-on) y deep link del
- * NowPlaying desde la notificación. Toda la composición vive en [MusicPlayerScreen]
- * (ui/MusicPlayerScreen.kt) — el NavHost en ui/navigation/AppNavHost.kt y la capa
- * flotante del reproductor en ui/PlayerOverlay.kt, coordinadas por MusicAppState.
+ * edge-to-edge, window flags (keep-screen-on) y deep link del NowPlaying desde la
+ * notificación. Toda la composición vive en [MusicPlayerScreen] (ui/MusicPlayerScreen.kt)
+ * — el NavHost en ui/navigation/AppNavHost.kt y la capa flotante del reproductor en
+ * ui/PlayerOverlay.kt, coordinadas por MusicAppState.
+ *
+ * **No hay puerta de permisos al arrancar.** La app entra directa al onboarding y cada permiso
+ * se pide donde se necesita: el de audio, solo si el usuario elige escanear todo el dispositivo
+ * (`rememberDeviceScanActivator`); el de notificaciones, al terminar el onboarding y sin bloquear.
+ * Cuando existía la puerta, denegar CUALQUIERA de los dos —incluido el de notificaciones, que no
+ * da acceso a nada— dejaba al usuario encerrado en la pantalla de permisos sin salida.
  */
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
@@ -62,14 +62,7 @@ class MainActivity : ComponentActivity() {
     private val authViewModel: AuthViewModel by viewModels()
 
     private var pendingNowPlayingNavigation by mutableStateOf(false)
-    private var hasPermission by mutableStateOf(false)
     private var userWantsScreenOn = false
-
-    private val permissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        hasPermission = permissions.values.all { it }
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val splashScreen = installSplashScreen()
@@ -89,7 +82,6 @@ class MainActivity : ComponentActivity() {
 
         pendingNowPlayingNavigation = savedInstanceState == null &&
             intent?.action == MusicPlaybackService.ACTION_SHOW_NOW_PLAYING
-        hasPermission = checkAudioPermission()
 
         setContent {
             // Acento del álbum en reproducción como seed del ColorScheme global, para
@@ -137,23 +129,15 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    if (hasPermission) {
-                        MusicPlayerScreen(
-                            snackbarManager = snackbarManager,
-                            pendingNowPlayingNavigation = pendingNowPlayingNavigation,
-                            onNavigationHandled = { pendingNowPlayingNavigation = false },
-                            onKeepScreenOnChanged = { enabled ->
-                                userWantsScreenOn = enabled
-                                updateKeepScreenOn(enabled)
-                            }
-                        )
-                    } else {
-                        PermissionScreen(
-                            onRequestPermission = {
-                                permissionLauncher.launch(getRequiredPermissions())
-                            }
-                        )
-                    }
+                    MusicPlayerScreen(
+                        snackbarManager = snackbarManager,
+                        pendingNowPlayingNavigation = pendingNowPlayingNavigation,
+                        onNavigationHandled = { pendingNowPlayingNavigation = false },
+                        onKeepScreenOnChanged = { enabled ->
+                            userWantsScreenOn = enabled
+                            updateKeepScreenOn(enabled)
+                        }
+                    )
                 }
             }
         }
@@ -191,17 +175,4 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun checkAudioPermission(): Boolean {
-        return getRequiredPermissions().all {
-            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
-        }
-    }
-
-    private fun getRequiredPermissions(): Array<String> {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            arrayOf(Manifest.permission.READ_MEDIA_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
-        } else {
-            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
-        }
-    }
 }

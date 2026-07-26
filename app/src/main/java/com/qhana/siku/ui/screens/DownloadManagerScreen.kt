@@ -1,5 +1,6 @@
 package com.qhana.siku.ui.screens
 
+import android.text.format.Formatter
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -14,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.res.stringResource
@@ -33,6 +35,7 @@ import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.SongItem
 import com.qhana.siku.ui.components.rememberListItemShape
 import com.qhana.siku.ui.model.toUiModel
+import com.qhana.siku.ui.viewmodel.StorageUsage
 import com.qhana.siku.ui.viewmodel.SyncViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -49,6 +52,7 @@ fun DownloadManagerScreen(
     val failedDownloads by viewModel.failedDownloads.collectAsStateWithLifecycle()
     val controlState by viewModel.downloadControlState.collectAsStateWithLifecycle()
     val downloadBanner by viewModel.downloadBanner.collectAsStateWithLifecycle()
+    val storageUsage by viewModel.storageUsage.collectAsStateWithLifecycle()
 
     var selectedTabIndex by remember { mutableIntStateOf(0) }
     val tabs = listOf(
@@ -60,14 +64,10 @@ fun DownloadManagerScreen(
     Scaffold(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
+            // Sin subtitle: el progreso de la cola vive en la tarjeta de resumen (con su barra y
+            // el consumo frente al tope). Repetirlo en la barra era el mismo dato dos veces.
             TopAppBar(
                 title = { Text(stringResource(R.string.download_title)) },
-                subtitle = {
-                    if (syncStatus is SyncStatus.Downloading) {
-                        val s = syncStatus as SyncStatus.Downloading
-                        Text(stringResource(R.string.download_queue_progress, s.current, s.total))
-                    }
-                },
                 navigationIcon = {
                     IconButton(onClick = onBackClick) {
                         MaterialSymbol("arrow_back")
@@ -157,7 +157,7 @@ fun DownloadManagerScreen(
                     label = "TabTransition"
                 ) { targetIndex ->
                     when (targetIndex) {
-                        0 -> ActiveDownloadsTab(syncStatus, activeDownloads)
+                        0 -> ActiveDownloadsTab(syncStatus, activeDownloads, storageUsage)
                         1 -> FailedDownloadsTab(
                             failedDownloads = failedDownloads,
                             onRetryAll = { viewModel.retryFailedDownloads() },
@@ -170,48 +170,150 @@ fun DownloadManagerScreen(
     }
 }
 
+/**
+ * Resumen ÚNICO de la pestaña Activas: progreso de la cola (si hay descarga en curso) y consumo
+ * frente al tope, en la misma tarjeta.
+ *
+ * **PERSISTENTE a propósito.** Antes la tarjeta entera colgaba de `syncStatus is Downloading`, y
+ * ese estado solo lo publica el pipeline mientras corre: al terminar el sync queda en `Complete`
+ * (nunca vuelve a `Idle`), así que abrir el gestor con la cola ya drenada —o pausada, o esperando
+ * WiFi— dejaba la pantalla sin ningún resumen. El progreso de cola sigue siendo condicional (sin
+ * descarga no hay nada que medir), pero el almacenamiento se ve siempre.
+ *
+ * Los indicadores son LINEALES, así que van con `LinearWavyProgressIndicator` — criterio unificado
+ * de la app (los circulares de descarga usan `LoadingIndicator`).
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun OverallProgressCard(syncStatus: SyncStatus, usage: StorageUsage?) {
+    val downloading = syncStatus as? SyncStatus.Downloading
+    // Una biblioteca 100% local no descarga nada: sin cola ni bytes ni tope no hay nada que decir.
+    val hasStorageInfo = usage != null && (usage.usedBytes > 0L || usage.hasCap)
+    if (downloading == null && !hasStorageInfo) return
+
+    val context = LocalContext.current
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                MaterialSymbol("cloud_download", color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(
+                    stringResource(R.string.download_global_progress),
+                    style = MaterialTheme.typography.titleMedium
+                )
+            }
+
+            if (downloading != null) {
+                Spacer(modifier = Modifier.height(12.dp))
+                // Onda expressive determinada: MISMO indicador que los banners de progreso de la
+                // biblioteca (antes aquí era una barra plana clásica).
+                LinearWavyProgressIndicator(
+                    progress = {
+                        if (downloading.total > 0) downloading.current.toFloat() / downloading.total.toFloat()
+                        else 0f
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    stringResource(
+                        R.string.download_completed_progress,
+                        downloading.current,
+                        downloading.total
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            if (usage != null && hasStorageInfo) {
+                if (downloading != null) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+
+                val used = Formatter.formatShortFileSize(context, usage.usedBytes)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = stringResource(R.string.download_storage_section),
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    Text(
+                        text = if (usage.hasCap) {
+                            stringResource(
+                                R.string.download_storage_used_of,
+                                used,
+                                Formatter.formatShortFileSize(context, usage.capBytes)
+                            )
+                        } else {
+                            stringResource(R.string.download_storage_used_only, used)
+                        },
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                if (usage.hasCap) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    LinearWavyProgressIndicator(
+                        progress = { usage.fraction },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // Por encima del tope no se dice "quedan -2 GB": se nombra el exceso, que es
+                    // lo que el desalojo LRU irá liberando.
+                    val remaining = usage.remainingBytes
+                    Text(
+                        text = if (remaining >= 0L) {
+                            stringResource(
+                                R.string.download_storage_remaining,
+                                Formatter.formatShortFileSize(context, remaining)
+                            )
+                        } else {
+                            stringResource(
+                                R.string.download_storage_over_cap,
+                                Formatter.formatShortFileSize(context, -remaining)
+                            )
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
 @Composable
 fun ActiveDownloadsTab(
-    syncStatus: SyncStatus, 
-    activeDownloads: List<com.qhana.siku.data.coordinator.ActiveDownload>
+    syncStatus: SyncStatus,
+    activeDownloads: List<com.qhana.siku.data.coordinator.ActiveDownload>,
+    storageUsage: StorageUsage?
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(top = 8.dp, bottom = 32.dp)
     ) {
-        if (syncStatus is SyncStatus.Downloading) {
-            item {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            MaterialSymbol("cloud_download", color = MaterialTheme.colorScheme.primary)
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Text(stringResource(R.string.download_global_progress), style = MaterialTheme.typography.titleMedium)
-                        }
-                        Spacer(modifier = Modifier.height(12.dp))
-                        // Onda expressive determinada: MISMO indicador que los banners de
-                        // progreso de la biblioteca (antes aquí era una barra plana clásica).
-                        LinearWavyProgressIndicator(
-                            progress = { if (syncStatus.total > 0) syncStatus.current.toFloat() / syncStatus.total.toFloat() else 0f },
-                            modifier = Modifier.fillMaxWidth(),
-                            color = MaterialTheme.colorScheme.primary,
-                            trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            stringResource(R.string.download_completed_progress, syncStatus.current, syncStatus.total),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-        }
+        // Key estable y item SIEMPRE presente: antes la tarjeta se insertaba en la posición 0 solo
+        // al empezar a descargar, y LazyColumn ancla el viewport al ítem visible — así que el
+        // nuevo item 0 nacía POR ENCIMA del scroll y había que subir a mano para verlo. Estando
+        // siempre, al entrar se ve sin tocar nada (y sale de vista solo si el usuario scrollea).
+        item(key = "overall_progress") { OverallProgressCard(syncStatus, storageUsage) }
 
         if (activeDownloads.isEmpty()) {
             item {
@@ -256,7 +358,7 @@ fun ActiveDownloadsTab(
                                                         downloadProgress = download.progress,
                                                         showDuration = false,
                                                         showStatusIcon = false, // Keep side spinner hidden
-                                                        useFillAnimation = true, // Enable Filling Animation for Album Art
+                                                        useRingProgress = true, // aro de progreso alrededor de la carátula
                                                         trailingContent = {                            Text(
                                 "${(download.progress * 100).toInt()}%",
                                 style = MaterialTheme.typography.labelSmall,

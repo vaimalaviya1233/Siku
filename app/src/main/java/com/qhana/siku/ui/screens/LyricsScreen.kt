@@ -57,11 +57,31 @@ private enum class LyricsViewMode {
     SYNCED, PLAIN
 }
 
+/**
+ * Alto de la zona de desvanecimiento que hay SOBRE los controles flotantes: es el recorrido
+ * en el que el gradiente pasa de transparente a opaco. Generoso a propósito — con un recorrido
+ * corto el fundido no se lee como tal, sino como una LÍNEA horizontal que corta el texto justo
+ * encima de los botones.
+ */
+private val ControlsFadeHeight = 132.dp
+
+/** Separación de los controles flotantes respecto al borde inferior de la pantalla. */
+private val ControlsBottomInset = 48.dp
+
 // Paddings de SyncedLyricsView. Se reutilizan en `contentPadding` y en el cálculo
 // del scroll offset para centrar la línea activa en el área visible "limpia"
 // (entre el header y los controles flotantes), no en el viewport bruto.
 private val SyncedTopPadding = 32.dp
-private val SyncedBottomPadding = 180.dp
+
+/**
+ * El último verso tiene que poder quedar por ENCIMA del fundido, así que el padding inferior
+ * se deriva de la geometría de los controles en vez de fijarse a ojo: si cambia el alto del
+ * fade o el inset, el hueco reservado en la lista lo sigue solo.
+ */
+private val SyncedBottomPadding = ControlsFadeHeight + ControlsBottomInset + 24.dp
+
+/** Marca que LrcLib devuelve para las pistas sin letra por ser instrumentales. */
+private const val INSTRUMENTAL_SENTINEL = "[INSTRUMENTAL]"
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -82,6 +102,10 @@ fun LyricsScreen(
     onSeek: (Long) -> Unit,
     onClose: () -> Unit,
     onFetchLyrics: () -> Unit,
+    /** Abre el guardado de la letra (diálogo o guardado directo, según la preferencia). */
+    onSaveLyrics: () -> Unit,
+    /** Hay un guardado en curso: el botón se apaga para no dispararlo dos veces. */
+    isSavingLyrics: Boolean,
     onGoogleSearch: () -> Unit,
     onSearchManually: () -> Unit,
     onSelectCandidate: (LyricsCandidate) -> Unit,
@@ -164,8 +188,13 @@ fun LyricsScreen(
                     Spacer(modifier = Modifier.width(48.dp))
                 }
 
-                // Manual search + Refetch. Solo con letra en pantalla: en el estado vacío las
+                // Búsqueda manual + guardar. Solo con letra en pantalla: en el estado vacío las
                 // acciones las da EmptyStateView, adaptadas a la causa.
+                //
+                // Ya no hay botón de "volver a buscar": con la búsqueda manual al lado —que además
+                // deja ELEGIR la versión en vez de repetir la misma consulta— era el mismo gesto
+                // dos veces. Su hueco lo ocupa guardar. `onFetchLyrics` sigue vivo para el estado
+                // vacío, donde sí significa algo distinto: "busca, que aquí no hay nada".
                 if (!showEmptyState) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         ExpressiveActionIcon(
@@ -175,12 +204,14 @@ fun LyricsScreen(
                             contentColor = safeAccent.copy(alpha = if (isLyricsLoading) 0.3f else 1f),
                             enabled = !isLyricsLoading
                         )
+                        // Una canción marcada como instrumental no tiene nada que guardar.
+                        val canSave = !isLyricsLoading && !isSavingLyrics && lyrics != INSTRUMENTAL_SENTINEL
                         ExpressiveActionIcon(
-                            onClick = onFetchLyrics,
-                            icon = "refresh",
-                            description = stringResource(R.string.lyrics_refetch_desc),
-                            contentColor = safeAccent.copy(alpha = if (isLyricsLoading) 0.3f else 1f),
-                            enabled = !isLyricsLoading
+                            onClick = onSaveLyrics,
+                            icon = "save",
+                            description = stringResource(R.string.lyrics_save_desc),
+                            contentColor = safeAccent.copy(alpha = if (canSave) 1f else 0.3f),
+                            enabled = canSave
                         )
                     }
                 } else {
@@ -206,7 +237,7 @@ fun LyricsScreen(
                         // LoadingIndicator expressive: morfea entre MaterialShapes.
                         LoadingIndicator(color = accentColor, modifier = Modifier.size(56.dp))
                     }
-                } else if (lyrics == "[INSTRUMENTAL]") {
+                } else if (lyrics == INSTRUMENTAL_SENTINEL) {
                     InstrumentalView(contentColor)
                 } else if (showEmptyState) {
                     EmptyStateView(
@@ -251,20 +282,24 @@ fun LyricsScreen(
                 .fillMaxWidth()
                 // Gradiente Fade: glow de color en la transición, pero aterriza en el
                 // backgroundColor SÓLIDO (sin tinte de acento) para que los botones —que
-                // son de acento— contrasten más contra su fondo inmediato. Se vuelve opaco
-                // antes para separar mejor los controles del texto que scrollea detrás.
+                // son de acento— contrasten más contra su fondo inmediato.
+                //
+                // Los stops van EXPLÍCITOS y estirados, no repartidos por igual: con reparto
+                // uniforme el tramo transparente→opaco se consumía en la primera mitad y el
+                // glow quedaba comprimido en una franja estrecha que se leía como una LÍNEA
+                // de color entre el texto y los controles. Ahora el color entra pronto y muy
+                // suave, y lo opaco no llega hasta pegado a los botones.
                 .background(
                     Brush.verticalGradient(
-                        colors = listOf(
-                            backgroundColor.copy(alpha = 0f),   // Transparente
-                            bottomGlow.copy(alpha = 0.5f),      // Glow de color en la transición
-                            backgroundColor.copy(alpha = 0.9f), // Casi opaco (ya sin tinte)
-                            backgroundColor,                    // Opaco sólido
-                            backgroundColor                     // Opaco sólido (tapa el texto)
-                        )
+                        0.00f to backgroundColor.copy(alpha = 0f),   // Transparente
+                        0.28f to bottomGlow.copy(alpha = 0.30f),     // El color asoma
+                        0.50f to bottomGlow.copy(alpha = 0.62f),     // Glow pleno
+                        0.70f to backgroundColor.copy(alpha = 0.88f),// Casi opaco (ya sin tinte)
+                        0.86f to backgroundColor,                    // Opaco sólido
+                        1.00f to backgroundColor                     // Opaco sólido (tapa el texto)
                     )
                 )
-                .padding(bottom = 48.dp, top = 80.dp)
+                .padding(bottom = ControlsBottomInset, top = ControlsFadeHeight)
         ) {
              Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -622,7 +657,7 @@ private fun PlainLyricsView(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(scrollState)
-            .padding(top = 16.dp, bottom = 180.dp, start = 24.dp, end = 24.dp),
+            .padding(top = 16.dp, bottom = SyncedBottomPadding, start = 24.dp, end = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(

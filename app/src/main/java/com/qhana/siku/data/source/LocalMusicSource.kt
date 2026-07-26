@@ -1,9 +1,16 @@
 package com.qhana.siku.data.source
 
+import android.Manifest
+import android.content.ContentUris
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.qhana.siku.R
 import com.qhana.siku.data.config.AppConfig
 import com.qhana.siku.data.model.DuplicatePolicy
@@ -22,15 +29,29 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Fuente de música LOCAL: una carpeta elegida por el usuario vía SAF
- * (`ACTION_OPEN_DOCUMENT_TREE`, con permiso persistido), recorrida recursivamente.
+ * Fuente de música LOCAL, en dos modos EXCLUYENTES:
+ *
+ * - **Dispositivo**: todo lo que el sistema indexa como música (`MediaStore`, filtrado por
+ *   `IS_MUSIC`, que es lo que deja fuera tonos, notificaciones, alarmas y grabaciones). Es el
+ *   único modo que necesita permiso de lectura de audio.
+ * - **Carpetas**: una o varias carpetas elegidas vía SAF (`ACTION_OPEN_DOCUMENT_TREE`, permiso
+ *   persistido), recorridas recursivamente. No necesita permiso: el árbol se autoriza al elegirlo.
+ *
+ * Son excluyentes porque no son bibliotecas distintas sino dos formas de mirar el MISMO
+ * almacenamiento: activar el escaneo completo con carpetas puestas dejaría cada archivo indexado
+ * por dos caminos.
  *
  * Diferencias clave con una fuente cloud:
  * - **No descarga nada**: los archivos ya están en el dispositivo. Sus canciones se excluyen de
  *   la cola de descargas (ver `SongDao`, `sourceType != 'LOCAL'`).
  * - **No hay auth** ni resolución de URL firmada: la reproducción usa el `content://` directo.
- * - El **id es portable**: `local:<ruta relativa a la raíz>` (ver `SourceType.buildId`), así una
- *   playlist respaldada resuelve en otro dispositivo con la misma estructura de carpetas.
+ *
+ * **El id es portable y relativo al VOLUMEN**: `local:<volumen>/<ruta desde la raíz del volumen>`
+ * (p. ej. `local:primary/music/artista/x.flac`). Que no sea relativo a la carpeta elegida es
+ * load-bearing por dos motivos: con varias carpetas, dos archivos homónimos en la raíz de cada una
+ * producirían el MISMO id y uno pisaría al otro; y así el id que genera SAF coincide con el que
+ * genera MediaStore, de modo que cambiar de modo —o añadir una carpeta que ya estaba dentro de
+ * otra— no duplica filas ni rompe las playlists que apuntan a ellas.
  */
 @Singleton
 class LocalMusicSource @Inject constructor(
@@ -42,49 +63,130 @@ class LocalMusicSource @Inject constructor(
 
     override val type: SourceType = SourceType.LOCAL
 
-    /** La fuente local está configurada si el usuario ya eligió una carpeta. */
-    override suspend fun isConfigured(): Boolean = musicPreferences.loadLocalFolderUri() != null
+    /** Configurada si se escanea el dispositivo entero o si hay al menos una carpeta. */
+    override suspend fun isConfigured(): Boolean = scansWholeDevice() || folderUris().isNotEmpty()
 
-    /** Tree URI de la carpeta elegida, o null. */
-    fun folderUri(): String? = musicPreferences.loadLocalFolderUri()
+    /** ¿El modo activo es "toda la música del dispositivo"? */
+    fun scansWholeDevice(): Boolean = musicPreferences.loadScanWholeDevice()
+
+    /** Tree URIs de las carpetas elegidas (vacío en modo dispositivo). */
+    fun folderUris(): Set<String> = musicPreferences.loadLocalFolderUris()
 
     /**
-     * Fija la carpeta local. Si cambió respecto a la anterior, borra las canciones LOCAL previas:
-     * sus `content://` apuntaban al árbol viejo y ya no son reproducibles. Los ids son por ruta
-     * relativa, así que si la estructura coincide se recrean iguales y las playlists sobreviven.
+     * ¿Está concedido el permiso de lectura de audio? Solo lo exige el modo dispositivo; el modo
+     * carpetas funciona sin él. La UI lo consulta para pedirlo justo cuando hace falta.
      */
-    suspend fun setFolder(uri: String) {
-        val previous = musicPreferences.loadLocalFolderUri()
-        if (previous != null && previous != uri) deleteAllLocalSongs()
-        musicPreferences.saveLocalFolderUri(uri)
+    fun hasAudioPermission(): Boolean =
+        ContextCompat.checkSelfPermission(context, audioPermission()) == PackageManager.PERMISSION_GRANTED
+
+    /** Permiso de lectura de audio vigente para esta versión de Android. */
+    fun audioPermission(): String =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_AUDIO
+        else Manifest.permission.READ_EXTERNAL_STORAGE
+
+    // --- Configuración de las fuentes locales -------------------------------------------------
+
+    /**
+     * Añade una carpeta a escanear (el permiso persistido de SAF ya lo tomó la UI). Desactiva el
+     * escaneo completo: son excluyentes.
+     *
+     * NO borra nada. Las canciones que ya estuvieran indexadas bajo esa ruta conservan su id, así
+     * que si venían del escaneo completo simplemente siguen ahí, con sus playlists y su historial.
+     */
+    suspend fun addFolder(uri: String) {
+        // Una sola escritura: añadir carpeta y apagar el escaneo completo son el mismo cambio, y
+        // dos `update` encadenados podían pisarse en disco (la carpeta nueva no aparecía).
+        // clearStash: elegir una carpeta a mano fija el modo carpetas; el stash de "las carpetas de
+        // antes del escaneo del dispositivo" deja de tener sentido.
+        musicPreferences.saveLocalSources(folderUris() + uri, scanWholeDevice = false, clearStash = true)
     }
 
-    /** Quita la carpeta local y borra sus canciones de la biblioteca. */
-    suspend fun clearFolder() {
-        deleteAllLocalSongs()
-        musicPreferences.clearLocalFolderUri()
+    /**
+     * Deja de escanear [uri] y retira de la biblioteca las canciones que solo esa carpeta cubría
+     * (los archivos NO se tocan: son `content://`, y [IMusicRepository.deleteSongs] solo borra del
+     * disco los `file://` que descargó la app).
+     *
+     * Las que además caen bajo otra carpeta que sigue activa se conservan — el caso de carpetas
+     * anidadas, donde quitar la interior no debe vaciar lo que la exterior sigue viendo.
+     */
+    suspend fun removeFolder(uri: String) {
+        val remaining = folderUris() - uri
+        musicPreferences.saveLocalFolderUris(remaining)
+
+        // Era la última: ya no queda fuente local, así que se va TODA la música local. Filtrar por
+        // prefijo aquí dejaría atrás las filas que aún arrastren un id del esquema viejo (usuario
+        // que actualiza y quita la carpeta antes de que corra el primer escaneo).
+        if (remaining.isEmpty() && !scansWholeDevice()) {
+            clearLocalSongs()
+            return
+        }
+
+        val removedPrefix = idPrefixOf(uri) ?: return
+        val remainingPrefixes = remaining.mapNotNull { idPrefixOf(it) }
+        val orphans = musicRepository.getSongIdsBySourceType(SourceType.LOCAL).filter { id ->
+            id.startsWith(removedPrefix) && remainingPrefixes.none { id.startsWith(it) }
+        }
+        if (orphans.isNotEmpty()) musicRepository.deleteSongs(orphans)
     }
 
-    private suspend fun deleteAllLocalSongs() = musicRepository.clearSourceData(SourceType.LOCAL)
+    /**
+     * Activa o desactiva el escaneo del dispositivo completo. Los modos son excluyentes, pero
+     * activar el dispositivo NO tira las carpetas que había: las guarda en un stash para
+     * restaurarlas al apagarlo. Sin eso, un usuario con carpetas que probaba "escanear todo" se
+     * quedaba sin ninguna fuente al desactivarlo → biblioteca vacía → de vuelta al onboarding.
+     *
+     * No borra canciones al activar: los ids coinciden entre ambos modos y el escaneo reconcilia.
+     *
+     * Al desactivar se devuelven las carpetas guardadas. Si no había ninguna, apagar el dispositivo
+     * SÍ vacía la biblioteca local (era la única fuente local que quedaba). Devuelve las carpetas
+     * restauradas para que el caller decida si hace falta reescanear (reconciliar lo del dispositivo).
+     */
+    suspend fun setWholeDeviceScan(enabled: Boolean): Set<String> {
+        if (enabled) {
+            // Guardar las carpetas actuales (si las hay) y activar el dispositivo con la lista
+            // vacía, todo en UNA escritura (evita la race de dos volcados encadenados).
+            val current = folderUris()
+            musicPreferences.saveLocalSources(
+                folderUris = emptySet(),
+                scanWholeDevice = true,
+                stashFolders = current.takeIf { it.isNotEmpty() }
+            )
+            return emptySet()
+        }
+        val restored = musicPreferences.loadStashedFolderUris()
+        musicPreferences.saveLocalSources(
+            folderUris = restored,
+            scanWholeDevice = false,
+            clearStash = true
+        )
+        if (restored.isEmpty()) clearLocalSongs()
+        return restored
+    }
+
+    private suspend fun clearLocalSongs() = musicRepository.clearSourceData(SourceType.LOCAL)
+
+    // --- Descubrimiento -----------------------------------------------------------------------
 
     override suspend fun discover(force: Boolean, ctx: DiscoverContext): DiscoverResult =
         withContext(Dispatchers.IO) {
-            val treeUriStr = musicPreferences.loadLocalFolderUri()
-                ?: return@withContext DiscoverResult(0, 0)
-            val treeUri = Uri.parse(treeUriStr)
+            // Sin fuente local configurada no hay nada que descubrir NI que reconciliar: seguir
+            // adelante equivaldría a decir "no encontré nada", y la reconciliación vaciaría la
+            // biblioteca local. El registro solo escanea fuentes configuradas, pero esta guardia
+            // hace que la clase sea segura por sí sola.
+            if (!isConfigured()) return@withContext DiscoverResult(0, 0)
 
-            val found = try {
-                walkAudioFiles(treeUri, ctx)
+            val listing = try {
+                if (scansWholeDevice()) queryDeviceAudio(ctx) else walkFolders(ctx)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                // Carpeta borrada o permiso revocado: no reventamos el sync, sólo avisamos.
-                Log.w(TAG, "No se pudo recorrer la carpeta local: ${e.message}")
+                // Permiso revocado o proveedor caído: no reventamos el sync ni tocamos la BD.
+                Log.w(TAG, "No se pudo listar la música local: ${e.message}")
                 return@withContext DiscoverResult(0, 0)
             }
 
             val existingIds = musicRepository.getSongIdsBySourceType(SourceType.LOCAL).toHashSet()
-            val seenIds = HashSet<String>(found.size)
+            val seenIds = HashSet<String>(listing.files.size)
             var added = 0
 
             // Política de duplicados PREFER_CLOUD: los archivos cuya ruta ya existe en la
@@ -95,9 +197,9 @@ class LocalMusicSource @Inject constructor(
                 else emptySet()
 
             val batch = ArrayList<Song>(UPSERT_BATCH)
-            for (file in found) {
+            for (file in listing.files) {
                 if (ctx.isStopped()) break
-                if (skipPaths.isNotEmpty() && relativePathOf(file) in skipPaths) {
+                if (skipPaths.isNotEmpty() && file.relativePath in skipPaths) {
                     // Si una copia vieja sigue en la BD, protegerla de la reconciliación:
                     // la retira el dedupe pass del orquestador re-apuntando playlists.
                     if (file.id in existingIds) seenIds.add(file.id)
@@ -106,8 +208,16 @@ class LocalMusicSource @Inject constructor(
                 seenIds.add(file.id)
                 if (file.id in existingIds) continue // ya indexada: no re-analizamos
 
-                val song = buildSong(file)
-                batch.add(song)
+                // Antes de indexarla como nueva: ¿es la MISMA canción con el id del esquema
+                // viejo (relativo a la carpeta)? Entonces se migra en vez de duplicarse.
+                if (file.legacyId != null && file.legacyId in existingIds) {
+                    migrateLegacyId(file, file.legacyId)
+                    existingIds.remove(file.legacyId)
+                    existingIds.add(file.id)
+                    continue
+                }
+
+                batch.add(buildSong(file))
                 if (batch.size >= UPSERT_BATCH) {
                     added += flush(batch)
                     ctx.reportScanning(
@@ -118,10 +228,13 @@ class LocalMusicSource @Inject constructor(
             }
             if (batch.isNotEmpty() && !ctx.isStopped()) added += flush(batch)
 
-            // Reconciliación: lo que ya no está en la carpeta se borra de la BD.
+            // Reconciliación: lo que ya no está se borra de la BD, pero SOLO dentro del ámbito
+            // que de verdad se pudo listar. Sin este acotado, una carpeta con el permiso revocado
+            // (o el modo dispositivo sin permiso, que devuelve 0 filas sin lanzar) se llevaría por
+            // delante toda la biblioteca local.
             var deleted = 0
             if (!ctx.isStopped()) {
-                val orphans = existingIds.filter { it !in seenIds }
+                val orphans = existingIds.filter { it !in seenIds && listing.covers(it) }
                 if (orphans.isNotEmpty()) {
                     Log.d(TAG, "Reconciliación local: borrando ${orphans.size} huérfanas")
                     musicRepository.deleteSongs(orphans)
@@ -129,7 +242,7 @@ class LocalMusicSource @Inject constructor(
                 }
             }
 
-            Log.d(TAG, "discover local: added=$added, deleted=$deleted (archivos=${found.size})")
+            Log.d(TAG, "discover local: added=$added, deleted=$deleted (archivos=${listing.files.size})")
             DiscoverResult(added, deleted)
         }
 
@@ -143,7 +256,7 @@ class LocalMusicSource @Inject constructor(
         val fileName = song.id.substringAfterLast('/')
         val analysis = audioFileAnalyzer.analyzeContentUri(uri, fileName)
         if (!analysis.isValid) return@withContext song
-        val artUri = analysis.embeddedArt?.let { audioFileAnalyzer.persistEmbeddedArt(song.id, it) }
+        val artUri = analysis.embeddedArt?.let { audioFileAnalyzer.persistArtwork(it) }
         song.copy(
             title = analysis.title ?: song.title,
             artist = analysis.artist ?: song.artist,
@@ -160,38 +273,138 @@ class LocalMusicSource @Inject constructor(
         return (result as? com.qhana.siku.data.model.AppResult.Success)?.data ?: 0
     }
 
+    /**
+     * Reindexa una canción que estaba guardada con el id viejo (relativo a la carpeta elegida)
+     * bajo el id nuevo (relativo al volumen), conservando TODO lo que el usuario acumuló:
+     * referencias en playlists, historial de reproducción, colores y carátula.
+     *
+     * Mismo patrón que el dedupe entre fuentes: insertar la fila ganadora, re-apuntar las
+     * referencias y borrar la perdedora — en ese orden, que es el que respeta la FK de
+     * `playlist_song_cross_ref` (declarada `onUpdate NO ACTION`, así que un UPDATE del id
+     * directo violaría la constraint).
+     *
+     * **CUÁNDO SE PUEDE BORRAR ESTO**: dos releases después de la primera que traiga el esquema de
+     * id por volumen (o sea, la que suceda a `versionCode 2` / 1.0.1). No hay Play Console —la app
+     * se distribuye como APK en GitHub—, así que no existe forma de medir qué versiones siguen
+     * vivas: es una decisión por plazo, no por telemetría. Quien actualice desde 1.0.1 más tarde
+     * tendrá que reinstalar limpio.
+     *
+     * Y reinstalar limpio NO es gratis: se lleva playlists, favoritos, historial (`playCount`/
+     * `lastPlayedAt`) y colores manuales. `PlaylistBackupRepository` cubre las playlists, pero solo
+     * con OneDrive conectado. Por eso el plazo se cuenta desde la release que introduce el cambio
+     * y no desde antes.
+     *
+     * Solo afecta al modo CARPETAS: `legacyId` únicamente se calcula en `walkAudioFiles`, porque el
+     * modo dispositivo nació ya con el esquema por volumen.
+     */
+    private suspend fun migrateLegacyId(file: LocalAudioFile, legacyId: String) {
+        val existing = (musicRepository.getSongById(legacyId)
+            as? com.qhana.siku.data.model.AppResult.Success)?.data ?: return
+
+        // La carátula NO se toca: su archivo se llama por el contenido de la imagen, no por el id
+        // de la canción, así que renombrar la canción no la afecta. El URI viaja tal cual.
+        musicRepository.upsertSongs(
+            listOf(
+                existing.copy(
+                    id = file.id,
+                    path = file.uri.toString(),
+                    // También cambió de semántica: antes era relativa a la carpeta elegida y ahora
+                    // a la raíz del volumen. Sin actualizarla, el dedup entre fuentes compararía
+                    // rutas de dos esquemas distintos.
+                    relativePath = file.relativePath
+                )
+            )
+        )
+        musicRepository.repointSongRefs(legacyId, file.id)
+        musicRepository.mergePlayStats(legacyId, file.id)
+        musicRepository.deleteSongs(listOf(legacyId))
+    }
+
     private suspend fun buildSong(file: LocalAudioFile): Song {
         val analysis = audioFileAnalyzer.analyzeContentUri(file.uri, file.name)
-        val artUri = analysis.embeddedArt?.let { audioFileAnalyzer.persistEmbeddedArt(file.id, it) }
+        val artUri = analysis.embeddedArt?.let { audioFileAnalyzer.persistArtwork(it) }
         return Song(
             id = file.id,
-            title = analysis.title ?: file.name.substringBeforeLast('.'),
-            artist = analysis.artist ?: AppConfig.UNKNOWN_ARTIST,
-            album = analysis.album ?: AppConfig.UNKNOWN_ALBUM,
+            // Los tags del archivo mandan; lo que traiga el índice del sistema (modo dispositivo)
+            // solo rellena huecos, y el nombre del archivo es el último recurso.
+            title = analysis.title ?: file.title ?: file.name.substringBeforeLast('.'),
+            artist = analysis.artist ?: file.artist ?: AppConfig.UNKNOWN_ARTIST,
+            album = analysis.album ?: file.album ?: AppConfig.UNKNOWN_ALBUM,
             genre = analysis.genre,
-            duration = analysis.duration,
+            duration = if (analysis.duration > 0) analysis.duration else file.duration,
             path = file.uri.toString(),
             albumArtUri = artUri?.let { Uri.parse(it) },
             dateAdded = file.lastModified / 1000,
             remoteId = null,               // local: no hay handle remoto
             sourceType = SourceType.LOCAL,
             size = file.size,
-            relativePath = relativePathOf(file)
+            relativePath = file.relativePath
         )
     }
 
-    /** Ruta relativa normalizada del archivo (su id ES "local:<relpath>"). */
-    private fun relativePathOf(file: LocalAudioFile): String =
-        normalizeRelativePath(file.id.substringAfter(':'))
-
-    /** Un audio encontrado en el árbol SAF. */
+    /** Un audio encontrado en el dispositivo, ya identificado con su id definitivo. */
     private data class LocalAudioFile(
-        val id: String,          // `local:<ruta relativa>`
+        /** `local:<volumen>/<ruta>` */
+        val id: String,
+        /**
+         * Id que ESTA canción habría tenido con el esquema viejo (relativo a la carpeta que la
+         * contiene). Solo existe en el modo carpetas, que es el único que pudo haberlo escrito.
+         */
+        val legacyId: String?,
         val name: String,
-        val uri: Uri,            // content:// reproducible
+        val uri: Uri,                // content:// reproducible
         val size: Long,
-        val lastModified: Long
+        val lastModified: Long,      // epoch ms
+        /** Ruta desde la raíz del volumen, normalizada: es lo que compara el dedup entre fuentes. */
+        val relativePath: String,
+        // Metadata que el índice del sistema ya conoce (modo dispositivo); null en modo carpetas.
+        val title: String? = null,
+        val artist: String? = null,
+        val album: String? = null,
+        val duration: Long = 0L
     )
+
+    /**
+     * Resultado de listar, con el ÁMBITO de lo listado: [covers] dice si un id de la biblioteca
+     * cae dentro de lo que esta pasada pudo mirar, y por tanto si su ausencia significa de verdad
+     * "ya no está" o solo "no lo miramos".
+     */
+    private class Listing(val files: List<LocalAudioFile>, val covers: (String) -> Boolean)
+
+    // --- Modo carpetas (SAF) ------------------------------------------------------------------
+
+    private fun walkFolders(ctx: DiscoverContext): Listing {
+        val folders = folderUris()
+        val files = ArrayList<LocalAudioFile>(256)
+        val scannedPrefixes = ArrayList<String>()
+        var failed = false
+        for (uri in folders) {
+            if (ctx.isStopped()) break
+            val treeUri = Uri.parse(uri)
+            try {
+                files.addAll(walkAudioFiles(treeUri, ctx))
+                idPrefixOf(uri)?.let { scannedPrefixes.add(it) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Carpeta borrada o permiso revocado: se salta, y el ámbito de la reconciliación
+                // se acota para no borrar canciones que probablemente siguen existiendo.
+                Log.w(TAG, "No se pudo recorrer $uri: ${e.message}")
+                failed = true
+            }
+        }
+
+        // Un archivo puede aparecer por dos carpetas anidadas: mismo id, una sola fila.
+        val unique = files.distinctBy { it.id }
+
+        // Si se pudieron recorrer TODAS las carpetas configuradas, la foto es completa y cualquier
+        // canción local ausente sobra: su archivo desapareció, su carpeta ya no está configurada, o
+        // arrastra un id del esquema viejo cuyo archivo ya no está. Acotar el ámbito a los prefijos
+        // escaneados dejaría esas últimas como fantasmas para siempre, porque su id no empieza por
+        // ningún prefijo actual. Con alguna carpeta ilegible sí se acota: ahí no sabemos qué falta.
+        if (!failed && !ctx.isStopped()) return Listing(unique) { true }
+        return Listing(unique) { id -> scannedPrefixes.any { id.startsWith(it) } }
+    }
 
     /**
      * Recorre el árbol SAF sin recursión (pila explícita) consultando `ContentResolver`.
@@ -222,14 +435,17 @@ class LocalMusicSource @Inject constructor(
                     if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
                         stack.addLast(docId)
                     } else if (isAudioFile(name)) {
-                        val relPath = docId.removePrefix(rootDocId).trimStart('/', ':')
+                        val volumePath = volumeRelativePath(docId)
+                        val legacyRelPath = docId.removePrefix(rootDocId).trimStart('/', ':')
                         out.add(
                             LocalAudioFile(
-                                id = SourceType.LOCAL.buildId(relPath),
+                                id = SourceType.LOCAL.buildId(volumePath),
+                                legacyId = SourceType.LOCAL.buildId(legacyRelPath),
                                 name = name,
                                 uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId),
                                 size = cursor.getLong(3),
-                                lastModified = cursor.getLong(4)
+                                lastModified = cursor.getLong(4),
+                                relativePath = pathWithoutVolume(volumePath)
                             )
                         )
                     }
@@ -238,6 +454,172 @@ class LocalMusicSource @Inject constructor(
         }
         return out
     }
+
+    // --- Modo dispositivo (MediaStore) --------------------------------------------------------
+
+    /**
+     * Toda la música indexada por el sistema, descartando lo que MediaStore marcó explícitamente
+     * como tono, notificación, alarma o podcast.
+     *
+     * El filtro se escribe por EXCLUSIÓN y tolerando `NULL` — nunca como `is_music != 0`. Esos
+     * flags los rellena MediaProvider al escanear, y hasta que lo hace la fila puede existir con
+     * todos a `NULL`; en SQL `NULL != 0` no es cierto, es `NULL`, así que el filtro estricto
+     * escondía esas canciones en vez de mostrarlas. Excluir solo lo que está marcado
+     * EXPLÍCITAMENTE como no-música es tolerante a ese estado intermedio y sigue dejando fuera
+     * tonos, notificaciones, alarmas y podcasts, que es lo que de verdad importa.
+     *
+     * Que entre algo de audio que no es música es el precio correcto para este modo: el usuario
+     * pidió "todo el dispositivo". Quien quiera control fino tiene el modo carpetas.
+     *
+     * NO hace falta filtrar `is_pending`/`is_trashed`: MediaProvider ya oculta a cada app las
+     * filas pendientes o en la papelera que no le pertenecen.
+     *
+     * Sin permiso devuelve una lista vacía CON el ámbito vacío, para que la reconciliación no
+     * interprete "no puedo ver nada" como "el usuario borró toda su música".
+     */
+    private fun queryDeviceAudio(ctx: DiscoverContext): Listing {
+        if (!hasAudioPermission()) {
+            Log.w(TAG, "Escaneo del dispositivo sin permiso de audio: se omite")
+            return Listing(emptyList()) { false }
+        }
+
+        val useRelativePath = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        val projection = buildList {
+            add(MediaStore.Audio.Media._ID)
+            add(MediaStore.Audio.Media.DISPLAY_NAME)
+            add(MediaStore.Audio.Media.SIZE)
+            add(MediaStore.Audio.Media.DATE_MODIFIED)
+            add(MediaStore.Audio.Media.DURATION)
+            add(MediaStore.Audio.Media.TITLE)
+            add(MediaStore.Audio.Media.ARTIST)
+            add(MediaStore.Audio.Media.ALBUM)
+            if (useRelativePath) {
+                add(MediaStore.Audio.Media.RELATIVE_PATH)
+                add(MediaStore.Audio.Media.VOLUME_NAME)
+            } else {
+                @Suppress("DEPRECATION")
+                add(MediaStore.Audio.Media.DATA)
+            }
+        }.toTypedArray()
+
+        val out = ArrayList<LocalAudioFile>(256)
+        val collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+        val cursor = context.contentResolver.query(
+            collection,
+            projection,
+            MUSIC_SELECTION,
+            null,
+            null
+        ) ?: run {
+            // Cursor null = el proveedor no respondió. NO es "no hay música": sin acotar el
+            // ámbito, la reconciliación se llevaría por delante toda la biblioteca local.
+            Log.w(TAG, "MediaStore no devolvió cursor: se omite el escaneo")
+            return Listing(emptyList()) { false }
+        }
+
+        cursor.use { rows ->
+            // Los índices se resuelven UNA vez, no por fila: en una biblioteca de miles de
+            // canciones, buscar la columna por nombre en cada vuelta es puro coste repetido.
+            val idCol = rows.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+            val nameCol = rows.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
+            val sizeCol = rows.getColumnIndexOrThrow(MediaStore.Audio.Media.SIZE)
+            val modifiedCol = rows.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_MODIFIED)
+            val durationCol = rows.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
+            val titleCol = rows.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
+            val artistCol = rows.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
+            val albumCol = rows.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
+            val relativeCol =
+                if (useRelativePath) rows.getColumnIndexOrThrow(MediaStore.Audio.Media.RELATIVE_PATH) else -1
+            val volumeCol =
+                if (useRelativePath) rows.getColumnIndexOrThrow(MediaStore.Audio.Media.VOLUME_NAME) else -1
+            @Suppress("DEPRECATION")
+            val dataCol =
+                if (useRelativePath) -1 else rows.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
+
+            while (rows.moveToNext()) {
+                if (ctx.isStopped()) break
+                val name = rows.getString(nameCol) ?: continue
+                if (!isAudioFile(name)) continue
+
+                val volumePath = if (useRelativePath) {
+                    val relative = rows.getString(relativeCol).orEmpty()
+                    val volume = rows.getString(volumeCol).orEmpty()
+                    normalizeRelativePath("${canonicalVolume(volume)}/$relative/$name")
+                } else {
+                    val data = rows.getString(dataCol) ?: continue
+                    volumePathFromAbsolutePath(data)
+                }
+
+                out.add(
+                    LocalAudioFile(
+                        id = SourceType.LOCAL.buildId(volumePath),
+                        // El escaneo del dispositivo es nuevo: nunca escribió ids del esquema viejo.
+                        legacyId = null,
+                        name = name,
+                        uri = ContentUris.withAppendedId(collection, rows.getLong(idCol)),
+                        size = rows.getLong(sizeCol),
+                        lastModified = rows.getLong(modifiedCol) * 1000, // MediaStore da segundos
+                        relativePath = pathWithoutVolume(volumePath),
+                        title = rows.getString(titleCol),
+                        artist = rows.getString(artistCol)?.takeIf { it != MEDIASTORE_UNKNOWN },
+                        album = rows.getString(albumCol)?.takeIf { it != MEDIASTORE_UNKNOWN },
+                        duration = rows.getLong(durationCol)
+                    )
+                )
+            }
+        }
+        // Ámbito = todo: en este modo, lo que no está en el índice del sistema ya no está.
+        return Listing(out) { true }
+    }
+
+    // --- Rutas e ids --------------------------------------------------------------------------
+
+    /**
+     * `primary:Music/Rock/x.flac` (docId de SAF) → `primary/music/rock/x.flac`.
+     *
+     * El volumen se conserva como primer segmento para que dos tarjetas/almacenamientos con la
+     * misma estructura no colisionen. Si el proveedor no usa el formato `volumen:ruta` (proveedores
+     * de terceros con ids opacos), se toma el docId entero: seguirá siendo único, aunque no
+     * unifique con MediaStore.
+     */
+    private fun volumeRelativePath(docId: String): String {
+        val separator = docId.indexOf(':')
+        if (separator < 0) return normalizeRelativePath(docId)
+        val volume = canonicalVolume(docId.substring(0, separator))
+        return normalizeRelativePath("$volume/${docId.substring(separator + 1)}")
+    }
+
+    /** Igual, partiendo de una ruta absoluta (`MediaStore.DATA`, único camino antes de API 29). */
+    private fun volumePathFromAbsolutePath(path: String): String {
+        val externalRoot = Environment.getExternalStorageDirectory()?.absolutePath
+        if (externalRoot != null && path.startsWith(externalRoot)) {
+            return normalizeRelativePath("$PRIMARY_VOLUME/${path.removePrefix(externalRoot)}")
+        }
+        // Volumen secundario: /storage/<UUID>/… → el UUID hace de nombre de volumen.
+        return normalizeRelativePath(path.removePrefix("/storage/"))
+    }
+
+    /**
+     * Nombre de volumen canónico. SAF dice `primary` y MediaStore `external_primary` para el mismo
+     * almacenamiento; sin unificarlos, el mismo archivo tendría dos ids según el modo.
+     */
+    private fun canonicalVolume(volume: String): String {
+        val lower = volume.lowercase(Locale.ROOT)
+        return if (lower == MEDIASTORE_PRIMARY_VOLUME) PRIMARY_VOLUME else lower
+    }
+
+    /** La ruta sin su primer segmento (el volumen): es lo que compara el dedup entre fuentes. */
+    private fun pathWithoutVolume(volumePath: String): String = volumePath.substringAfter('/', "")
+
+    /**
+     * Prefijo de id que cubre una carpeta: `local:primary/music/`. Sirve para saber qué canciones
+     * "pertenecen" a una carpeta sin guardar esa relación en la BD (sería estado redundante: el id
+     * YA es la ruta).
+     */
+    private fun idPrefixOf(treeUriString: String): String? = runCatching {
+        val docId = DocumentsContract.getTreeDocumentId(Uri.parse(treeUriString))
+        SourceType.LOCAL.buildId(volumeRelativePath(docId)) + "/"
+    }.getOrNull()
 
     private fun isAudioFile(name: String): Boolean {
         val n = name.lowercase(Locale.ROOT)
@@ -248,5 +630,24 @@ class LocalMusicSource @Inject constructor(
     private companion object {
         private const val TAG = "LocalMusicSource"
         private const val UPSERT_BATCH = 50
+
+        /**
+         * Ver [queryDeviceAudio]: por exclusión y tolerando `NULL`, porque los archivos fuera de
+         * `Music/` se indexan con todos estos flags sin rellenar y un `is_music != 0` los perdería.
+         */
+        private val MUSIC_SELECTION = listOf(
+            MediaStore.Audio.Media.IS_MUSIC to "!= 0",
+            MediaStore.Audio.Media.IS_RINGTONE to "= 0",
+            MediaStore.Audio.Media.IS_NOTIFICATION to "= 0",
+            MediaStore.Audio.Media.IS_ALARM to "= 0",
+            MediaStore.Audio.Media.IS_PODCAST to "= 0"
+        ).joinToString(" AND ") { (column, comparison) ->
+            "($column IS NULL OR $column $comparison)"
+        }
+        private const val PRIMARY_VOLUME = "primary"
+        private const val MEDIASTORE_PRIMARY_VOLUME = "external_primary"
+
+        /** Marcador literal que MediaStore usa cuando el archivo no trae el tag. */
+        private const val MEDIASTORE_UNKNOWN = "<unknown>"
     }
 }

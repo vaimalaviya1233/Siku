@@ -32,4 +32,6 @@ class MusicSourceRegistry @Inject constructor(
         sourceFor(song).resolveDownloadUrl(song, forceRefresh)
 
     suspend fun extractMetadata(song: Song): Song = sourceFor(song).extractMetadata(song)
+
+    suspend fun fetchLightMetadata(song: Song): LightMetadata? = sourceFor(song).fetchLightMetadata(song)
 }

@@ -4,6 +4,7 @@ import com.qhana.siku.data.local.AlbumSummary
 import com.qhana.siku.data.local.ArtistDao
 import com.qhana.siku.data.local.ArtistEntity
 import com.qhana.siku.data.local.ArtistSummary
+import com.qhana.siku.data.local.GenreSummary
 import com.qhana.siku.data.model.AlbumSortOrder
 import com.qhana.siku.data.model.ArtistSortOrder
 import com.qhana.siku.data.local.SongDao
@@ -49,6 +50,31 @@ class BrowseRepository @Inject constructor(
 
     fun getSongsByAlbum(album: String): Flow<List<Song>> =
         songDao.getSongsByAlbumFlow(album).map { list -> list.map(SongEntity::toSong) }
+
+    /**
+     * Todos los géneros de la biblioteca (agrupados sin distinguir mayúsculas), con su conteo y
+     * las carátulas del collage. Sin tope: la pestaña Géneros los lista enteros — los chips del
+     * inicio, que sí piden un top, van por `ISongRepository.getTopGenres`.
+     */
+    fun getGenres(minCount: Int): Flow<List<GenreSummary>> = songDao.getGenresFlow(
+        minCount = minCount,
+        limit = SongDao.NO_LIMIT,
+        artsLimit = SongDao.ARTS_PER_GENRE,
+        artsSeparator = SongDao.ARTS_SEPARATOR
+    )
+
+    /**
+     * Canciones de un género para su pantalla de detalle. [partialMatch] = ajuste "incluir
+     * géneros compuestos": "Rock" trae también "Rock/Metal" y "Hard Rock".
+     */
+    fun getSongsByGenre(genre: String, partialMatch: Boolean): Flow<List<Song>> {
+        val flow = if (partialMatch) {
+            songDao.getSongsByGenreLikeFlow("%${SongDao.escapeLike(genre)}%")
+        } else {
+            songDao.getSongsByGenreFlow(genre)
+        }
+        return flow.map { list -> list.map(SongEntity::toSong) }
+    }
 
     /** Limpia el cache de artistas (fotos Deezer + selecciones manuales). Se usa en logout. */
     suspend fun clearArtistCache() = artistDao.deleteAll()

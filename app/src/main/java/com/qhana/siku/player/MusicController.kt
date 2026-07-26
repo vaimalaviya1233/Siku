@@ -37,6 +37,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -90,6 +91,15 @@ class MusicController @Inject constructor(
     private val _duration = MutableStateFlow(0L)
     val duration: StateFlow<Long> = _duration.asStateFlow()
 
+    /**
+     * Hasta dónde tiene audio ya cargado el player. Solo dice algo en STREAMING (una canción en
+     * disco está bufferizada por definición, y ExoPlayer devuelve la duración entera); la UI lo
+     * pinta como tercer nivel de la barra para distinguir "cargando" de "colgado", que era
+     * indistinguible con mala conexión.
+     */
+    private val _bufferedPosition = MutableStateFlow(0L)
+    val bufferedPosition: StateFlow<Long> = _bufferedPosition.asStateFlow()
+
     /** Conexión viva con el MediaController (para consumidores fuera de la UI, p. ej. widgets). */
     val isConnected: Boolean get() = mediaController?.isConnected == true
 
@@ -128,6 +138,84 @@ class MusicController @Inject constructor(
     private val _sleepTimer = MutableStateFlow<SleepTimerState?>(null)
     val sleepTimer: StateFlow<SleepTimerState?> = _sleepTimer.asStateFlow()
     private var sleepTimerJob: Job? = null
+
+    // === Canciones descargadas mientras están en la cola ===
+
+    /**
+     * Ids cuyo `MediaItem` sigue apuntando al origen REMOTO porque la canción terminó de
+     * descargarse mientras sonaba. Se corrigen al salir de ellas (ver [onMediaItemTransition]):
+     * hacerlo en caliente cambia el URI del item, lo que obliga a ExoPlayer a construir un
+     * `MediaSource` nuevo — corta el audio y lo reinicia desde cero, que es precisamente lo que
+     * no puede pasar por una mejora invisible para quien está escuchando.
+     */
+    private val pendingItemRefresh = ConcurrentHashMap.newKeySet<String>()
+
+    init {
+        // La descarga es lo único que cambia una canción por debajo de la cola: `PlaylistManager`
+        // guarda los `Song` capturados al armarla, así que sin esto la hoja de cola sigue diciendo
+        // "se transmitirá" para un archivo que ya está en el dispositivo — mientras el NowPlaying,
+        // que sí lee la fila de la BD, dice lo contrario. Ver un estado y su opuesto en la misma
+        // pantalla es lo que empuja a reintentar acciones que ya no hacen falta.
+        scope.launch {
+            syncManager.downloadedSongs.collect { song -> onSongDownloaded(song) }
+        }
+    }
+
+    /**
+     * Una canción de la cola acabó de descargarse: su fila ya apunta al archivo local.
+     *
+     * Se hacen DOS cosas distintas, y la separación importa. Actualizar la lista lógica es
+     * gratis y arregla la UI de la cola al instante para todas, incluida la que suena. Reemplazar
+     * el `MediaItem` es lo que evita que ExoPlayer vuelva a transmitirla por red al llegarle el
+     * turno (el resolver decide por el esquema del URI, no consulta la BD), pero no es gratis
+     * sobre el item en curso — por eso ese se aplaza.
+     */
+    private fun onSongDownloaded(song: Song) {
+        val index = updateSong(song)
+        if (index < 0) return // no está en la cola actual: nada que sincronizar
+
+        val controller = mediaController ?: return
+        if (!controller.isConnected) return
+
+        if (controller.currentMediaItemIndex == index) {
+            pendingItemRefresh.add(song.id)
+            return
+        }
+        replaceQueueItem(controller, index, song)
+    }
+
+    /**
+     * Sustituye el `MediaItem` de [index] por el de [song]. Comprueba el `mediaId` antes de
+     * escribir: entre el aviso de descarga y este punto la cola pudo reordenarse o recargarse, y
+     * escribir a ciegas en una posición pondría la canción equivocada en mitad de la cola.
+     */
+    private fun replaceQueueItem(controller: MediaController, index: Int, song: Song) {
+        try {
+            if (index >= controller.mediaItemCount) return
+            if (controller.getMediaItemAt(index).mediaId != song.id) return
+            controller.replaceMediaItem(index, song.toMediaItem())
+        } catch (e: Exception) {
+            // Cosmético para el player: si falla, la canción se sigue reproduciendo por su URI
+            // remoto y la cola se corrige la próxima vez que se cargue entera.
+            appLogger.error("No se pudo actualizar el item ${song.id} de la cola: ${e.message}")
+        }
+    }
+
+    /**
+     * Aplica los reemplazos aplazados de [pendingItemRefresh] ahora que la canción ya no está en
+     * curso. [nowPlayingId] se salta: con repeat-one la transición vuelve al mismo item, que
+     * sigue sonando.
+     */
+    private fun flushPendingItemRefresh(controller: MediaController, nowPlayingId: String) {
+        if (pendingItemRefresh.isEmpty()) return
+        val songs = playlistManager.getCurrentPlaylist()
+        for (id in pendingItemRefresh.toList()) {
+            if (id == nowPlayingId) continue
+            pendingItemRefresh.remove(id)
+            val idx = songs.indexOfFirst { it.id == id }
+            if (idx >= 0) replaceQueueItem(controller, idx, songs[idx])
+        }
+    }
 
     private fun fetchAudioSessionId() {
         val controller = mediaController ?: return
@@ -322,6 +410,18 @@ class MusicController @Inject constructor(
                     index < queueCount &&
                     controller.getMediaItemAt(index).mediaId == song.id
 
+                // Ya estamos exactamente aquí (pulsar en la cola la canción que suena). Se sale
+                // ANTES de tocar `_playbackState` y `_currentPosition`: ninguna de las ramas de
+                // abajo movería el audio —no hay seek que hacer— pero el estado optimista del
+                // final sí ponía BUFFERING y la posición a 0, así que la barra saltaba al inicio
+                // y aparecía un "cargando" mientras la canción seguía sonando tan tranquila.
+                // Nadie corregía esa mentira hasta el siguiente evento del player.
+                if (queueInSync && controller.currentMediaItemIndex == index && startPosition == 0L) {
+                    if (autoPlay && !controller.isPlaying) controller.play()
+                    syncManager.prioritizeSong(song.id)
+                    return@launch
+                }
+
                 if (!queueInSync) {
                     // Historial: recargar la cola descarta el item en curso SIN discontinuidad
                     // AUTO/SEEK (reason REMOVE), así que la escucha interrumpida se cuenta acá.
@@ -352,6 +452,9 @@ class MusicController @Inject constructor(
                 }
 
                 _currentPosition.value = startPosition
+                // Sin este reset, la barra de la canción nueva arranca enseñando el búfer de la
+                // anterior hasta el primer tick.
+                _bufferedPosition.value = startPosition
                 Log.d(TAG, "Cargando: ${song.title} (AutoPlay=$autoPlay, queueSynced=$queueInSync)")
             } catch (e: Exception) {
                 Log.e(TAG, "Error crítico al cargar canción en ExoPlayer", e)
@@ -410,19 +513,20 @@ class MusicController @Inject constructor(
         songCacheManager.cacheSongs(songs)
     }
 
-    fun updateSong(newSong: Song) {
-        val updated = playlistManager.updateSong(newSong)
-        if (!updated) return
+    /**
+     * Reemplaza una canción en el estado LÓGICO (cola, caché y, si es la actual, `currentSong`).
+     * No toca la cola de ExoPlayer: quien necesite eso debe replicarlo explícitamente, porque
+     * cambiar el URI del item en curso reinicia la reproducción.
+     *
+     * @return su posición en la cola, o -1 si no está.
+     */
+    fun updateSong(newSong: Song): Int {
+        val index = playlistManager.updateSong(newSong)
+        if (index < 0) return -1
 
-        val isCurrent = newSong.id == _currentSong.value?.id
         songCacheManager.cacheSong(newSong)
-
-        if (isCurrent) {
-            _currentSong.value = newSong
-            // Logic for remote->local transition or URL refresh
-            // Simplified: if current song path changed significantly, reload might be needed
-            // But for now keeping it simple as per original logic's intent but cleaner
-        }
+        if (newSong.id == _currentSong.value?.id) _currentSong.value = newSong
+        return index
     }
 
     /**
@@ -499,6 +603,7 @@ class MusicController @Inject constructor(
         _playbackState.value = PlaybackState.IDLE
         _currentPosition.value = 0L
         _duration.value = 0L
+        _bufferedPosition.value = 0L
 
         playlistManager.clear()
         sessionStateManager.clearSession()
@@ -735,6 +840,7 @@ class MusicController @Inject constructor(
                 mediaController?.let {
                     updateDurationSafe(it.duration)
                     _currentPosition.value = it.currentPosition
+                    _bufferedPosition.value = it.bufferedPosition
                 }
             }
         }
@@ -751,7 +857,15 @@ class MusicController @Inject constructor(
             // (auto-avance o skip manual, da igual — el usuario pidió parar aquí).
             if (_sleepTimer.value?.awaitingSongEnd == true) pauseFromSleepTimer()
 
+            // El búfer del tema anterior no dice nada del nuevo: se pone a cero y el primer
+            // tick lo vuelve a llenar (ver [bufferedPosition]).
+            _bufferedPosition.value = 0L
+
             playlistManager.setCurrentIndex(newIndex)
+
+            // Canciones que se descargaron mientras sonaban: ya no están en curso, así que
+            // ahora su MediaItem puede apuntar al archivo local sin interrumpir nada.
+            flushPendingItemRefresh(controller, nowPlayingId = songId)
 
             val song = songCacheManager.getSongSync(songId)
                 ?: playlistManager.getSongAt(newIndex)
@@ -922,6 +1036,9 @@ class MusicController @Inject constructor(
                 _currentPosition.value = it.currentPosition
                 updateDurationSafe(it.duration)
             }
+            // El búfer se refresca AUNQUE no esté sonando: el momento en que más importa verlo
+            // avanzar es justo el que no cuenta como reproducción (parado esperando datos).
+            _bufferedPosition.value = it.bufferedPosition
         }
     }
     
@@ -967,7 +1084,7 @@ class MusicController @Inject constructor(
     }
 
     fun getAudioSessionId(): Int = audioSessionId
-    fun retryCurrentWithFreshUrl(updatedSong: Song) = updateSong(updatedSong)
+    fun retryCurrentWithFreshUrl(updatedSong: Song) { updateSong(updatedSong) }
     fun setBuffering() { _playbackState.value = PlaybackState.BUFFERING }
 
     private fun updateDurationSafe(newDuration: Long) {

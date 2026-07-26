@@ -1,9 +1,7 @@
 package com.qhana.siku.ui.screens
 
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyItemScope
@@ -82,8 +80,6 @@ fun SongsScreen(
 
     // Properties from UiState
     val favorites = uiState.favorites
-    val isSelectionMode = uiState.isSelectionMode
-    val selectedSongs = uiState.selectedSongs
     val redownloadingIds by viewModel.redownloadingIds.collectAsStateWithLifecycle()
     val downloadProgressById by viewModel.downloadProgressById.collectAsStateWithLifecycle()
 
@@ -269,13 +265,12 @@ fun SongsScreen(
 
                     if (song != null) {
                         val songId = song.id
-                        val isSelected = songId in selectedSongs
                         val isPlaying = songId == currentSongId
 
                         val shape = rememberListItemShape(
                             index = index,
                             count = itemCount,
-                            isActive = isPlaying || isSelected
+                            isActive = isPlaying
                         )
 
                         SongItemOptimized(
@@ -286,8 +281,6 @@ fun SongsScreen(
                             isFavorite = songId in favorites,
                             isRedownloading = songId in redownloadingIds,
                             downloadProgress = downloadProgressById[songId],
-                            isSelectionMode = isSelectionMode,
-                            isSelected = isSelected,
                             shape = shape,
                             onSongClick = {
                                 // La cola debe ser EXACTAMENTE la lista visible (misma
@@ -307,8 +300,6 @@ fun SongsScreen(
                             onRedownload = { viewModel.redownloadSong(it) },
                             onToggleFavorite = { viewModel.toggleFavorite(it) },
                             songId = songId,
-                            onSelectionChange = { id, selected -> viewModel.toggleSelection(id) },
-                            onStartSelection = { viewModel.startSelection(it) },
                             onAddToPlaylistRequest = onAddToPlaylistRequest,
                             onStatusClick = {
                                 viewModel.showMessage(
@@ -326,7 +317,6 @@ fun SongsScreen(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SongItemOptimized(
     song: Song,
@@ -335,49 +325,42 @@ private fun SongItemOptimized(
     isFavorite: Boolean,
     isRedownloading: Boolean,
     downloadProgress: Float?,
-    isSelectionMode: Boolean,
-    isSelected: Boolean,
     shape: androidx.compose.ui.graphics.Shape,
     onSongClick: (Song) -> Unit,
     onRedownload: (Song) -> Unit,
     onToggleFavorite: (String) -> Unit,
     songId: String,
-    onSelectionChange: (String, Boolean) -> Unit,
-    onStartSelection: (String) -> Unit,
     onAddToPlaylistRequest: (String) -> Unit,
     onStatusClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val isActive = isSelected || isPlaying
     val surfaceHigh = MaterialTheme.colorScheme.surfaceContainerHigh
     val primaryContainer = MaterialTheme.colorScheme.primaryContainer
     val backgroundColor = when {
-        // Activo (reproduciendo o seleccionado): resaltado teñido con el acento del álbum.
-        isActive && playingAccent != null ->
+        // Sonando: resaltado teñido con el acento del álbum.
+        isPlaying && playingAccent != null ->
             Color(androidx.core.graphics.ColorUtils.blendARGB(surfaceHigh.toArgb(), playingAccent.toArgb(), 0.30f))
-        isActive -> primaryContainer
+        isPlaying -> primaryContainer
         else -> surfaceHigh
     }
 
-    val trailingContent: @Composable (() -> Unit)? = remember(isSelectionMode, isFavorite, songId, isRedownloading, isPlaying, song.isLocalAudio) {
-        if (!isSelectionMode) {
-            {
-                SongItemMenu(
-                    isPlaying = isPlaying,
-                    isFavorite = isFavorite,
-                    isRedownloading = isRedownloading,
-                    songId = songId,
-                    // Por sourceType, no por isLocalAudio: la nube DESCARGADA (file://) también
-                    // es isLocalAudio y re-descargarla (reparar) sí tiene sentido. Solo la
-                    // fuente LOCAL queda fuera (no hay copia en la nube que bajar).
-                    showRedownload = song.sourceType != SourceType.LOCAL,
-                    isDownloaded = song.isLocalAudio,
-                    onRedownload = { onRedownload(song) },
-                    onToggleFavorite = onToggleFavorite,
-                    onAddToPlaylistRequest = onAddToPlaylistRequest
-                )
-            }
-        } else null
+    val trailingContent: @Composable (() -> Unit)? = remember(isFavorite, songId, isRedownloading, isPlaying, song.isLocalAudio) {
+        {
+            SongItemMenu(
+                isPlaying = isPlaying,
+                isFavorite = isFavorite,
+                isRedownloading = isRedownloading,
+                songId = songId,
+                // Por sourceType, no por isLocalAudio: la nube DESCARGADA (file://) también
+                // es isLocalAudio y re-descargarla (reparar) sí tiene sentido. Solo la
+                // fuente LOCAL queda fuera (no hay copia en la nube que bajar).
+                showRedownload = song.sourceType != SourceType.LOCAL,
+                isDownloaded = song.isLocalAudio,
+                onRedownload = { onRedownload(song) },
+                onToggleFavorite = onToggleFavorite,
+                onAddToPlaylistRequest = onAddToPlaylistRequest
+            )
+        }
     }
 
     Row(
@@ -388,29 +371,9 @@ private fun SongItemOptimized(
             .padding(horizontal = 16.dp, vertical = 1.dp)
             .clip(shape)
             .background(backgroundColor)
-            .combinedClickable(
-                onClick = {
-                    if (isSelectionMode) onSelectionChange(songId, !isSelected)
-                    else onSongClick(song)
-                },
-                onLongClick = {
-                    if (!isSelectionMode) onStartSelection(songId)
-                }
-            ),
+            .clickable { onSongClick(song) },
         verticalAlignment = Alignment.CenterVertically
     ) {
-        if (isSelectionMode) {
-            Checkbox(
-                checked = isSelected,
-                onCheckedChange = { onSelectionChange(songId, !isSelected) },
-                modifier = Modifier.padding(start = 8.dp),
-                colors = CheckboxDefaults.colors(
-                    checkedColor = playingAccent ?: MaterialTheme.colorScheme.primary,
-                    uncheckedColor = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            )
-        }
-
         SongItem(
             song = song,
             isPlaying = isPlaying,

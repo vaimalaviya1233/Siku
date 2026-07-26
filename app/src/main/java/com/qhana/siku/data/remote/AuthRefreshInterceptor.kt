@@ -38,6 +38,15 @@ class AuthRefreshInterceptor @Inject constructor(
          * reintento moriría en 403.
          */
         private const val APP_FOLDER_SEGMENT = "approot"
+
+        /**
+         * Marca que una request necesita el scope de escritura sobre el drive (guardar letras
+         * junto a la canción). No se puede deducir de la URL como con [APP_FOLDER_SEGMENT]: son
+         * rutas normales de `/me/drive/items/…`, idénticas a las de lectura. Refrescar con los
+         * scopes de lectura devolvería un token válido pero sin permiso, y el reintento moriría
+         * en 403.
+         */
+        const val HEADER_WRITE_SCOPE = "X-Siku-Write-Scope"
     }
 
     override fun intercept(chain: Interceptor.Chain): Response {
@@ -53,12 +62,14 @@ class AuthRefreshInterceptor @Inject constructor(
         Log.w(TAG, "401 recibido en ${request.url.encodedPath}, refrescando token")
         response.close()
 
-        val needsWriteScope = request.url.encodedPath.contains(APP_FOLDER_SEGMENT)
         val newToken = try {
             runBlocking {
                 val authManager = authManagerProvider.get()
-                if (needsWriteScope) authManager.getBackupAccessToken().firstOrNull()
-                else authManager.getAccessToken().firstOrNull()
+                when {
+                    request.header(HEADER_WRITE_SCOPE) != null -> authManager.getWriteAccessToken().firstOrNull()
+                    request.url.encodedPath.contains(APP_FOLDER_SEGMENT) -> authManager.getBackupAccessToken().firstOrNull()
+                    else -> authManager.getAccessToken().firstOrNull()
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error refrescando token", e)

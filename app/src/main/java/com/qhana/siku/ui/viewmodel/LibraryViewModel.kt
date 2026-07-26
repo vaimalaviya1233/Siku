@@ -1,6 +1,8 @@
 package com.qhana.siku.ui.viewmodel
 
 import android.content.Context
+import android.os.Build
+import android.view.accessibility.AccessibilityManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.paging.PagingData
@@ -8,6 +10,7 @@ import androidx.paging.cachedIn
 import com.qhana.siku.data.coordinator.SyncManager
 import com.qhana.siku.data.coordinator.SyncStatus
 import com.qhana.siku.data.model.PlaybackContext
+import com.qhana.siku.data.model.LyricsSaveMode
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.model.SongFilter
 import com.qhana.siku.data.model.SongSourceFilter
@@ -46,9 +49,35 @@ sealed class LibraryBannerState {
     data class Scanning(val progress: Int, val message: String) : LibraryBannerState()
     data class Downloading(val current: Int, val total: Int, val failed: Int, val status: String) : LibraryBannerState()
     data class Complete(val newSongs: Int, val downloaded: Int, val failed: Int, val deleted: Int = 0) : LibraryBannerState()
+    /** Cola detenida por el entorno (sin WiFi, sin red, batería): informativo, se reanuda sola. */
+    data class Paused(val message: String) : LibraryBannerState()
     data class Error(val message: String, val canRetry: Boolean = true) : LibraryBannerState()
     object Hidden : LibraryBannerState()
 }
+
+/**
+ * Las dos señales con las que `SyncManager` gobierna el banner, unificadas para que un ÚNICO
+ * colector las consuma: el estado en curso ([Progress]) y el aviso de que terminó ([Finished],
+ * un evento sin replay, para que un ViewModel recién nacido no reviva un "Complete" retenido).
+ *
+ * Existen como un tipo común precisamente para que no puedan tener consumidores separados: en
+ * cuanto dos coroutines escriben el mismo estado de UI, cada una acaba con una rama que delega
+ * en la otra y el banner se queda colgado cuando ambas se callan.
+ */
+private sealed interface SyncSignal {
+    data class Progress(val status: SyncStatus) : SyncSignal
+    data class Finished(val status: SyncStatus.Complete) : SyncSignal
+}
+
+/**
+ * Duración de un snackbar CORTO de Material 3 (`SnackbarDuration.Short`), en ms.
+ *
+ * Se replica en vez de leerse porque `SnackbarDuration.toMillis` es `internal` en
+ * compose-material3. No es un valor elegido a ojo: el resumen del sync es exactamente lo mismo
+ * que un snackbar informativo sin acción —un mensaje corto que se retira solo— así que hereda su
+ * duración en lugar de inventarse una propia.
+ */
+private const val SNACKBAR_SHORT_MS = 4000L
 
 @OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
 @HiltViewModel
@@ -267,8 +296,13 @@ class LibraryViewModel @Inject constructor(
             .flowOn(Dispatchers.IO)
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    /** Canciones de un género (para el chip: se reproducen en aleatorio). */
-    suspend fun getSongsByGenre(genre: String): List<Song> = repository.getSongsByGenre(genre)
+    /**
+     * Canciones de un género (para el chip: se reproducen en aleatorio). Respeta el ajuste
+     * "incluir géneros compuestos" de la pestaña Géneros: el mismo género tiene que dar la misma
+     * lista se toque en el chip del inicio o en su tarjeta.
+     */
+    suspend fun getSongsByGenre(genre: String): List<Song> =
+        repository.getSongsByGenre(genre, musicPreferences.loadGenrePartialMatch())
 
     init {
         // Initial Prefs Load
@@ -283,10 +317,39 @@ class LibraryViewModel @Inject constructor(
                     replayGainPreamp = musicPreferences.loadReplayGainPreamp(),
                     nowPlayingSolidBackground = musicPreferences.loadNowPlayingSolidBackground(),
                     nowPlayingWavyProgress = musicPreferences.loadNowPlayingWavyProgress(),
+                    playerGestures = musicPreferences.loadPlayerGestures(),
                     themePaletteStyle = musicPreferences.loadThemePaletteStyle(),
                     useSystemEq = musicPreferences.loadUseSystemEq()
                 )
             )
+        }
+
+        // El chip de formato detallado se conmuta TAMBIÉN desde el reproductor (otra instancia
+        // de ViewModel), así que se OBSERVA en vez de cargarse una vez: si no, el switch de
+        // Ajustes mostraría el valor con el que nació esta instancia.
+        viewModelScope.launch {
+            musicPreferences.nowPlayingDetailedFormatFlow.collect { enabled ->
+                _uiState.update {
+                    it.copy(playbackSettings = it.playbackSettings.copy(nowPlayingDetailedFormat = enabled))
+                }
+            }
+        }
+
+        // Mismo caso: el modo de guardado de letras lo fija también el diálogo del reproductor
+        // (con "no volver a preguntar"), desde otra instancia de ViewModel. Observado, no cargado.
+        viewModelScope.launch {
+            musicPreferences.lyricsSaveModeFlow.collect { mode ->
+                _uiState.update {
+                    it.copy(playbackSettings = it.playbackSettings.copy(lyricsSaveMode = mode))
+                }
+            }
+        }
+        viewModelScope.launch {
+            musicPreferences.lyricsFolderUriFlow.collect { uri ->
+                _uiState.update {
+                    it.copy(playbackSettings = it.playbackSettings.copy(lyricsFolderUri = uri))
+                }
+            }
         }
 
         // Collect Repository Flows (Combined) — flowOn IO to avoid main thread work
@@ -315,45 +378,76 @@ class LibraryViewModel @Inject constructor(
                 }
         }
 
-        // Collect Sync Manager State (estados EN CURSO). El "sync terminado" es un EVENTO,
-        // no estado: llega por completedEvents (SharedFlow sin replay), así que un ViewModel
-        // nacido después de un sync ya terminado no re-muestra el banner de Complete retenido.
+        // El banner del sync tiene UN SOLO dueño: este colector. Las dos señales que lo
+        // gobiernan —el estado en curso y el evento de "terminó"— se funden en un flujo y cada
+        // una SIEMPRE produce un `LibraryBannerState`.
+        //
+        // Antes eran dos coroutines escribiendo el mismo campo, y cada una tenía una rama que
+        // salía sin tocarlo delegando en la otra ("de esto se encarga el otro colector"). Basta
+        // con que ambas decidan callarse para que el banner anterior se quede congelado: pasó
+        // exactamente eso, "Escaneando biblioteca" para siempre en una biblioteca local sin
+        // novedades. Con un único consumidor y un `when` que cubre todos los casos, ese camino
+        // ni siquiera se puede escribir.
+        //
+        // El orden entre ambas señales está garantizado porque `SyncManager` publica el estado
+        // y emite el evento en la misma secuencia (`_state.value = complete` y luego `tryEmit`).
         viewModelScope.launch {
-            syncManager.state.collect { status ->
-                // El sync publicó estado: el pull-to-refresh ya no espera nada.
-                if (status !is SyncStatus.Idle) _isManualRefreshing.value = false
-                val banner = when (status) {
-                    is SyncStatus.Scanning -> LibraryBannerState.Scanning(status.found, status.message)
-                    is SyncStatus.Downloading -> LibraryBannerState.Downloading(status.current, status.total, status.failed, status.message)
-                    // El banner de Complete lo pone el colector de completedEvents.
-                    is SyncStatus.Complete -> return@collect
-                    is SyncStatus.Error -> LibraryBannerState.Error(status.message)
-                    is SyncStatus.Idle -> LibraryBannerState.Hidden
+            merge(
+                syncManager.state.map { SyncSignal.Progress(it) },
+                syncManager.completedEvents.map { SyncSignal.Finished(it) }
+            ).collect { signal ->
+                // El sync publicó algo: el pull-to-refresh ya no espera nada.
+                if (signal !is SyncSignal.Progress || signal.status !is SyncStatus.Idle) {
+                    _isManualRefreshing.value = false
                 }
+
+                val banner = when (signal) {
+                    is SyncSignal.Progress -> when (val status = signal.status) {
+                        is SyncStatus.Scanning ->
+                            LibraryBannerState.Scanning(status.found, status.message)
+                        is SyncStatus.Downloading -> LibraryBannerState.Downloading(
+                            status.current, status.total, status.failed, status.message
+                        )
+                        is SyncStatus.Error -> LibraryBannerState.Error(status.message)
+                        // Detenido por el entorno: se anuncia igual mientras se espera que
+                        // como estado final, porque para quien mira es la misma situación.
+                        // NO lleva acción: reanudar con datos móviles ya se decide en Ajustes,
+                        // y para escuchar ahora mismo está el streaming.
+                        is SyncStatus.Paused -> LibraryBannerState.Paused(status.message)
+                        // Terminó: el banner de progreso se va. Si hay algo que anunciar, la
+                        // señal Finished que viene detrás lo repone con el resumen.
+                        is SyncStatus.Complete, is SyncStatus.Idle -> LibraryBannerState.Hidden
+                    }
+                    // "Biblioteca al día" (sync sin cambio alguno) solo aporta con una fuente de
+                    // NUBE (confirma que se consultó el servidor). Con biblioteca 100% local el
+                    // re-escaneo es silencioso: sin novedades no hay nada que anunciar. Si SÍ
+                    // hubo cambios (canciones nuevas/borradas de la carpeta), se muestra igual.
+                    is SyncSignal.Finished -> signal.status.let { status ->
+                        val nothingToReport = status.newSongs == 0 && status.downloaded == 0 &&
+                            status.failed == 0 && status.deleted == 0
+                        val onlyLocal = sourceRegistry.activeSources()
+                            .none { it.type != SourceType.LOCAL }
+                        if (nothingToReport && onlyLocal) {
+                            LibraryBannerState.Hidden
+                        } else {
+                            LibraryBannerState.Complete(
+                                status.newSongs, status.downloaded, status.failed, status.deleted
+                            )
+                        }
+                    }
+                }
+
                 bannerDismissJob?.cancel()
                 _uiState.update { it.copy(data = it.data.copy(bannerState = banner)) }
-            }
-        }
-        viewModelScope.launch {
-            syncManager.completedEvents.collect { status ->
-                // "Biblioteca al día" (sync sin cambio alguno) solo aporta con una fuente de
-                // NUBE (confirma que se consultó el servidor). Con biblioteca 100% local el
-                // re-escaneo es silencioso: sin novedades no hay nada que anunciar. Si SÍ
-                // hubo cambios (canciones nuevas/borradas de la carpeta), se muestra igual.
-                val nothingToReport = status.newSongs == 0 && status.downloaded == 0 &&
-                    status.failed == 0 && status.deleted == 0
-                if (nothingToReport && sourceRegistry.activeSources().none { it.type != SourceType.LOCAL }) {
-                    return@collect
-                }
-                bannerDismissJob?.cancel()
-                _uiState.update {
-                    it.copy(data = it.data.copy(bannerState = LibraryBannerState.Complete(
-                        status.newSongs, status.downloaded, status.failed, status.deleted
-                    )))
-                }
-                bannerDismissJob = viewModelScope.launch {
-                    delay(6000)
-                    _uiState.update { it.copy(data = it.data.copy(bannerState = LibraryBannerState.Hidden)) }
+                // El resumen es lo único que se retira solo: los estados en curso los releva la
+                // siguiente señal, y un error se queda hasta que el usuario reintente.
+                if (banner is LibraryBannerState.Complete) {
+                    bannerDismissJob = viewModelScope.launch {
+                        delay(summaryBannerTimeoutMs())
+                        _uiState.update {
+                            it.copy(data = it.data.copy(bannerState = LibraryBannerState.Hidden))
+                        }
+                    }
                 }
             }
         }
@@ -361,6 +455,25 @@ class LibraryViewModel @Inject constructor(
         // La restauración de sesión vive en MusicController.syncCurrentState (al conectar el
         // MediaController, resolviendo SOLO los IDs de la cola contra la BD). El viejo restore
         // desde aquí cargaba la biblioteca ENTERA en memoria para lo mismo.
+    }
+
+    /**
+     * Cuánto permanece el resumen del sync, con el MISMO criterio que un snackbar de Material 3:
+     * su duración corta, pasada por el ajuste de accesibilidad del sistema.
+     *
+     * Ese ajuste no es un adorno: es lo que hace `SnackbarHostState` internamente, y respeta la
+     * preferencia "tiempo para realizar acciones" de quien necesita más rato para leer. Sin él,
+     * el mismo mensaje se le escaparía. Antes de API 29 no existe la preferencia y no hay nada
+     * que ajustar.
+     */
+    private fun summaryBannerTimeoutMs(): Long {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return SNACKBAR_SHORT_MS
+        val manager = context.getSystemService(AccessibilityManager::class.java)
+            ?: return SNACKBAR_SHORT_MS
+        return manager.getRecommendedTimeoutMillis(
+            SNACKBAR_SHORT_MS.toInt(),
+            AccessibilityManager.FLAG_CONTENT_ICONS or AccessibilityManager.FLAG_CONTENT_TEXT
+        ).toLong()
     }
 
     // --- Actions ---
@@ -486,22 +599,6 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
-    fun startSelection(id: String) {
-        _uiState.update { it.copy(selection = it.selection.copy(isSelectionMode = true, selectedSongs = setOf(id))) }
-    }
-
-    fun toggleSelection(id: String) {
-        _uiState.update { state ->
-            val current = state.selectedSongs
-            val newSet = if (id in current) current - id else current + id
-            state.copy(selection = state.selection.copy(selectedSongs = newSet, isSelectionMode = newSet.isNotEmpty()))
-        }
-    }
-
-    fun clearSelection() {
-        _uiState.update { it.copy(selection = it.selection.copy(isSelectionMode = false, selectedSongs = emptySet())) }
-    }
-
     // --- Settings Updates ---
 
     // --- ReplayGain ---
@@ -516,6 +613,14 @@ class LibraryViewModel @Inject constructor(
         musicPreferences.saveUseSystemEq(enabled)
         if (enabled) musicPreferences.saveEqEnabled(false)
     }
+
+    // --- Pestañas de la biblioteca (orden + visibilidad) ---
+    val libraryTabs: StateFlow<List<com.qhana.siku.data.model.LibraryTabState>> =
+        musicPreferences.libraryTabsConfigFlow
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), musicPreferences.loadLibraryTabsConfig())
+
+    fun setLibraryTabs(list: List<com.qhana.siku.data.model.LibraryTabState>) =
+        musicPreferences.saveLibraryTabsConfig(list)
 
     // --- Toolbar del NowPlaying ---
     val toolbarConfig: StateFlow<List<com.qhana.siku.data.model.ToolbarActionState>> =
@@ -546,10 +651,36 @@ class LibraryViewModel @Inject constructor(
         musicPreferences.saveNowPlayingSolidBackground(enabled)
     }
 
+    /**
+     * Dónde guardar las letras. El estado no se toca aquí: lo refresca el colector de
+     * `lyricsSaveModeFlow`, que es el único escritor de ese campo (si además se actualizara a
+     * mano, habría dos y el valor podría quedar congelado por el que no escribe).
+     */
+    fun setLyricsSaveMode(mode: LyricsSaveMode) = musicPreferences.saveLyricsSaveMode(mode)
+
+    /** Carpeta SAF para los `.lrc` de la música del dispositivo. null = quitarla. */
+    fun setLyricsFolder(uri: String?) = musicPreferences.saveLyricsFolderUri(uri)
+
+    /** Gestos del reproductor (deslizar para cambiar/cerrar, doble toque para saltar). */
+    fun setPlayerGestures(enabled: Boolean) {
+        _uiState.update { it.copy(playbackSettings = it.playbackSettings.copy(playerGestures = enabled)) }
+        musicPreferences.savePlayerGestures(enabled)
+    }
+
     /** Barra ondulada (Expressive) en el NowPlaying; el MiniPlayer no se toca (ver prefs). */
     fun setNowPlayingWavyProgress(enabled: Boolean) {
         _uiState.update { it.copy(playbackSettings = it.playbackSettings.copy(nowPlayingWavyProgress = enabled)) }
         musicPreferences.saveNowPlayingWavyProgress(enabled)
+    }
+
+    /**
+     * Ficha técnica en el chip de formato del NowPlaying. El OTRO escritor es el propio chip
+     * (PlaybackViewModel), así que aquí se refleja además el valor de DataStore en el uiState:
+     * si se conmuta desde el reproductor, este switch tiene que verse ya cambiado al entrar.
+     */
+    fun setNowPlayingDetailedFormat(enabled: Boolean) {
+        _uiState.update { it.copy(playbackSettings = it.playbackSettings.copy(nowPlayingDetailedFormat = enabled)) }
+        musicPreferences.saveNowPlayingDetailedFormat(enabled)
     }
 
     /**

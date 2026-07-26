@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Rutas que el FileProvider puede exponer a OTRAS apps. SOLO `files/music`, que es donde
+    MusicDownloader deja los audios descargados de la nube: es lo único que tiene sentido
+    compartir. El resto del almacenamiento privado (la base de datos, las carátulas, el log de
+    depuración) queda fuera a propósito — un provider con `path="."` sobre filesDir dejaría
+    todo eso al alcance de cualquiera que reciba un URI.
+-->
+<paths>
+    <files-path
+        name="music"
+        path="music/" />
+</paths>

@@ -14,6 +14,10 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -85,6 +89,21 @@ class MusicDownloader @Inject constructor(
     }
 
     /**
+     * Canciones que acaban de quedar descargadas, con la fila ya actualizada (`path` = `file://`).
+     *
+     * Existe porque la descarga es lo ÚNICO que cambia una canción por debajo de quien la está
+     * mostrando: la cola del reproductor guarda objetos `Song` capturados al armarla, y sin este
+     * aviso se queda anunciando "se transmitirá" para un archivo que ya está en el dispositivo.
+     * El `NowPlaying` no lo notaba porque su canción actual sí sale de un flujo de la BD.
+     *
+     * `extraBufferCapacity` generoso: un sync masivo finaliza muchas canciones seguidas y las
+     * emisiones no deben bloquear el pipeline (`tryEmit` descarta si no cabe, y perder un aviso
+     * solo significa que esa fila se corrige la próxima vez que se cargue la cola).
+     */
+    private val _downloadedSongs = MutableSharedFlow<Song>(extraBufferCapacity = 64)
+    val downloadedSongs: SharedFlow<Song> = _downloadedSongs.asSharedFlow()
+
+    /**
      * Clasificación del error de descarga. TRANSIENT = vale la pena reintentar
      * (red caída, timeout, stall, 5xx/429, página de error de OneDrive).
      * PERMANENT = reintentar de inmediato no va a cambiar nada (4xx tras refresh
@@ -145,6 +164,8 @@ class MusicDownloader @Inject constructor(
         val baseName = song.id
         var tempFile: File? = null
         val wasStalled = AtomicBoolean(false)
+        // La red pasó a medida a mitad de esta descarga (solo aplica al pipeline masivo).
+        val wentMetered = AtomicBoolean(false)
 
         try {
             val request = Request.Builder().url(url).build()
@@ -234,6 +255,20 @@ class MusicDownloader @Inject constructor(
                         }
                     }
 
+                    // Corte por cambio de red, con el MISMO mecanismo que el watchdog: cerrar el
+                    // stream desde fuera es lo único que rompe un `read` bloqueante en el acto.
+                    // Cancelar la corrutina no bastaría — la lectura no es interrumpible y
+                    // seguiría consumiendo datos hasta que el socket muriera por timeout.
+                    //
+                    // Solo para el pipeline masivo: una descarga prioritaria es la canción que
+                    // el usuario está escuchando, y esa sí está permitida con datos móviles.
+                    val networkGuard = if (isPriority) null else launch {
+                        networkManager.status.first { !it.isUnmetered }
+                        Log.i(TAG, "Red medida durante la descarga de ${song.title}, abortando")
+                        wentMetered.set(true)
+                        try { inputStream.close() } catch (_: Exception) {}
+                    }
+
                     try {
                         inputStream.use { input ->
                             tmpFile.outputStream().use { output ->
@@ -266,6 +301,7 @@ class MusicDownloader @Inject constructor(
                         }
                     } finally {
                         watchdog.cancel()
+                        networkGuard?.cancel()
                     }
                 }
 
@@ -296,6 +332,12 @@ class MusicDownloader @Inject constructor(
             }
         } catch (e: Exception) {
             try { tempFile?.delete() } catch (_: Exception) {}
+            // Antes que nada: cortamos NOSOTROS por un cambio de red, así que no es un fallo de
+            // la canción. `Cancelled` no gasta un intento ni deja error en la cola persistente;
+            // la fila sigue "needing work" y la retoma la continuación que espera WiFi.
+            if (wentMetered.get()) {
+                return@withContext DownloadStage.Cancelled
+            }
             if (wasStalled.get()) {
                 Log.w(TAG, "Download stalled for ${song.title}, marking as failed and continuing queue")
                 return@withContext DownloadStage.Error(context.getString(R.string.dl_err_stalled, (STALL_TIMEOUT_MS / 1000).toInt()))
@@ -330,6 +372,11 @@ class MusicDownloader @Inject constructor(
             val newPath = "file://${finalFile.absolutePath}"
             musicRepository.updateSongUrl(song.id, newPath)
             audioFileAnalyzer.updateSongWithAnalysis(song, newPath, analysis, musicRepository)
+            // Género PEGADO al resto de la metadata, y no al final del bloque: el tag ya lo trae
+            // este mismo análisis, pero entre medias se lee el ReplayGain (abre el archivo con
+            // JAudioTagger, puede lanzar) y cualquier fallo ahí dejaba la canción descargada y
+            // sin género para siempre. "" = analizado sin género.
+            musicRepository.updateGenre(song.id, analysis.genre ?: "")
             // Bytes recién bajados de la fuente = la canción ya NO está corrupta. Sin esto,
             // una marcada por PlaybackErrorRecoveryUseCase quedaba corrupta PARA SIEMPRE (no
             // existía el camino de vuelta) y la reparación automática de SyncViewModel la
@@ -343,43 +390,17 @@ class MusicDownloader @Inject constructor(
                 musicRepository.updateReplayGain(song.id, rg.trackGainDb, rg.trackPeak, rg.albumGainDb, rg.albumPeak)
             }
 
-            // Género: el tag ya lo leyó el análisis de arriba. "" = analizado sin género (evita
-            // que el backfill lo reprocese). Alimenta los chips de género del inicio.
-            musicRepository.updateGenre(song.id, analysis.genre ?: "")
-
             val finalSong = musicRepository.getSongById(song.id).getOrNull() ?: song.copy(path = newPath)
+            // Punto ÚNICO en el que una canción pasa a estar descargada, así que es el único
+            // sitio donde este aviso no se puede olvidar: los dos caminos de descarga (cola
+            // masiva y prioritaria/individual) terminan aquí.
+            _downloadedSongs.tryEmit(finalSong)
             Result.Success(finalSong)
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             Log.e(TAG, "Error finalizing ${song.title}", e)
             Result.Error("Finalize exception: ${e.message}", e)
         }
-    }
-
-    /**
-     * Backfill una-vez de géneros: re-lee el tag GENRE de las canciones YA descargadas (archivo
-     * local, sin re-descargar) que aún no lo tienen. Escribe "" cuando el archivo no existe o no
-     * trae género, así el WHERE `genre IS NULL` deja de tomarlas (sin bucles). Devuelve cuántas
-     * quedaron con un género real. Lo dispara SyncManager tras el scan, gateado por preferencia.
-     */
-    suspend fun backfillGenres(): Int = withContext(Dispatchers.IO) {
-        var tagged = 0
-        while (true) {
-            val batch = musicRepository.getDownloadedSongsWithoutGenre(200)
-            if (batch.isEmpty()) break
-            for (song in batch) {
-                val path = song.path.removePrefix("file://")
-                val file = File(path)
-                if (!file.exists()) {
-                    musicRepository.updateGenre(song.id, "") // sin archivo: marcar analizado
-                    continue
-                }
-                val genre = audioFileAnalyzer.analyzeFile(file).genre
-                musicRepository.updateGenre(song.id, genre ?: "")
-                if (genre != null) tagged++
-            }
-        }
-        tagged
     }
 
     private fun hasEnoughDiskSpace(): Boolean {

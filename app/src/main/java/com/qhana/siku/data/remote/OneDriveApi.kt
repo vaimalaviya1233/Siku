@@ -38,12 +38,37 @@ interface OneDriveApi {
         @Body body: RequestBody
     ): OneDriveItem
 
+    /**
+     * Hijos de una carpeta, para el explorador que elige la carpeta de música. Devuelve el mismo
+     * sobre que [getDelta] (`value` + `@odata.nextLink`), así que la paginación se recorre igual.
+     */
+    @GET
+    suspend fun listChildren(
+        @Header("Authorization") token: String,
+        @Url url: String
+    ): OneDriveResponse
+
     /** Descarga el contenido de un archivo de la carpeta de la app. 404 si nunca se subió. */
     @GET
     suspend fun downloadFile(
         @Header("Authorization") token: String,
         @Url url: String
     ): ResponseBody
+
+    /**
+     * Sube un archivo pequeño FUERA de la carpeta de la app (el `.lrc` junto a la canción).
+     *
+     * Necesita el header de [AuthRefreshInterceptor.HEADER_WRITE_SCOPE]: sin él, un 401 se
+     * refrescaría con los scopes de lectura y el reintento moriría en 403. Para el audio completo
+     * NO se usa este método — ver `CloudLyricsStore`, que sube por OkHttp con timeouts largos.
+     */
+    @PUT
+    suspend fun uploadFileWithWriteScope(
+        @Header("Authorization") token: String,
+        @Header(AuthRefreshInterceptor.HEADER_WRITE_SCOPE) writeScope: String,
+        @Url url: String,
+        @Body body: RequestBody
+    ): OneDriveItem
 }
 
 data class OneDriveResponse(
@@ -58,6 +83,8 @@ data class OneDriveItem(
     val id: String,
     val name: String?, // Puede ser null en items eliminados
     val file: FileFacet?,
+    /** Presente solo si el item ES una carpeta (lo usa el explorador de carpetas). */
+    val folder: FolderFacet? = null,
     val deleted: DeletedFacet?,
     val size: Long?,
     @SerializedName("@microsoft.graph.downloadUrl")
@@ -68,8 +95,16 @@ data class OneDriveItem(
 
 data class ParentReference(
     /** Formato Graph: "/drive/root:/Music/Sub" (sin URL-encoding en el JSON). */
-    val path: String?
+    val path: String?,
+    /**
+     * Id de la carpeta contenedora. Es la forma robusta de crear un archivo hermano (el `.lrc`
+     * junto a la canción) sin reconstruir rutas a mano: `/me/drive/items/{id}:/{nombre}:/content`.
+     */
+    val id: String? = null
 )
 
 class FileFacet
 class DeletedFacet
+
+/** Facet de carpeta. `childCount` se muestra en el explorador para orientar al usuario. */
+data class FolderFacet(val childCount: Int? = null)

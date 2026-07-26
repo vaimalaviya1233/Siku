@@ -68,17 +68,30 @@ class PlaylistManagerTest {
         val updated = song("b", title = "Nueva B")
         val result = manager.updateSong(updated)
 
-        assertTrue(result)
+        assertEquals(1, result)
         assertEquals("Nueva B", manager.playlist.value[1].title)
         assertEquals(1, manager.currentIndex.value)
         assertEquals(listOf("a", "b", "c", "d"), manager.playlist.value.map { it.id })
     }
 
     @Test
-    fun `updateSong devuelve false si la cancion no esta en la lista`() {
+    fun `updateSong devuelve -1 si la cancion no esta en la lista`() {
         manager.setPlaylist(songs)
 
-        assertFalse(manager.updateSong(song("zzz")))
+        assertEquals(-1, manager.updateSong(song("zzz")))
+    }
+
+    @Test
+    fun `updateSong tambien alcanza al orden original con aleatorio activo`() {
+        manager.setPlaylist(songs, startIndex = 0)
+        manager.setShuffle(true)
+
+        manager.updateSong(song("d", title = "Nueva D"))
+        manager.setShuffle(false)
+
+        // Sin esto, apagar el aleatorio restauraba la versión vieja de la canción: la cola
+        // barajada y el orden original guardan los mismos objetos, no solo los mismos ids.
+        assertEquals("Nueva D", manager.playlist.value.first { it.id == "d" }.title)
     }
 
     @Test

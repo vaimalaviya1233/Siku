@@ -34,6 +34,11 @@ sealed class Screen(val route: String) {
     data object SettingsDownloads : Screen("settings/downloads")
     data object SettingsAppearance : Screen("settings/appearance")
 
+    // Personalizaciones con lista propia: viven fuera de Apariencia para que esa pantalla no
+    // se convierta en un muro de opciones (dos listas drag & drop la ocupaban entera).
+    data object SettingsTabs : Screen("settings/tabs")
+    data object SettingsPlayerBar : Screen("settings/player_bar")
+
     data object DownloadManager : Screen("download_manager")
 
     data object PlaylistDetail : Screen("playlist_detail/{playlistId}/{playlistName}") {
@@ -64,6 +69,12 @@ sealed class Screen(val route: String) {
     data object AlbumDetail : Screen("album_detail/{albumName}") {
         const val ARG_ALBUM_NAME = "albumName"
         fun createRoute(albumName: String): String = "album_detail/${encodeNameArg(albumName)}"
+        fun decodeName(raw: String?): String = decodeNameArg(raw)
+    }
+
+    data object GenreDetail : Screen("genre_detail/{genreName}") {
+        const val ARG_GENRE_NAME = "genreName"
+        fun createRoute(genreName: String): String = "genre_detail/${encodeNameArg(genreName)}"
         fun decodeName(raw: String?): String = decodeNameArg(raw)
     }
 }

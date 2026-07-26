@@ -22,7 +22,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
@@ -35,10 +34,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
-import coil3.compose.AsyncImage
 import com.qhana.siku.R
 import com.qhana.siku.data.model.PlaybackState
 import com.qhana.siku.data.model.Song
+import com.qhana.siku.ui.components.AdaptiveCollage
 import com.qhana.siku.ui.components.ComponentConfig
 import com.qhana.siku.ui.components.DetailPlayButtons
 import com.qhana.siku.ui.components.MaterialSymbol
@@ -378,9 +377,8 @@ private fun EmptyPlaylistState(
 }
 
 /**
- * Cabecera inmersiva: collage ADAPTATIVO con hasta 4 carátulas DISTINTAS — 1 a sangre,
- * 2 en mitades verticales, 3 con una grande + dos apiladas, 4 en mosaico 2x2. Nunca se
- * repite una imagen para rellenar huecos (se ve como un error).
+ * Cabecera inmersiva: [AdaptiveCollage] de hasta 4 carátulas distintas, con su propio placeholder
+ * cuando la lista no tiene ninguna.
  */
 @Composable
 private fun PlaylistImmersiveHeader(
@@ -411,28 +409,7 @@ private fun PlaylistImmersiveHeader(
                     color = colorScheme.onSurfaceVariant
                 )
             }
-            1 -> CollageTile(arts[0], Modifier.matchParentSize())
-            2 -> Row(modifier = Modifier.matchParentSize()) {
-                CollageTile(arts[0], Modifier.weight(1f))
-                CollageTile(arts[1], Modifier.weight(1f))
-            }
-            3 -> Row(modifier = Modifier.matchParentSize()) {
-                CollageTile(arts[0], Modifier.weight(1f))
-                Column(modifier = Modifier.weight(1f)) {
-                    CollageTile(arts[1], Modifier.weight(1f).fillMaxWidth())
-                    CollageTile(arts[2], Modifier.weight(1f).fillMaxWidth())
-                }
-            }
-            else -> Column(modifier = Modifier.matchParentSize()) {
-                Row(modifier = Modifier.weight(1f)) {
-                    CollageTile(arts[0], Modifier.weight(1f))
-                    CollageTile(arts[1], Modifier.weight(1f))
-                }
-                Row(modifier = Modifier.weight(1f)) {
-                    CollageTile(arts[2], Modifier.weight(1f))
-                    CollageTile(arts[3], Modifier.weight(1f))
-                }
-            }
+            else -> AdaptiveCollage(arts, Modifier.matchParentSize())
         }
 
         // Scrim inferior: funde el collage con el fondo y da contraste al texto.
@@ -489,14 +466,4 @@ private fun PlaylistImmersiveHeader(
             }
         }
     }
-}
-
-@Composable
-private fun CollageTile(art: String, modifier: Modifier = Modifier) {
-    AsyncImage(
-        model = art,
-        contentDescription = null,
-        contentScale = ContentScale.Crop,
-        modifier = modifier.fillMaxHeight()
-    )
 }

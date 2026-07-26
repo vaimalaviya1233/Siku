@@ -12,6 +12,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -23,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
@@ -163,7 +165,7 @@ fun MusicPlayerScreen(
     // con Onboarding como startDestination, al resolverse la sesión navegaríamos a Library
     // y el usuario vería el Onboarding un instante (flash al reabrir la app).
     val loggedIn = isLoggedIn ?: return
-    val localFolderUri by sourcesViewModel.localFolderUri.collectAsStateWithLifecycle()
+    val hasLocalSource by sourcesViewModel.hasLocalSource.collectAsStateWithLifecycle()
 
     // Una biblioteca necesita al menos una fuente. OneDrive ya NO es obligatorio: un usuario
     // solo-local nunca ve la pantalla de cuenta de Microsoft.
@@ -172,30 +174,94 @@ fun MusicPlayerScreen(
     // persistido, que sería estado redundante capaz de desincronizarse (flag a true sin fuentes =
     // biblioteca vacía sin salida) y que además haría pasar por el onboarding a quien ya tenía la
     // cuenta conectada de antes.
-    val hasAnySource = loggedIn || localFolderUri != null
+    val hasAnySource = loggedIn || hasLocalSource
     // remember: el destino inicial se decide una vez. Que el usuario conecte una fuente durante
     // el onboarding no debe recomponer el NavHost por debajo ni sacarlo de la pantalla.
+    //
+    // El onboarding a medias también manda: si se conectó la nube pero el proceso murió antes de
+    // fijar el tope de descargas, se vuelve al onboarding (que arranca en ese paso) en vez de
+    // caer en la biblioteca con la decisión sin tomar. El flag solo cuenta CON sesión activa,
+    // así que nunca puede exiliar a un usuario solo-local de su biblioteca.
+    val storageStepPending = sourcesViewModel.storageStepPending
     val startDestination = remember {
-        if (hasAnySource) Screen.Library.route else Screen.Onboarding.route
+        if (hasAnySource && !(loggedIn && storageStepPending)) Screen.Library.route
+        else Screen.Onboarding.route
     }
 
     val appState = rememberMusicAppState()
 
     // Sincronización al conectar sesión (primer arranque de la composición o login posterior).
+    //
+    // NUNCA durante el onboarding: ahí el usuario todavía está eligiendo fuentes y fijando el
+    // tope de descargas, así que arrancar el sync al conectar OneDrive empezaría a bajar audio
+    // contra un tope que aún no ha decidido. El scan del primer arranque lo dispara `onFinish`
+    // del onboarding (ver AppNavHost), una vez, con todas las fuentes ya configuradas.
     var previousLoginState by rememberSaveable { mutableStateOf<Boolean?>(null) }
     var hasInitialized by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(loggedIn) {
         if (!hasInitialized) {
             hasInitialized = true
             previousLoginState = loggedIn
-            if (loggedIn) syncViewModel.refreshSongs(force = false)
+            // En el arranque se compara contra `startDestination`, NO contra la ruta actual del
+            // navController: este efecto puede correr antes de que el NavHost registre su
+            // destino, y un `currentDestination` nulo se leería como "no estoy en onboarding".
+            val startsInOnboarding = startDestination == Screen.Onboarding.route
+            // Arrancamos FUERA del onboarding: si quedó un "tope pendiente" de una sesión
+            // anterior (p. ej. el usuario desconectó la nube después), ya no aplica y se limpia
+            // para que no reviva en el próximo arranque.
+            if (!startsInOnboarding && storageStepPending) sourcesViewModel.clearStorageStepPending()
+            // Cualquier fuente, no solo OneDrive: una biblioteca solo-local también necesita
+            // su escaneo de arranque para ver los archivos que se copiaron desde el PC.
+            if (hasAnySource && !startsInOnboarding) syncViewModel.refreshSongs(force = false)
             return@LaunchedEffect
         }
         if (previousLoginState != loggedIn) {
             previousLoginState = loggedIn
-            // Conectar OneDrive ya no implica navegar: durante el onboarding el usuario sigue
+            // Acá sí vale la ruta actual: el cambio de sesión ocurre en caliente, con el NavHost
+            // ya compuesto. Conectar OneDrive no navega: durante el onboarding el usuario sigue
             // eligiendo fuentes, y desde Ajustes se queda donde estaba. Solo sincronizamos.
-            if (loggedIn) syncViewModel.refreshSongs(force = false)
+            val onboarding = appState.navController.currentDestination?.route == Screen.Onboarding.route
+            if (loggedIn && !onboarding) syncViewModel.refreshSongs(force = false)
+        }
+    }
+
+    // Volver a la app re-lista las fuentes LOCALES: es justo cuando el usuario acaba de copiar
+    // canciones al teléfono desde el PC.
+    //
+    // Hace falta porque el escaneo de arranque de arriba corre UNA vez por proceso, y una app de
+    // música casi nunca vuelve a arrancar en frío: el servicio de reproducción mantiene el proceso
+    // vivo durante días, así que sin esto la biblioteca se quedaba vieja hasta un pull-to-refresh
+    // manual. La señal es el ciclo de vida, no un temporizador: no hay nada que sondear mientras
+    // el usuario está fuera de la app.
+    //
+    // Solo lo LOCAL, y SOLO si hay una fuente local: una biblioteca de pura nube no tiene nada
+    // que re-listar al volver a la app (su delta va en el scan completo, y pedirle a Graph en
+    // cada alt-tab sería tráfico por nada). Por eso el observer se monta condicionado a
+    // `hasLocalSource` y no a `hasAnySource`: sin música del dispositivo ni siquiera se registra.
+    //
+    // Registrarse dispara un ON_START de arranque además de los de vuelta, y se deja correr a
+    // propósito: es idempotente, y cubre que el ScanWorker se retrase por sus constraints
+    // (batería baja) — la música local aparece igual, que es lo único que no necesita red.
+    // Compartido con el polling de posición de más abajo.
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    if (hasLocalSource) {
+        DisposableEffect(lifecycleOwner) {
+            val observer = LifecycleEventObserver { _, event ->
+                // ON_START y no ON_RESUME: ON_RESUME también llega al cerrar un diálogo o al
+                // volver del selector de carpetas, y eso no es "el usuario volvió a la app".
+                //
+                // La ruta se consulta AQUÍ, no al montar: durante el onboarding no debe
+                // escanearse nada (el único scan del primer arranque lo dispara "Empezar"), pero
+                // al terminarlo el usuario sigue en el mismo proceso y sí debe refrescarse.
+                val inOnboarding =
+                    appState.navController.currentDestination?.route == Screen.Onboarding.route
+                if (event == Lifecycle.Event.ON_START && !inOnboarding) {
+                    syncViewModel.refreshLocalLibrary()
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
         }
     }
 
@@ -220,9 +286,11 @@ fun MusicPlayerScreen(
     // Position Updates — lifecycle-aware: el polling se detiene con la app en background
     // (repeatOnLifecycle cancela el bucle en onStop y lo reanuda en onStart), evitando
     // despertar el main thread cada segundo con la pantalla apagada toda la noche.
-    val lifecycleOwner = LocalLifecycleOwner.current
+    // BUFFERING cuenta además de PLAYING: es el estado en el que la barra tiene algo que contar
+    // (el búfer llenándose) y era justo cuando el bucle estaba parado, así que el indicador se
+    // habría quedado congelado exactamente en el caso para el que existe.
     LaunchedEffect(playbackState, lifecycleOwner) {
-        if (playbackState == PlaybackState.PLAYING) {
+        if (playbackState == PlaybackState.PLAYING || playbackState == PlaybackState.BUFFERING) {
             lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 // Refresh INMEDIATO al (re)entrar en primer plano: sin él, el primer tick
                 // llegaba 1s tarde y el progreso quedaba congelado en el valor
@@ -237,6 +305,16 @@ fun MusicPlayerScreen(
     }
 
     // --- Composición de capas ---
+    // El snackbar solo debe reservar el alto del MiniPlayer cuando la píldora está REALMENTE en
+    // pantalla: su ruta lo permite Y hay canción (misma condición que [PlayerOverlay]). En
+    // onboarding, ajustes o cualquier pantalla sin mini player, el inset fijo dejaba el snackbar
+    // flotando alto sobre una barra que no existe. Sin píldora, basta el margen normal sobre la navbar.
+    val miniPlayerShown = currentSong != null && when (appState.currentRoute) {
+        Screen.Library.route, Screen.PlaylistDetail.route, Screen.Favorites.route,
+        Screen.ArtistDetail.route, Screen.AlbumDetail.route, Screen.GenreDetail.route -> true
+        else -> false
+    }
+
     // El hostState viaja por CompositionLocal para que los diálogos full-screen (ventana propia,
     // que tapa el host de abajo) puedan montar su propio SnackbarHost sobre el mismo estado.
     CompositionLocalProvider(LocalSnackbarHostState provides snackbarHostState) {
@@ -273,7 +351,10 @@ fun MusicPlayerScreen(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .navigationBarsPadding()
-                        .padding(bottom = ComponentConfig.FloatingBarListInset)
+                        .padding(
+                            bottom = if (miniPlayerShown) ComponentConfig.FloatingBarListInset
+                            else ComponentConfig.FloatingBarBottomMargin
+                        )
                 )
             }
         }

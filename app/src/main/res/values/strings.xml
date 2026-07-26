@@ -116,8 +116,12 @@
     <string name="download_tab_active">Activas (%1$d)</string>
     <string name="download_tab_failed">Fallidas (%1$d)</string>
     <string name="download_global_progress">Progreso Global</string>
-    <!-- %1$d = actuales, %2$d = total -->
-    <string name="download_queue_progress">%1$d/%2$d canciones</string>
+    <!-- Tarjeta de consumo del gestor de descargas. %1$s/%2$s = tamaños ya formateados -->
+    <string name="download_storage_section">Almacenamiento</string>
+    <string name="download_storage_used_of">%1$s de %2$s</string>
+    <string name="download_storage_used_only">%1$s descargados</string>
+    <string name="download_storage_remaining">Quedan %1$s libres del tope</string>
+    <string name="download_storage_over_cap">%1$s por encima del tope</string>
     <string name="download_completed_progress">%1$d de %2$d completadas</string>
     <string name="download_syncing">Sincronizando…</string>
     <string name="download_up_to_date">Todo al día</string>
@@ -155,6 +159,8 @@
     <string name="download_storage_limit_title">Tope de almacenamiento</string>
     <string name="download_storage_limit_desc">Limita cuánto audio se descarga. Al llegar al tope, el sync frena y las canciones menos escuchadas se borran para hacer sitio a las nuevas.</string>
     <string name="download_storage_limit_unlimited">Sin límite</string>
+    <!-- %1$s = espacio libre ya formateado por el sistema (p. ej. "45 GB") -->
+    <string name="download_storage_free_space">%1$s libres en este dispositivo</string>
     <!-- %1$s = valor en GB -->
     <string name="download_storage_limit_value">%1$s GB</string>
     <!-- %1$s = usado, %2$s = tope -->
@@ -236,6 +242,13 @@
     <string name="album_art_desc">Carátula de %1$s</string>
     <string name="album_empty_detail">Álbum vacío</string>
 
+    <!-- ==================== Géneros (pestaña + detalle) ==================== -->
+    <string name="common_genres">Géneros</string>
+    <string name="genre_empty">Sin géneros</string>
+    <string name="genre_empty_desc">El género sale de la etiqueta del archivo. Las canciones de la nube lo leen al descargarse.</string>
+    <string name="genre_empty_detail">Género vacío</string>
+    <string name="genre_partial_match">Géneros compuestos</string>
+
     <!-- ==================== Plurales (contadores) ==================== -->
     <plurals name="album_count">
         <item quantity="one">%d álbum</item>
@@ -248,6 +261,10 @@
     <plurals name="artist_count">
         <item quantity="one">%d artista</item>
         <item quantity="other">%d artistas</item>
+    </plurals>
+    <plurals name="genre_count">
+        <item quantity="one">%d género</item>
+        <item quantity="other">%d géneros</item>
     </plurals>
 
     <!-- ==================== Now Playing / MiniPlayer / cola ==================== -->
@@ -283,6 +300,22 @@
     <string name="np_open_eq">Abrir ecualizador</string>
     <string name="np_more_options">Más opciones</string>
     <string name="np_download">Descargar</string>
+    <string name="np_view_queue_shuffled">Ver cola de reproducción, en aleatorio</string>
+    <string name="np_seek_forward">Adelantar %1$d segundos</string>
+    <string name="np_seek_back">Retroceder %1$d segundos</string>
+    <string name="np_album_art_options">Elegir el color del tema</string>
+    <string name="np_share">Compartir canción</string>
+    <string name="np_share_text">Estoy escuchando %1$s de %2$s</string>
+    <!-- Progreso hablado para lectores de pantalla: sin esto el slider se anuncia en porcentaje -->
+    <string name="np_progress_state">%1$s de %2$s</string>
+    <plurals name="np_spoken_minutes">
+        <item quantity="one">%d minuto</item>
+        <item quantity="other">%d minutos</item>
+    </plurals>
+    <plurals name="np_spoken_seconds">
+        <item quantity="one">%d segundo</item>
+        <item quantity="other">%d segundos</item>
+    </plurals>
 
     <!-- ==================== Widgets ==================== -->
     <string name="widget_player_desc">Carátula con play/pausa y me gusta</string>
@@ -334,6 +367,51 @@
     <string name="lyrics_refresh_notfound">No se encontraron letras</string>
     <string name="lyrics_no_metadata">El archivo no tiene tags de artista: usa la búsqueda manual</string>
 
+    <!-- ==================== Guardar letras ==================== -->
+    <string name="lyrics_save_desc">Guardar la letra</string>
+    <string name="lyrics_save_title">Guardar letra</string>
+    <string name="lyrics_save_subtitle">Elige dónde quedará guardada esta letra</string>
+    <string name="lyrics_save_option_lrc">Archivo .lrc</string>
+    <string name="lyrics_save_option_lrc_desc">Un archivo aparte, junto a la canción. No modifica la música.</string>
+    <string name="lyrics_save_option_embedded">Dentro de la canción</string>
+    <string name="lyrics_save_option_embedded_desc">En los tags del archivo. La letra viaja con la música a cualquier reproductor.</string>
+    <string name="lyrics_save_dont_ask">No volver a preguntar</string>
+    <string name="lyrics_save_confirm">Guardar</string>
+    <!-- Advertencias: lo que va a pasar de verdad al confirmar -->
+    <string name="lyrics_save_warn_rewrites">Se reescribirá el archivo de audio.</string>
+    <string name="lyrics_save_warn_upload">Se subirán %1$s a OneDrive.</string>
+    <string name="lyrics_save_warn_upload_small">Se subirá a OneDrive, junto a la canción.</string>
+    <string name="lyrics_save_warn_consent">Se te pedirá permiso de escritura en OneDrive.</string>
+    <!-- Motivos por los que una opción no está disponible -->
+    <string name="lyrics_save_blocked_format">Este formato no admite letras dentro del archivo.</string>
+    <string name="lyrics_save_blocked_not_downloaded">Descarga la canción para poder escribir dentro de ella.</string>
+    <string name="lyrics_save_blocked_no_folder">Elige una carpeta para las letras en Ajustes.</string>
+    <string name="lyrics_save_blocked_no_remote">No se sabe a qué archivo de la nube corresponde.</string>
+    <!-- Resultados -->
+    <string name="lyrics_save_ok_lrc">Letra guardada en un archivo .lrc</string>
+    <string name="lyrics_save_ok_embedded">Letra guardada dentro de la canción</string>
+    <string name="lyrics_save_err_empty">No hay ninguna letra que guardar</string>
+    <string name="lyrics_save_err_format">Este formato no admite letras dentro del archivo</string>
+    <string name="lyrics_save_err_not_downloaded">Descarga la canción primero</string>
+    <string name="lyrics_save_err_no_folder">Elige una carpeta para las letras en Ajustes</string>
+    <string name="lyrics_save_err_permission">Sin permiso para modificar el archivo</string>
+    <string name="lyrics_save_err_wifi">Necesitas WiFi para subir la canción</string>
+    <string name="lyrics_save_consent_denied">Sin permiso de escritura no se puede guardar en OneDrive</string>
+    <string name="lyrics_save_consent_title">Permiso de OneDrive</string>
+    <string name="lyrics_save_consent_message">Para dejar la letra junto a tu canción, Microsoft pide permiso de escritura sobre tu OneDrive. Es el único permiso que lo permite: no existe uno limitado a una sola carpeta.</string>
+    <string name="lyrics_save_consent_confirm">Conceder</string>
+
+    <!-- Ajuste: modo de guardado de letras -->
+    <string name="settings_lyrics_save_title">Guardar letras</string>
+    <string name="settings_lyrics_save_ask">Preguntar cada vez</string>
+    <string name="settings_lyrics_save_lrc">Siempre en un archivo .lrc</string>
+    <string name="settings_lyrics_save_embedded">Siempre dentro de la canción</string>
+    <string name="settings_lyrics_folder_title">Carpeta para las letras</string>
+    <string name="settings_lyrics_folder_summary">Dónde dejar los .lrc de la música del dispositivo</string>
+    <string name="settings_lyrics_folder_none">Sin carpeta elegida</string>
+    <string name="settings_lyrics_folder_choose">Elegir carpeta</string>
+    <string name="settings_lyrics_folder_clear">Quitar</string>
+
     <!-- ==================== Ecualizador ==================== -->
     <string name="eq_none_available">No hay ecualizador disponible</string>
     <string name="eq_open_error">Error al abrir ecualizador</string>
@@ -372,6 +450,15 @@
     <string name="settings_eq_header">Ecualizador</string>
     <string name="settings_use_system_eq">Usar ecualizador del sistema</string>
     <string name="settings_use_system_eq_desc">El botón de ecualizador del reproductor abre el panel del sistema (MIUI/fabricante) en vez del ecualizador propio. Al activarlo, el ecualizador propio se apaga.</string>
+
+    <!-- ==================== Pestañas de la biblioteca ==================== -->
+    <string name="settings_tabs_header">Pestañas</string>
+    <string name="settings_tabs_desc">Arrastra para ordenar. Las pestañas desactivadas no aparecen en la biblioteca.</string>
+    <string name="settings_tabs_min">Tiene que quedar al menos una pestaña</string>
+
+    <!-- ==================== Chip de formato del reproductor ==================== -->
+    <string name="settings_detailed_format">Detalle del formato</string>
+    <string name="settings_detailed_format_desc">Muestra la ficha técnica en el chip del reproductor (FLAC · 16 bit · 44.1 kHz). También se conmuta tocando el chip.</string>
 
     <!-- ==================== Barra del reproductor (toolbar del NowPlaying) ==================== -->
     <string name="settings_player_bar_header">Barra del reproductor</string>
@@ -415,17 +502,43 @@
     <string name="settings_local_header">Música local</string>
     <string name="settings_local_desc">Escanea una carpeta del dispositivo (subcarpetas incluidas). Sus canciones se suman a la misma biblioteca que OneDrive.</string>
     <string name="settings_local_pick">Elegir carpeta de música</string>
-    <string name="settings_local_change">Cambiar carpeta</string>
-    <string name="settings_local_remove">Quitar carpeta local</string>
+    <string name="settings_local_add">Añadir carpeta</string>
+    <string name="settings_local_remove">Quitar</string>
     <string name="settings_local_none">Ninguna carpeta seleccionada</string>
-    <string name="local_folder_set">Carpeta local añadida. Escaneando…</string>
-    <string name="local_folder_removed">Carpeta local quitada</string>
+    <string name="local_folder_set">Carpeta añadida. Escaneando…</string>
+    <string name="local_folder_removed">Carpeta quitada de la biblioteca</string>
+    <string name="local_folder_remove_title">¿Dejar de escanear «%1$s»?</string>
+    <string name="local_folder_remove_body">Sus canciones saldrán de tu biblioteca. Los archivos NO se borran del dispositivo.</string>
+    <string name="local_folder_remove_last_body">Es tu única carpeta: tu música del dispositivo saldrá de la biblioteca. Los archivos NO se borran.</string>
+    <string name="local_folder_remove_last_locked_body">Es tu única fuente de música. Para dejar de escanear esta carpeta, cambia a escanear todo el dispositivo, o cancela para conservarla.</string>
+    <string name="local_folder_remove_scan_all">Escanear todo</string>
+    <string name="local_device_scan_enabled">Escaneando toda la música del dispositivo…</string>
+    <string name="local_device_scan_disabled">Se dejó de escanear el dispositivo</string>
+    <string name="local_folders_restored">Se restauraron tus carpetas de música</string>
 
     <!-- Fuentes de música: onboarding (Fase 4) + sección de Ajustes -->
-    <string name="onboarding_title">Bienvenido</string>
-    <string name="onboarding_subtitle">Conecta al menos una fuente de música. Puedes añadir la otra más tarde desde Ajustes.</string>
+    <string name="onboarding_local_title">Tu música</string>
+    <string name="onboarding_local_subtitle">Empecemos por la música que ya tienes en el teléfono. Elige una de las dos formas, o sáltalo si toda tu música está en la nube.</string>
+    <string name="onboarding_cloud_title">OneDrive</string>
+    <string name="onboarding_cloud_subtitle">Conecta tu cuenta para escuchar tu música de la nube y descargarla para oírla sin conexión.</string>
     <string name="onboarding_start">Empezar</string>
+    <string name="onboarding_skip">Omitir</string>
     <string name="onboarding_need_source">Elige una fuente para continuar</string>
+    <string name="onboarding_continue">Continuar</string>
+    <!-- Indicador de paso del onboarding. %1$d = paso actual, %2$d = total -->
+    <string name="onboarding_step">Paso %1$d de %2$d</string>
+    <string name="onboarding_storage_title">Espacio</string>
+    <string name="onboarding_storage_subtitle">Tu música de la nube se descarga al teléfono para escucharla sin conexión. Decide cuánto espacio puede ocupar; se cambia cuando quieras desde Ajustes.</string>
+    <string name="onboarding_back_to_sources">Volver a las fuentes</string>
+    <string name="onboarding_notifications_title">Notificaciones</string>
+    <string name="onboarding_notifications_subtitle">Siku solo las usa para esto:</string>
+    <string name="onboarding_notif_player_title">Controles de reproducción</string>
+    <string name="onboarding_notif_player_desc">Play, siguiente y la carátula en la barra de estado y en la pantalla de bloqueo.</string>
+    <string name="onboarding_notif_sync_title">Progreso de tu nube</string>
+    <string name="onboarding_notif_sync_desc">Cuánto falta del escaneo y de las descargas de OneDrive.</string>
+    <string name="onboarding_notif_note">Nunca vas a recibir avisos promocionales. Puedes cambiarlo cuando quieras en los ajustes del sistema.</string>
+    <string name="onboarding_notif_allow">Permitir notificaciones</string>
+    <string name="onboarding_notif_skip">Ahora no</string>
 
     <string name="sources_header">Fuentes de música</string>
     <string name="source_onedrive_title">OneDrive</string>
@@ -433,8 +546,38 @@
     <string name="source_onedrive_connected">Cuenta conectada</string>
     <string name="source_onedrive_connect">Conectar</string>
     <string name="source_onedrive_disconnect">Desconectar</string>
-    <string name="source_local_title">Música local</string>
-    <string name="source_local_desc">Una carpeta del dispositivo, subcarpetas incluidas.</string>
+    <!-- Carpeta de OneDrive que se escanea. %1$s = ruta elegida -->
+    <string name="source_onedrive_folder">Carpeta: %1$s</string>
+    <string name="source_onedrive_folder_root">Toda la cuenta</string>
+    <string name="source_onedrive_change_folder">Cambiar carpeta</string>
+    <string name="onedrive_folder_title">Carpeta de música</string>
+    <string name="onedrive_folder_subtitle">Elige la carpeta de tu OneDrive donde está tu música. Se incluyen sus subcarpetas.</string>
+    <string name="onedrive_folder_empty">Esta carpeta no tiene subcarpetas</string>
+    <string name="onedrive_folder_up">Subir</string>
+    <!-- %1$s = nombre de la carpeta en la que está parado el explorador -->
+    <string name="onedrive_folder_use">Usar «%1$s»</string>
+    <string name="onedrive_folder_use_root">Usar toda la cuenta</string>
+    <string name="onedrive_folder_change_title">¿Cambiar la carpeta?</string>
+    <string name="onedrive_folder_change_body">Se volverá a escanear OneDrive desde cero. Las canciones que estaban fuera de la carpeta nueva se quitarán de la biblioteca, junto con su historial y sus colores, y saldrán de las listas donde estuvieran.</string>
+    <string name="onedrive_folder_change_confirm">Cambiar y escanear</string>
+    <plurals name="onedrive_folder_items">
+        <item quantity="one">%1$d elemento</item>
+        <item quantity="other">%1$d elementos</item>
+    </plurals>
+    <string name="source_local_title">Carpetas de música</string>
+    <string name="source_local_desc">Elige carpetas concretas, subcarpetas incluidas.</string>
+    <string name="source_device_title">Todo el dispositivo</string>
+    <string name="source_device_desc">Toda la música guardada en el teléfono, sin elegir carpetas.</string>
+    <string name="source_device_active">Escaneando toda la música del dispositivo</string>
+    <string name="source_device_enable">Escanear todo</string>
+    <string name="source_device_disable">Desactivar</string>
+    <string name="source_device_disable_locked">Añade una carpeta de música antes de desactivar el escaneo completo, para no quedarte sin biblioteca.</string>
+    <string name="source_device_permission_title">Falta el permiso</string>
+    <string name="source_device_permission_body">Para escanear toda la música del dispositivo, Siku necesita permiso para leer tus archivos de audio. Puedes concederlo desde los ajustes de la app, o elegir carpetas concretas en su lugar (eso no necesita permiso).</string>
+    <string name="source_device_permission_settings">Abrir ajustes</string>
+    <!-- Tarjeta única de música local del onboarding (escanear todo · añadir carpeta) -->
+    <string name="source_phone_music_title">Música del teléfono</string>
+    <string name="source_phone_music_desc">Toda la música del dispositivo, o solo las carpetas que elijas.</string>
     <string name="sources_rescan">Volver a escanear</string>
     <string name="sources_rescan_desc">Full scan de todas las fuentes y limpieza de las canciones que ya no existen.</string>
     <string name="sources_rescan_started">Escaneando fuentes…</string>
@@ -469,6 +612,8 @@
     <string name="settings_solid_bg_desc">Usa un color sólido del tema en lugar del degradado de la carátula.</string>
     <string name="settings_wavy_progress">Barra de progreso ondulada</string>
     <string name="settings_wavy_progress_desc">Usa la onda animada de Material 3 en el reproductor. El miniplayer mantiene la barra fina.</string>
+    <string name="settings_player_gestures">Gestos del reproductor</string>
+    <string name="settings_player_gestures_desc">Desliza la carátula para cambiar de canción, hacia abajo para cerrar el reproductor y hacia arriba en el miniplayer para abrirlo. Toca dos veces a los lados de la carátula para saltar %1$d segundos.</string>
 
     <!-- Estilo de paleta: cómo se genera el tema a partir del color de la carátula -->
     <string name="settings_palette_style">Estilo de color</string>
@@ -517,12 +662,6 @@
     <string name="tab_all">Canciones</string>
     <string name="tab_home">Inicio</string>
     <string name="tab_playlists">Listas</string>
-    <!-- Cabecera del modo selección múltiple. %d = nº de canciones marcadas -->
-    <plurals name="library_selected_count">
-        <item quantity="one">%d seleccionada</item>
-        <item quantity="other">%d seleccionadas</item>
-    </plurals>
-    <string name="library_clear_selection">Salir de la selección</string>
 
     <!-- ==================== Pantalla de inicio (home) ==================== -->
     <!-- Chip de orden (menú desplegable) compartido por Todas/Artistas/Álbumes. %1$s = criterio actual -->
@@ -539,6 +678,7 @@
     <!-- Subtítulos de tipo de cada contexto reanudable en "Seguir escuchando" -->
     <string name="home_ctx_album">Álbum</string>
     <string name="home_ctx_artist">Artista</string>
+    <string name="home_ctx_genre">Género</string>
     <string name="home_ctx_playlist">Lista</string>
     <string name="home_ctx_favorites">Favoritos</string>
     <string name="home_ctx_shuffle">Aleatorio</string>
@@ -570,6 +710,12 @@
     <string name="sync_error">Error de sincronización</string>
     <string name="sync_error_retry">%1$s · Toca para reintentar</string>
     <string name="sync_postponed_low_battery">Batería baja: la sincronización se hará cuando cargues el dispositivo</string>
+    <!-- Cola detenida por una condición del entorno, NO por un error: se reanuda sola, así que
+         el texto dice qué falta y no pide ninguna acción. -->
+    <string name="sync_paused">Descargas en pausa</string>
+    <string name="sync_paused_no_wifi">Se reanudarán al volver a una red WiFi</string>
+    <string name="sync_paused_no_network">Sin conexión. Se reanudarán al recuperarla</string>
+    <string name="sync_paused_low_battery">Batería baja. Se reanudarán al cargar el dispositivo</string>
     <string name="sync_new">%1$d nuevas</string>
     <string name="sync_downloaded">%1$d descargadas</string>
     <string name="sync_deleted">%1$d eliminadas</string>
@@ -577,6 +723,14 @@
     <string name="sync_failed_suffix">" · %1$d fallidas"</string>
     <string name="sync_up_to_date">Biblioteca al día</string>
     <string name="sync_scanning">Escaneando biblioteca</string>
+    <string name="sync_looking_for_changes">Buscando cambios…</string>
+    <string name="sync_error_auth">No se pudo autenticar con la fuente de música</string>
+    <!-- %1$s = carpeta configurada que no se encontró en OneDrive -->
+    <string name="sync_err_folder_missing">No se encontró la carpeta «%1$s» en OneDrive. Elige otra en Ajustes → Fuentes.</string>
+    <!-- %1$s = clase de la excepción, %2$s = detalle -->
+    <string name="sync_error_unexpected">Error inesperado (%1$s): %2$s</string>
+    <string name="sync_error_critical">Error crítico: %1$s</string>
+    <string name="sync_error_no_details">sin detalles</string>
     <string name="sync_found">%1$d encontradas · %2$s</string>
     <string name="sort_title_asc">Título (A-Z)</string>
     <string name="sort_name_asc">Nombre (A-Z)</string>
@@ -589,6 +743,11 @@
     <string name="sort_recently_played">Escuchadas recientemente</string>
 
     <!-- Progreso del escaneo por fuente (banner de sync: "N encontradas · <esto>") -->
+    <plurals name="source_local_count">
+        <item quantity="one">%1$d carpeta</item>
+        <item quantity="other">%1$d carpetas</item>
+    </plurals>
+
     <plurals name="scan_local_songs">
         <item quantity="one">%1$d canción local</item>
         <item quantity="other">%1$d canciones locales</item>
@@ -623,8 +782,5 @@
     <string name="error_playback_generic">Error de reproducción</string>
 
     <!-- ==================== Permisos ==================== -->
-    <string name="permission_required">Permiso requerido</string>
-    <string name="permission_rationale">Necesitamos acceso a tus archivos de audio.</string>
-    <string name="grant_permission">Otorgar Permiso</string>
 
 </resources>

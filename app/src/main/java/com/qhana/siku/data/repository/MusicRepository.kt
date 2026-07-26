@@ -32,8 +32,8 @@ class MusicRepository @Inject constructor(
     override fun getSongsByArtist(artist: String): Flow<List<Song>> = songRepository.getSongsByArtist(artist)
     override fun getRediscover(before: Long, limit: Int): Flow<List<Song>> = songRepository.getRediscover(before, limit)
     override fun getTopGenres(minCount: Int, limit: Int): Flow<List<com.qhana.siku.data.local.GenreSummary>> = songRepository.getTopGenres(minCount, limit)
-    override suspend fun getSongsByGenre(genre: String): List<Song> = songRepository.getSongsByGenre(genre)
-    override suspend fun getDownloadedSongsWithoutGenre(limit: Int): List<Song> = songRepository.getDownloadedSongsWithoutGenre(limit)
+    override suspend fun getSongsByGenre(genre: String, partialMatch: Boolean): List<Song> =
+        songRepository.getSongsByGenre(genre, partialMatch)
     override suspend fun updateGenre(songId: String, genre: String?) = songRepository.updateGenre(songId, genre)
     override fun getTopPlayedArtist(minSongs: Int): Flow<String?> = songRepository.getTopPlayedArtist(minSongs)
     override fun getPlayedSinceCount(since: Long): Flow<Int> = songRepository.getPlayedSinceCount(since)
@@ -67,6 +67,7 @@ class MusicRepository @Inject constructor(
     override suspend fun deleteSongs(idsToDelete: List<String>) = songRepository.deleteSongs(idsToDelete)
     override suspend fun countSongsNeedingWork(): Int = songRepository.countSongsNeedingWork()
     override suspend fun getTotalDownloadedBytes(): Long = songRepository.getTotalDownloadedBytes()
+    override fun getTotalDownloadedBytesFlow(): Flow<Long> = songRepository.getTotalDownloadedBytesFlow()
     override suspend fun getEvictionCandidates(excludeId: String): List<Pair<String, Long>> = songRepository.getEvictionCandidates(excludeId)
     override suspend fun getDownloadAttempts(songId: String): Int = songRepository.getDownloadAttempts(songId)
     override suspend fun markDownloadFailed(songId: String, error: String, transient: Boolean, attempts: Int, nextRetryAt: Long) =
@@ -76,8 +77,21 @@ class MusicRepository @Inject constructor(
     override fun getFailedDownloadsFlow(): Flow<List<FailedDownload>> = songRepository.getFailedDownloadsFlow()
     override suspend fun getEarliestRetryAt(): Long? = songRepository.getEarliestRetryAt()
     override suspend fun updateSongMetadata(song: Song) = songRepository.updateSongMetadata(song)
+    override suspend fun getSongsNeedingLightMetadata(): List<Song> = songRepository.getSongsNeedingLightMetadata()
+    override suspend fun updateLightMetadata(
+        songId: String, title: String, artist: String, album: String, genre: String?, durationMs: Long
+    ) = songRepository.updateLightMetadata(songId, title, artist, album, genre, durationMs)
+    override suspend fun getAlbumArtUri(album: String): String? = songRepository.getAlbumArtUri(album)
+    override suspend fun setAlbumArt(album: String, uri: String) = songRepository.setAlbumArt(album, uri)
     override suspend fun updateAlbumArtUri(songId: String, uri: String?) = songRepository.updateAlbumArtUri(songId, uri)
     override suspend fun getSongsWithLocalArt(): List<Song> = songRepository.getSongsWithLocalArt()
+    override suspend fun getSongsWithPendingArtwork(localOnly: Boolean): List<Song> =
+        songRepository.getSongsWithPendingArtwork(localOnly)
+    override suspend fun markArtworkAttempted(songIds: List<String>) =
+        songRepository.markArtworkAttempted(songIds)
+    override suspend fun clearArtworkAttempted(songIds: List<String>) =
+        songRepository.clearArtworkAttempted(songIds)
+    override suspend fun getReferencedArtUris(): Set<String> = songRepository.getReferencedArtUris()
     override suspend fun getAllSongs(): List<Song> = songRepository.getAllSongs()
     override suspend fun updateSongUrl(songId: String, newUrl: String) = songRepository.updateSongUrl(songId, newUrl)
     override suspend fun updateReplayGain(songId: String, trackGainDb: Float?, trackPeak: Float?, albumGainDb: Float?, albumPeak: Float?) = songRepository.updateReplayGain(songId, trackGainDb, trackPeak, albumGainDb, albumPeak)

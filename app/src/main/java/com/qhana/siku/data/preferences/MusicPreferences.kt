@@ -14,11 +14,15 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.qhana.siku.data.config.AppConfig
 import com.qhana.siku.data.model.AlbumSortOrder
 import com.qhana.siku.data.model.ArtistSortOrder
 import com.qhana.siku.data.model.DownloadControlState
 import com.qhana.siku.data.model.DuplicatePolicy
 import com.qhana.siku.data.model.EqCustomPreset
+import com.qhana.siku.data.model.LibraryTabState
+import com.qhana.siku.data.model.LibraryTabsConfig
+import com.qhana.siku.data.model.LyricsSaveMode
 import com.qhana.siku.data.model.PlaybackContext
 import com.qhana.siku.data.model.PlayerToolbarConfig
 import com.qhana.siku.data.model.ReplayGainMode
@@ -241,18 +245,85 @@ class MusicPreferences(context: Context) {
         it.remove(KEY_DELTA_TOKEN)
     }
 
-    // --- Fuente local (Fase 3): tree URI de SAF con permiso persistido ---
+    // --- Fuente local: o TODO el dispositivo (MediaStore), o N carpetas SAF. Excluyentes ---
 
-    /** Guarda el tree URI (`ACTION_OPEN_DOCUMENT_TREE`) de la carpeta de música local. */
-    fun saveLocalFolderUri(uri: String) = update {
-        it[KEY_LOCAL_FOLDER_URI] = uri
+    /**
+     * Tree URIs (`ACTION_OPEN_DOCUMENT_TREE`, con permiso persistido) de las carpetas de música.
+     * Vacío = no hay carpetas configuradas.
+     *
+     * Migra en lectura la clave de carpeta ÚNICA de las versiones anteriores: mientras el set no
+     * exista, el valor viejo se presenta como un set de un elemento. La reescritura ocurre sola en
+     * el primer [saveLocalFolderUris] y, hasta entonces, un usuario que actualice y no toque nada
+     * conserva su carpeta.
+     */
+    fun loadLocalFolderUris(): Set<String> = readLocalFolderUris(cache)
+
+    /**
+     * Reactivo. La configuración de fuentes se toca desde DOS instancias distintas de
+     * `SourcesViewModel` (el onboarding vive en su propio `NavBackStackEntry`), así que un
+     * `MutableStateFlow` local dejaría a una sin enterarse de lo que hizo la otra — el mismo
+     * motivo por el que el toggle del ecualizador se observa por flow.
+     */
+    val localFolderUrisFlow: Flow<Set<String>> = dataStore.data.map { readLocalFolderUris(it) }
+
+    private fun readLocalFolderUris(prefs: Preferences): Set<String> =
+        prefs[KEY_LOCAL_FOLDER_URIS] ?: prefs[KEY_LOCAL_FOLDER_URI]?.let { setOf(it) } ?: emptySet()
+
+    /** Fija el conjunto completo de carpetas (añadir y quitar son operaciones de la capa de arriba). */
+    fun saveLocalFolderUris(uris: Set<String>) = update {
+        it[KEY_LOCAL_FOLDER_URIS] = uris
+        // La clave vieja deja de tener sentido en cuanto se escribe el set: si sobreviviera,
+        // vaciar las carpetas haría "reaparecer" la carpeta original en la siguiente lectura.
+        it.remove(KEY_LOCAL_FOLDER_URI)
     }
 
-    /** Tree URI de la carpeta local elegida, o null si el usuario no configuró ninguna. */
-    fun loadLocalFolderUri(): String? = cache[KEY_LOCAL_FOLDER_URI]
-
-    fun clearLocalFolderUri() = update {
+    /**
+     * Fija carpetas y modo dispositivo en UNA sola escritura. Ambos ajustes son excluyentes y
+     * cambian juntos (añadir carpeta apaga el escaneo completo; activarlo vacía las carpetas).
+     *
+     * Partirlo en dos [update] encadenados hacía que sus volcados a disco —cada uno un snapshot
+     * completo del caché— compitieran en el scope de IO: al no garantizarse el orden, el snapshot
+     * más viejo (con la lista de carpetas de ANTES) podía pisar al nuevo, y la carpeta recién
+     * añadida "desaparecía" del flujo reactivo aunque el caché en memoria ya la tuviera.
+     *
+     * El "stash" (carpetas guardadas para restaurar tras un episodio de escaneo del dispositivo) se
+     * fija/limpia en la MISMA transacción por el mismo motivo: dos escrituras separadas competirían.
+     *
+     * @param stashFolders si != null, fija el stash; usar al activar el dispositivo para no perder
+     *        las carpetas que había.
+     * @param clearStash true al restaurar: vacía el stash una vez devueltas las carpetas.
+     */
+    fun saveLocalSources(
+        folderUris: Set<String>,
+        scanWholeDevice: Boolean,
+        stashFolders: Set<String>? = null,
+        clearStash: Boolean = false
+    ) = update {
+        it[KEY_LOCAL_FOLDER_URIS] = folderUris
         it.remove(KEY_LOCAL_FOLDER_URI)
+        it[KEY_SCAN_WHOLE_DEVICE] = scanWholeDevice
+        if (stashFolders != null) it[KEY_LOCAL_FOLDER_URIS_STASH] = stashFolders
+        if (clearStash) it.remove(KEY_LOCAL_FOLDER_URIS_STASH)
+    }
+
+    /** Carpetas guardadas al activar el escaneo del dispositivo (vacío si no hay nada que restaurar). */
+    fun loadStashedFolderUris(): Set<String> = cache[KEY_LOCAL_FOLDER_URIS_STASH] ?: emptySet()
+
+    /** Reactivo: gobierna si en Ajustes se puede apagar el escaneo del dispositivo (habría a dónde volver). */
+    val localFolderStashFlow: Flow<Set<String>> =
+        dataStore.data.map { it[KEY_LOCAL_FOLDER_URIS_STASH] ?: emptySet() }
+
+    /**
+     * ¿Indexar TODA la música del dispositivo (MediaStore) en vez de carpetas concretas?
+     * Es el único modo local que necesita permiso de lectura de audio.
+     */
+    fun loadScanWholeDevice(): Boolean = cache[KEY_SCAN_WHOLE_DEVICE] == true
+
+    /** Reactivo, por el mismo motivo que [localFolderUrisFlow]. */
+    val scanWholeDeviceFlow: Flow<Boolean> = dataStore.data.map { it[KEY_SCAN_WHOLE_DEVICE] == true }
+
+    fun saveScanWholeDevice(enabled: Boolean) = update {
+        it[KEY_SCAN_WHOLE_DEVICE] = enabled
     }
 
     fun clearQueue() = update {
@@ -404,27 +475,74 @@ class MusicPreferences(context: Context) {
         update { it[KEY_EQ_CONFLICT_WARNING_SUPPRESSED] = suppressed }
     fun loadEqConflictWarningSuppressed(): Boolean = cache[KEY_EQ_CONFLICT_WARNING_SUPPRESSED] ?: false
 
-    // --- Duplicados entre fuentes (v23) ---
+    // --- Onboarding: paso del tope de descargas a medias ---
 
     /**
-     * Bootstrap v23 (una sola vez): el delta incremental nunca re-envía items sin cambios,
-     * así que las filas de nube pre-migración jamás recibirían su relativePath — el primer
-     * sync tras actualizar limpia el delta token para forzar UN full scan de backfill.
+     * true mientras el usuario conectó una fuente de NUBE durante el onboarding pero todavía no
+     * llegó a fijar el tope de descargas. Sobrevive a un cierre forzado, así que al reabrir se
+     * vuelve a ese paso en vez de caer en la biblioteca con el onboarding a medias (y sin haber
+     * decidido cuánto espacio puede ocupar el audio).
+     *
+     * NO es un flag "onboarding completado" (ese sería estado redundante frente a "¿hay alguna
+     * fuente?", capaz de quedar en true sin fuentes = biblioteca vacía sin salida). Este solo
+     * puede RETENER en el onboarding, nunca sacar de él, y por defecto es false: quien ya tenía
+     * la app instalada no ve ningún cambio.
      */
-    fun saveRelPathBackfillDone() = update { it[KEY_RELPATH_BACKFILL] = true }
-    fun loadRelPathBackfillDone(): Boolean = cache[KEY_RELPATH_BACKFILL] ?: false
-
-    /**
-     * Bootstrap v24 (una sola vez): re-lee el tag GENRE de las canciones ya descargadas para
-     * poblar los chips de género del inicio (las nuevas lo reciben en el pipeline de análisis).
-     */
-    fun saveGenreBackfillDone() = update { it[KEY_GENRE_BACKFILL] = true }
-    fun loadGenreBackfillDone(): Boolean = cache[KEY_GENRE_BACKFILL] ?: false
+    fun saveOnboardingStoragePending(pending: Boolean) =
+        update { it[KEY_ONBOARDING_STORAGE_PENDING] = pending }
+    fun loadOnboardingStoragePending(): Boolean = cache[KEY_ONBOARDING_STORAGE_PENDING] ?: false
 
     /** null = aún no se preguntó (el sync detecta y dispara el diálogo de decisión). */
     fun saveDuplicatePolicy(policy: DuplicatePolicy) = update { it[KEY_DUPLICATE_POLICY] = policy.name }
     fun loadDuplicatePolicy(): DuplicatePolicy? =
         cache[KEY_DUPLICATE_POLICY]?.let { runCatching { DuplicatePolicy.valueOf(it) }.getOrNull() }
+
+    // --- Carpeta de OneDrive que se escanea ---
+
+    /**
+     * Ruta relativa a la raíz del OneDrive del usuario (`Music`, `Documentos/Música`…). Cadena
+     * vacía = la cuenta entera.
+     *
+     * **Cambiarla invalida el delta token**: el token describe el estado de UN subárbol concreto,
+     * y reutilizarlo apuntando a otra carpeta daría un incremental sobre cambios que no son los de
+     * esa carpeta. Por eso [saveOneDriveFolderPath] lo limpia en la misma escritura y no en el
+     * llamador — un olvido ahí produciría una biblioteca incoherente muy difícil de diagnosticar.
+     */
+    fun loadOneDriveFolderPath(): String = readOneDriveFolderPath(cache)
+    val oneDriveFolderPathFlow: Flow<String> = dataStore.data.map { readOneDriveFolderPath(it) }
+
+    private fun readOneDriveFolderPath(prefs: Preferences): String =
+        prefs[KEY_ONEDRIVE_FOLDER] ?: AppConfig.ONEDRIVE_DEFAULT_FOLDER
+
+    fun saveOneDriveFolderPath(path: String) = update {
+        it[KEY_ONEDRIVE_FOLDER] = path.trim().trim('/')
+        it.remove(KEY_DELTA_TOKEN)
+    }
+
+    // --- Guardado de letras (pantalla de letras + Ajustes → Reproducción) ---
+
+    /**
+     * Cómo guardar las letras. [LyricsSaveMode.ASK] = preguntar cada vez; el diálogo lo cambia
+     * cuando el usuario marca "no volver a preguntar", y Ajustes puede devolverlo a ASK.
+     */
+    fun saveLyricsSaveMode(mode: LyricsSaveMode) = update { it[KEY_LYRICS_SAVE_MODE] = mode.name }
+    fun loadLyricsSaveMode(): LyricsSaveMode = readLyricsSaveMode(cache)
+    val lyricsSaveModeFlow: Flow<LyricsSaveMode> = dataStore.data.map { readLyricsSaveMode(it) }
+
+    private fun readLyricsSaveMode(prefs: Preferences): LyricsSaveMode =
+        prefs[KEY_LYRICS_SAVE_MODE]?.let { runCatching { LyricsSaveMode.valueOf(it) }.getOrNull() }
+            ?: LyricsSaveMode.ASK
+
+    /**
+     * Carpeta (árbol SAF) donde dejar los `.lrc` de las canciones a las que no se les puede
+     * escribir al lado: las indexadas por MediaStore, donde el permiso de audio no autoriza a
+     * crear archivos no-media. Vacío = no configurada.
+     */
+    fun saveLyricsFolderUri(uri: String?) = update {
+        if (uri == null) it.remove(KEY_LYRICS_FOLDER_URI) else it[KEY_LYRICS_FOLDER_URI] = uri
+    }
+    fun loadLyricsFolderUri(): String? = cache[KEY_LYRICS_FOLDER_URI]
+    val lyricsFolderUriFlow: Flow<String?> = dataStore.data.map { it[KEY_LYRICS_FOLDER_URI] }
 
     // --- Fotos de artistas (Deezer): política de red (Ajustes → Descargas) ---
 
@@ -533,6 +651,72 @@ class MusicPreferences(context: Context) {
     val nowPlayingWavyProgressFlow: Flow<Boolean> =
         dataStore.data.map { it[KEY_NOW_PLAYING_WAVY] ?: false }
 
+    /**
+     * Chip de formato del NowPlaying EXTENDIDO (`FLAC · 16 bit · 44.1 kHz`) en vez de solo el
+     * contenedor. Se escribe desde dos sitios —el switch de Ajustes → Apariencia y el tap sobre
+     * el propio chip—, de ahí que sea reactivo: son instancias de ViewModel distintas.
+     */
+    fun saveNowPlayingDetailedFormat(enabled: Boolean) = update {
+        it[KEY_NOW_PLAYING_DETAILED_FORMAT] = enabled
+    }
+
+    fun loadNowPlayingDetailedFormat(): Boolean = cache[KEY_NOW_PLAYING_DETAILED_FORMAT] ?: false
+
+    val nowPlayingDetailedFormatFlow: Flow<Boolean> =
+        dataStore.data.map { it[KEY_NOW_PLAYING_DETAILED_FORMAT] ?: false }
+
+    /**
+     * Gestos del reproductor: deslizar la carátula para cambiar de canción, deslizar hacia abajo
+     * para cerrar el player, deslizar hacia arriba en el mini para abrirlo y doble toque en los
+     * laterales de la carátula para saltar unos segundos.
+     *
+     * Es UN solo ajuste para los cuatro a propósito: son el mismo contrato ("la carátula y el
+     * player responden al dedo"), y trocearlo en cuatro switches obligaría al usuario a razonar
+     * sobre gestos que aún no descubrió. Encendido por defecto —es lo que todo reproductor hace—
+     * y apagable porque conviven con el long-press del selector de color y con el arrastre del
+     * slider, y a quien le estorben tiene que poder quitarlos.
+     */
+    fun savePlayerGestures(enabled: Boolean) = update {
+        it[KEY_PLAYER_GESTURES] = enabled
+    }
+
+    fun loadPlayerGestures(): Boolean = cache[KEY_PLAYER_GESTURES] ?: DEFAULT_PLAYER_GESTURES
+
+    /** Reactivo por el mismo motivo que [nowPlayingSolidBackgroundFlow] (Ajustes ↔ reproductor). */
+    val playerGesturesFlow: Flow<Boolean> =
+        dataStore.data.map { it[KEY_PLAYER_GESTURES] ?: DEFAULT_PLAYER_GESTURES }
+
+    // --- Biblioteca ---
+
+    /**
+     * Pestañas de la biblioteca: orden + cuáles se muestran. Reactivo porque lo edita Ajustes y
+     * lo consume `LibraryScreen` (el pager se reconstruye en vivo al guardar).
+     */
+    val libraryTabsConfigFlow: Flow<List<LibraryTabState>> =
+        dataStore.data.map { LibraryTabsConfig.decode(it[KEY_LIBRARY_TABS_CONFIG]) }
+
+    fun loadLibraryTabsConfig(): List<LibraryTabState> =
+        LibraryTabsConfig.decode(cache[KEY_LIBRARY_TABS_CONFIG])
+
+    fun saveLibraryTabsConfig(list: List<LibraryTabState>) = update {
+        it[KEY_LIBRARY_TABS_CONFIG] = LibraryTabsConfig.encode(list)
+    }
+
+    /**
+     * Géneros por coincidencia PARCIAL: con esto activo, abrir "Rock" trae también las canciones
+     * etiquetadas "Rock/Metal" o "Hard Rock" (LIKE), no solo las de tag exacto. Los tags GENRE
+     * reales son un desastre y no hay forma de normalizarlos sin perder información, así que la
+     * decisión es del usuario. Default apagado = lo que se ve es lo que dice el tag.
+     */
+    fun saveGenrePartialMatch(enabled: Boolean) = update {
+        it[KEY_GENRE_PARTIAL_MATCH] = enabled
+    }
+
+    fun loadGenrePartialMatch(): Boolean = cache[KEY_GENRE_PARTIAL_MATCH] ?: false
+
+    val genrePartialMatchFlow: Flow<Boolean> =
+        dataStore.data.map { it[KEY_GENRE_PARTIAL_MATCH] ?: false }
+
     // --- Tema ---
 
     /**
@@ -559,8 +743,8 @@ class MusicPreferences(context: Context) {
         private val KEY_ARTIST_SORT = stringPreferencesKey("artist_sort_order")
         private val KEY_ALBUM_SORT = stringPreferencesKey("album_sort_order")
         private val KEY_DUPLICATE_POLICY = stringPreferencesKey("duplicate_policy")
-        private val KEY_RELPATH_BACKFILL = booleanPreferencesKey("relpath_backfill_done")
-        private val KEY_GENRE_BACKFILL = booleanPreferencesKey("genre_backfill_done")
+        private val KEY_ONBOARDING_STORAGE_PENDING =
+            booleanPreferencesKey("onboarding_storage_step_pending")
         private const val QUEUE_DELIMITER = "" // Unit Separator
 
         // DataStore keys tipadas
@@ -579,6 +763,9 @@ class MusicPreferences(context: Context) {
         private val KEY_ARTIST_PHOTOS_BANNER = booleanPreferencesKey("artist_photos_banner_enabled")
         private val KEY_ARTIST_PHOTO_DETAIL_METERED = booleanPreferencesKey("artist_photo_detail_metered")
         private val KEY_TOOLBAR_CONFIG = stringPreferencesKey("player_toolbar_config")
+        private val KEY_LIBRARY_TABS_CONFIG = stringPreferencesKey("library_tabs_config")
+        private val KEY_NOW_PLAYING_DETAILED_FORMAT = booleanPreferencesKey("now_playing_detailed_format")
+        private val KEY_GENRE_PARTIAL_MATCH = booleanPreferencesKey("genre_partial_match")
         private val KEY_RECENT_CONTEXTS = stringPreferencesKey("recent_playback_contexts")
         private val KEY_NOW_PLAYING_SOLID_BG = booleanPreferencesKey("now_playing_solid_bg")
         private val KEY_THEME_PALETTE_STYLE = stringPreferencesKey("theme_palette_style")
@@ -586,6 +773,10 @@ class MusicPreferences(context: Context) {
         /** Igual que el default de Material You y el de MaterialKolor. */
         const val DEFAULT_PALETTE_STYLE = "TonalSpot"
         private val KEY_NOW_PLAYING_WAVY = booleanPreferencesKey("now_playing_wavy_progress")
+        private val KEY_PLAYER_GESTURES = booleanPreferencesKey("player_gestures")
+
+        /** Los gestos vienen ENCENDIDOS: es el comportamiento que espera cualquiera. */
+        private const val DEFAULT_PLAYER_GESTURES = true
         private val KEY_DOWNLOAD_CONTROL_STATE = stringPreferencesKey("download_control_state")
         private val KEY_STOP_BANNER_DISMISSED = booleanPreferencesKey("download_stop_banner_dismissed")
         private val KEY_DOWNLOAD_BANNER_MUTED = booleanPreferencesKey("download_banner_muted")
@@ -599,8 +790,16 @@ class MusicPreferences(context: Context) {
         private val KEY_OFFLOAD_BROKEN = booleanPreferencesKey("audio_offload_broken")
         private val KEY_ORIGINAL_QUEUE = stringPreferencesKey("original_queue_ids")
         private val KEY_DELTA_TOKEN = stringPreferencesKey("delta_token")
+        /** Legacy: carpeta local ÚNICA. Solo se LEE, para migrar al set (ver loadLocalFolderUris). */
         private val KEY_LOCAL_FOLDER_URI = stringPreferencesKey("local_folder_uri")
+        private val KEY_LOCAL_FOLDER_URIS = stringSetPreferencesKey("local_folder_uris")
+        /** Carpetas guardadas al activar el escaneo del dispositivo, para restaurarlas al apagarlo. */
+        private val KEY_LOCAL_FOLDER_URIS_STASH = stringSetPreferencesKey("local_folder_uris_stash")
+        private val KEY_SCAN_WHOLE_DEVICE = booleanPreferencesKey("scan_whole_device")
         private val KEY_MANUAL_COLOR_IDS = stringSetPreferencesKey("manual_color_song_ids")
+        private val KEY_ONEDRIVE_FOLDER = stringPreferencesKey("onedrive_folder_path")
+        private val KEY_LYRICS_SAVE_MODE = stringPreferencesKey("lyrics_save_mode")
+        private val KEY_LYRICS_FOLDER_URI = stringPreferencesKey("lyrics_folder_uri")
 
         /**
          * DataStore de preferencias con migración automática desde SharedPreferences.

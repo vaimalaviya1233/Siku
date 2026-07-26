@@ -24,6 +24,10 @@ sealed class PlaybackContext {
         override val key get() = "artist:$name"
     }
 
+    data class Genre(val name: String, val coverUri: String?) : PlaybackContext() {
+        override val key get() = "genre:$name"
+    }
+
     data class Playlist(val id: Long, val name: String, val coverUri: String?) : PlaybackContext() {
         override val key get() = "playlist:$id"
     }
@@ -48,6 +52,7 @@ sealed class PlaybackContext {
         // carátula) van en Base64 URL-safe (sin '|' ni '\n') para neutralizar separadores.
         //   A|<b64 name>|<b64 cover>       álbum
         //   R|<b64 name>|<b64 cover>       artista
+        //   G|<b64 name>|<b64 cover>       género
         //   P|<id>|<b64 name>|<b64 cover>  lista
         //   F / S / L                      favoritos / aleatorio / biblioteca
         fun encode(list: List<PlaybackContext>): String =
@@ -55,6 +60,7 @@ sealed class PlaybackContext {
                 when (ctx) {
                     is Album -> "A|${b64(ctx.name)}|${b64(ctx.coverUri)}"
                     is Artist -> "R|${b64(ctx.name)}|${b64(ctx.coverUri)}"
+                    is Genre -> "G|${b64(ctx.name)}|${b64(ctx.coverUri)}"
                     is Playlist -> "P|${ctx.id}|${b64(ctx.name)}|${b64(ctx.coverUri)}"
                     Favorites -> "F"
                     LibraryShuffle -> "S"
@@ -69,6 +75,7 @@ sealed class PlaybackContext {
                 when (parts.getOrNull(0)) {
                     "A" -> Album(unb64(parts.getOrNull(1)) ?: return@mapNotNull null, unb64(parts.getOrNull(2)))
                     "R" -> Artist(unb64(parts.getOrNull(1)) ?: return@mapNotNull null, unb64(parts.getOrNull(2)))
+                    "G" -> Genre(unb64(parts.getOrNull(1)) ?: return@mapNotNull null, unb64(parts.getOrNull(2)))
                     "P" -> {
                         val id = parts.getOrNull(1)?.toLongOrNull() ?: return@mapNotNull null
                         val name = unb64(parts.getOrNull(2)) ?: return@mapNotNull null

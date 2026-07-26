@@ -20,9 +20,20 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!--
+        allowBackup=false a propósito: el backup a la nube de Android tiene un tope de 25 MB
+        por app, así que se lleva la BD y las preferencias pero NUNCA el audio descargado.
+        Restaurarlo en otro device dejaba dos estados imposibles: canciones marcadas como
+        descargadas cuyo archivo no existe (fantasmas que sólo repara el healing del siguiente
+        sync), y un delta token de OneDrive válido sobre una biblioteca vacía → el scan
+        incremental no reporta nada y la biblioteca se queda EN BLANCO.
+        Con targetSdk 35 esto NO desactiva la transferencia device-to-device al cambiar de
+        teléfono, que sí copia todo junto (BD + audio) y por eso es consistente.
+        Las playlists tienen su propia vía de migración: el backup JSON a OneDrive.
+    -->
     <application
         android:name=".MusicPlayerApp"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -105,6 +116,21 @@
                 <action android:name="androidx.media3.session.MediaSessionService" />
             </intent-filter>
         </service>
+
+        <!--
+            Compartir la canción en curso: los audios descargados viven en el almacenamiento
+            privado de la app y sin provider no hay forma de pasarle el archivo a otra app.
+            El alcance está acotado en res/xml/file_paths.xml a files/music.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <!-- Disable default WorkManager initializer for Hilt on-demand initialization -->
         <provider

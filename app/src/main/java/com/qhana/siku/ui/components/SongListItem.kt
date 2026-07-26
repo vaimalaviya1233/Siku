@@ -27,8 +27,11 @@ import com.qhana.siku.ui.model.toUiModel
 
 /**
  * Indicador de estado de descarga de una canción.
- * Icon button ESTÁNDAR M3 Expressive (sin contenedor): ripple + shape-morph al presionar
- * vía `IconButtonDefaults.shapes()`, mismo patrón que los toggles con `toggleableShapes()`.
+ * Con [onClick] es un icon button ESTÁNDAR M3 Expressive (sin contenedor): ripple + shape-morph
+ * al presionar vía `IconButtonDefaults.shapes()`, mismo patrón que los toggles con
+ * `toggleableShapes()`. Sin [onClick] se dibuja como INDICADOR puro: un botón que se ilumina y no
+ * responde se lee como un control roto, y en la mayoría de las listas el estado solo informa.
+ * El área que ocupa es la misma en ambos casos (mínimo táctil de M3), así que la fila no salta.
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -38,7 +41,7 @@ fun SongStatusIcon(
     downloadProgress: Float?,
     modifier: Modifier = Modifier,
     size: Dp = ComponentConfig.StatusIconSize,
-    onClick: () -> Unit = {},
+    onClick: (() -> Unit)? = null,
     contrast: Boolean = false,
     contrastColor: Color = MaterialTheme.colorScheme.primary
 ) {
@@ -54,11 +57,7 @@ fun SongStatusIcon(
         else -> stringResource(R.string.status_download_song)
     }
 
-    IconButton(
-        onClick = onClick,
-        shapes = IconButtonDefaults.shapes(),
-        modifier = modifier.semantics { contentDescription = description }
-    ) {
+    val content: @Composable () -> Unit = {
         when {
             isDownloaded -> {
                 MaterialSymbol("offline_pin", color = primaryColor, size = sizeSp)
@@ -86,6 +85,24 @@ fun SongStatusIcon(
             }
         }
     }
+
+    val described = modifier.semantics { contentDescription = description }
+    if (onClick != null) {
+        IconButton(
+            onClick = onClick,
+            shapes = IconButtonDefaults.shapes(),
+            modifier = described,
+            content = { content() }
+        )
+    } else {
+        // `minimumInteractiveComponentSize` es el MISMO mecanismo con el que IconButton reserva su
+        // espacio, así que el indicador ocupa lo mismo que el botón y las filas siguen alineadas.
+        Box(
+            modifier = described.minimumInteractiveComponentSize(),
+            contentAlignment = Alignment.Center,
+            content = { content() }
+        )
+    }
 }
 
 // ============== SONG ITEM ==============
@@ -99,9 +116,10 @@ fun SongItem(
     downloadProgress: Float? = null,
     showDuration: Boolean = false, // Por defecto NO se muestra la duración en las listas
     showStatusIcon: Boolean = true, // New parameter
-    useFillAnimation: Boolean = false, // New parameter
+    useRingProgress: Boolean = false, // aro de progreso alrededor de la carátula (cola de descargas)
     showActiveBackground: Boolean = true,
-    onStatusClick: () -> Unit = {},
+    // null = el estado solo informa (sin ripple). Solo lo pasan las pantallas que reaccionan al tap.
+    onStatusClick: (() -> Unit)? = null,
     trailingContent: @Composable (() -> Unit)? = null
 ) {
     // Convertir a modelo UI para reutilizar la lógica de renderizado
@@ -115,7 +133,7 @@ fun SongItem(
         downloadProgress = downloadProgress,
         showDuration = showDuration,
         showStatusIcon = showStatusIcon,
-        useFillAnimation = useFillAnimation, // Pass through
+        useRingProgress = useRingProgress, // Pass through
         showActiveBackground = showActiveBackground,
         onStatusClick = onStatusClick,
         trailingContent = trailingContent
@@ -132,11 +150,12 @@ fun SongItem(
     downloadProgress: Float? = null,
     showDuration: Boolean = false, // Por defecto NO se muestra la duración en las listas
     showStatusIcon: Boolean = true, // New parameter
-    useFillAnimation: Boolean = false, // New parameter
+    useRingProgress: Boolean = false, // aro de progreso alrededor de la carátula (cola de descargas)
     // El item activo dibuja su propio tinte de contenedor. Ponerlo en false cuando un CONTENEDOR
     // externo ya pinta el resaltado de TODA la fila (p. ej. la cola), para no duplicar el énfasis.
     showActiveBackground: Boolean = true,
-    onStatusClick: () -> Unit = {},
+    // null = el estado solo informa (sin ripple). Solo lo pasan las pantallas que reaccionan al tap.
+    onStatusClick: (() -> Unit)? = null,
     trailingContent: @Composable (() -> Unit)? = null
 ) {
     // `ListItem` REAL de M3 (anatomía + tokens por spec): headline `bodyLarge`/onSurface,
@@ -149,12 +168,17 @@ fun SongItem(
         containerColor = if (isPlaying && showActiveBackground) activeContainer else Color.Transparent
     )
 
+    // El indicador de estado del archivo (descargada / se transmitirá) es un concepto de NUBE:
+    // una canción del propio dispositivo está siempre ahí, así que el icono no comunicaba nada y
+    // su pulsación solo repetía lo obvio. En una biblioteca solo-local desaparece de toda la app.
+    val showStatus = showStatusIcon && song.isCloud
+
     // contentDescription/stateDescription hoisteados (los lambdas de semantics {} no son @Composable).
     val playingStateDesc = if (isPlaying) stringResource(R.string.status_playing) else ""
     val durationDesc = stringResource(R.string.common_duration, song.durationText)
 
     // Trailing (duración + estado de descarga + menú). null si no hay nada → ListItem no reserva slot.
-    val trailing: @Composable (() -> Unit)? = if (showDuration || showStatusIcon || trailingContent != null) {
+    val trailing: @Composable (() -> Unit)? = if (showDuration || showStatus || trailingContent != null) {
         {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (showDuration) {
@@ -166,7 +190,7 @@ fun SongItem(
                     )
                 }
                 // Estado de descarga junto al menú, como icon button estándar (sin fondo).
-                if (showStatusIcon) {
+                if (showStatus) {
                     SongStatusIcon(
                         isDownloaded = song.isDownloaded,
                         isDownloading = isDownloading,
@@ -210,7 +234,7 @@ fun SongItem(
                 cacheKey = song.id,
                 downloadProgress = downloadProgress,
                 isDownloading = isDownloading,
-                useFillAnimation = useFillAnimation
+                useRingProgress = useRingProgress
             )
         },
         trailingContent = trailing,

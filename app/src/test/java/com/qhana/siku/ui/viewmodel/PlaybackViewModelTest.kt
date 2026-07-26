@@ -47,6 +47,9 @@ class PlaybackViewModelTest {
     @RelaxedMockK lateinit var syncManager: com.qhana.siku.data.coordinator.SyncManager
     @RelaxedMockK lateinit var context: Context
     @RelaxedMockK lateinit var workManager: WorkManager
+    @RelaxedMockK lateinit var localLyricsReader: com.qhana.siku.data.lyrics.LocalLyricsReader
+    @RelaxedMockK lateinit var lyricsWriter: com.qhana.siku.data.lyrics.LyricsWriter
+    @RelaxedMockK lateinit var authManager: com.qhana.siku.data.auth.AuthManager
 
     private lateinit var viewModel: PlaybackViewModel
     private val testDispatcher = UnconfinedTestDispatcher()
@@ -64,6 +67,7 @@ class PlaybackViewModelTest {
         every { musicController.repeatMode } returns MutableStateFlow(com.qhana.siku.data.model.RepeatMode.OFF)
         every { musicController.currentPosition } returns MutableStateFlow(0L)
         every { musicController.duration } returns MutableStateFlow(0L)
+        every { musicController.bufferedPosition } returns MutableStateFlow(0L)
         every { musicController.playlist } returns MutableStateFlow(emptyList())
         every { musicController.currentIndex } returns MutableStateFlow(0)
 
@@ -75,6 +79,8 @@ class PlaybackViewModelTest {
             musicController = musicController,
             artworkRepository = artworkRepository,
             lyricsRepository = lyricsRepository,
+            localLyricsReader = localLyricsReader,
+            lyricsWriter = lyricsWriter,
             repository = repository,
             parseLyricsUseCase = parseLyricsUseCase,
             playbackErrorRecoveryUseCase = playbackErrorRecoveryUseCase,
@@ -83,6 +89,7 @@ class PlaybackViewModelTest {
             playbackCoordinator = playbackCoordinator,
             requestCoordinator = requestCoordinator,
             networkManager = networkManager,
+            authManager = authManager,
             downloadScheduler = downloadScheduler,
             snackbarManager = snackbarManager,
             syncManager = syncManager,

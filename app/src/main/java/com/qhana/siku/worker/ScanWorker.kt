@@ -136,6 +136,11 @@ class ScanWorker @AssistedInject constructor(
                             state.total,
                             if (state.failed > 0) applicationContext.getString(R.string.sync_failed_suffix, state.failed) else ""
                         )
+                    // La espera de red también se cuenta en la notificación: el foreground
+                    // service sigue vivo durante ella, así que sin esto la barra se queda
+                    // anunciando una descarga que ya no avanza.
+                    is SyncStatus.Paused ->
+                        applicationContext.getString(R.string.sync_paused) to state.message
                     is SyncStatus.Complete,
                     is SyncStatus.Error,
                     SyncStatus.Idle -> return@collectLatest

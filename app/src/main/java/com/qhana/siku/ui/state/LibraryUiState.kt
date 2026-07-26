@@ -1,6 +1,7 @@
 package com.qhana.siku.ui.state
 
 import androidx.compose.runtime.Stable
+import com.qhana.siku.data.model.LyricsSaveMode
 import com.qhana.siku.data.model.Playlist
 import com.qhana.siku.data.model.ReplayGainMode
 import com.qhana.siku.data.model.Song
@@ -21,12 +22,6 @@ data class SearchFilterState(
 data class SortingState(
     val sortOrderAll: SortOrder = SortOrder.TITLE_ASC,
     val sortOrderFavorites: SortOrder = SortOrder.TITLE_ASC
-)
-
-@Stable
-data class SelectionState(
-    val isSelectionMode: Boolean = false,
-    val selectedSongs: Set<String> = emptySet()
 )
 
 @Stable
@@ -52,16 +47,23 @@ data class PlaybackSettingsState(
     val replayGainPreamp: Float = 0f,
     val nowPlayingSolidBackground: Boolean = false,
     val nowPlayingWavyProgress: Boolean = false,
+    /** Chip de formato del NowPlaying con la ficha técnica (bitrate/bits + frecuencia). */
+    val nowPlayingDetailedFormat: Boolean = false,
+    /** Deslizar la carátula/el player y el doble toque para saltar. Encendido por defecto. */
+    val playerGestures: Boolean = true,
     val useSystemEq: Boolean = false,
     /** Nombre del `PaletteStyle` con el que se genera el tema desde el color del álbum. */
-    val themePaletteStyle: String = MusicPreferences.DEFAULT_PALETTE_STYLE
+    val themePaletteStyle: String = MusicPreferences.DEFAULT_PALETTE_STYLE,
+    /** Dónde guardar las letras; ASK vuelve a mostrar el diálogo en cada guardado. */
+    val lyricsSaveMode: LyricsSaveMode = LyricsSaveMode.ASK,
+    /** Carpeta para los `.lrc` de la música del dispositivo (SAF). null = sin elegir. */
+    val lyricsFolderUri: String? = null
 )
 
 @Stable
 data class LibraryUiState(
     val searchFilter: SearchFilterState = SearchFilterState(),
     val sorting: SortingState = SortingState(),
-    val selection: SelectionState = SelectionState(),
     val data: LibraryDataState = LibraryDataState(),
     val colorTuning: ColorTuningState = ColorTuningState(),
     val playbackSettings: PlaybackSettingsState = PlaybackSettingsState()
@@ -72,8 +74,6 @@ data class LibraryUiState(
     val sourceFilters: Set<SongSourceFilter> get() = searchFilter.sourceFilters
     val sortOrderAll: SortOrder get() = sorting.sortOrderAll
     val sortOrderFavorites: SortOrder get() = sorting.sortOrderFavorites
-    val isSelectionMode: Boolean get() = selection.isSelectionMode
-    val selectedSongs: Set<String> get() = selection.selectedSongs
     val playlists: List<Playlist> get() = data.playlists
     val favorites: Set<String> get() = data.favorites
     val favoriteSongs: List<Song> get() = data.favoriteSongs
@@ -83,6 +83,8 @@ data class LibraryUiState(
     val replayGainPreamp: Float get() = playbackSettings.replayGainPreamp
     val nowPlayingSolidBackground: Boolean get() = playbackSettings.nowPlayingSolidBackground
     val nowPlayingWavyProgress: Boolean get() = playbackSettings.nowPlayingWavyProgress
+    val nowPlayingDetailedFormat: Boolean get() = playbackSettings.nowPlayingDetailedFormat
+    val playerGestures: Boolean get() = playbackSettings.playerGestures
     val useSystemEq: Boolean get() = playbackSettings.useSystemEq
     val themePaletteStyle: String get() = playbackSettings.themePaletteStyle
 }

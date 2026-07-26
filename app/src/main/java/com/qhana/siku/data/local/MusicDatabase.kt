@@ -29,7 +29,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PlaylistSongCrossRef::class,
         ArtistEntity::class
     ],
-    version = 24, // v24: genre (tag GENRE para los chips de género del inicio)
+    version = 25, // v25: artworkAttemptedAt (resolución de carátulas pendientes)
     exportSchema = true
 )
 abstract class MusicDatabase : RoomDatabase() {
@@ -67,13 +67,24 @@ abstract class MusicDatabase : RoomDatabase() {
             }
         }
 
-        // v23 -> v24: tag GENRE por canción. Aditiva, no toca datos. Se rellena perezosamente:
-        // las locales/descargadas por el pipeline de análisis + un backfill una-vez que re-lee
-        // los archivos locales (ver MusicDownloader.backfillGenres). Las solo-streaming quedan
-        // NULL hasta que se descarguen/analicen.
+        // v23 -> v24: tag GENRE por canción. Aditiva, no toca datos. Lo rellena el pipeline de
+        // análisis (locales al indexar, de nube al descargar). Las solo-streaming quedan NULL
+        // hasta que se descarguen o las lea la metadata ligera.
         private val MIGRATION_23_24 = object : Migration(23, 24) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE songs ADD COLUMN genre TEXT")
+            }
+        }
+
+        // v24 -> v25: marca de "ya se intentó resolver la carátula". Aditiva y deliberadamente
+        // SIN backfill: dejar la columna en NULL para todas es justo lo que hace que la fase de
+        // resolución del sync revise una vez cada canción existente. Así, las bibliotecas donde
+        // la 1.0.1 no llegó a guardar la portada (su id local llevaba '/' y la escritura fallaba
+        // en silencio) se reparan solas, con el MISMO mecanismo que atiende a las canciones
+        // nuevas — no hay un camino de migración aparte que retirar más adelante.
+        private val MIGRATION_24_25 = object : Migration(24, 25) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE songs ADD COLUMN artworkAttemptedAt INTEGER")
             }
         }
 
@@ -84,7 +95,7 @@ abstract class MusicDatabase : RoomDatabase() {
                     MusicDatabase::class.java,
                     "music_cache.db"
                 )
-                    .addMigrations(MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24)
+                    .addMigrations(MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24, MIGRATION_24_25)
                     // SIN fallbackToDestructiveMigration a propósito: ver el KDoc de la clase.
                     .build()
                     .also { INSTANCE = it }

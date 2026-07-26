@@ -4,6 +4,10 @@ import android.content.Intent
 import android.media.audiofx.AudioEffect
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExperimentalSharedTransitionApi
@@ -26,6 +30,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -45,6 +52,8 @@ import com.qhana.siku.ui.components.AddSongsToPlaylistSheet
 import com.qhana.siku.ui.components.ComponentConfig
 import com.qhana.siku.ui.components.EqualizerSheet
 import com.qhana.siku.ui.components.MiniPlayer
+import com.qhana.siku.ui.components.miniPlayerExpandDrag
+import com.qhana.siku.ui.components.SaveLyricsDialog
 import com.qhana.siku.ui.navigation.Screen
 import com.qhana.siku.ui.screens.AmbientPlayerActivity
 import com.qhana.siku.ui.screens.NavigationActions
@@ -80,13 +89,15 @@ fun BoxScope.PlayerOverlay(
     val keepScreenOn by playbackViewModel.keepScreenOn.collectAsStateWithLifecycle()
     val nowPlayingSolidBackground by playbackViewModel.nowPlayingSolidBackground.collectAsStateWithLifecycle()
     val nowPlayingWavyProgress by playbackViewModel.nowPlayingWavyProgress.collectAsStateWithLifecycle()
+    val nowPlayingDetailedFormat by playbackViewModel.nowPlayingDetailedFormat.collectAsStateWithLifecycle()
+    val playerGestures by playbackViewModel.playerGestures.collectAsStateWithLifecycle()
     val duration by playbackViewModel.duration.collectAsStateWithLifecycle()
+    val lyricsSaveState by playbackViewModel.lyricsSaveState.collectAsStateWithLifecycle()
     val libraryUiState by libraryViewModel.uiState.collectAsStateWithLifecycle()
     val favorites = libraryUiState.favorites
 
     val navBackStackEntry = appState.currentBackStackEntry
     val currentRoute = navBackStackEntry?.destination?.route
-    val onLibraryRoute = currentRoute == Screen.Library.route
     val onPlaylistDetailRoute = currentRoute == Screen.PlaylistDetail.route
     val onFavoritesRoute = currentRoute == Screen.Favorites.route
     // Rutas de lista donde aplica la hoja de "añadir canciones" (botón en el detalle).
@@ -95,7 +106,7 @@ fun BoxScope.PlayerOverlay(
         // Rutas con capa flotante habilitada; la píldora se cae sola si no hay canción
         // (el viejo FAB de "añadir canciones" ya no existe: es un botón del detalle).
         Screen.Library.route, Screen.PlaylistDetail.route, Screen.Favorites.route -> true
-        Screen.ArtistDetail.route, Screen.AlbumDetail.route -> currentSong != null
+        Screen.ArtistDetail.route, Screen.AlbumDetail.route, Screen.GenreDetail.route -> currentSong != null
         else -> false
     }
 
@@ -112,6 +123,56 @@ fun BoxScope.PlayerOverlay(
     // (transición) no se toca nada; se decide solo cuando hay una ruta real sin reproductor.
     LaunchedEffect(miniPlayerVisible, currentRoute) {
         if (currentRoute != null && !miniPlayerVisible) appState.playerExpanded = false
+    }
+
+    // --- Guardar la letra en el archivo -------------------------------------------------------
+    //
+    // Los tres pasos posibles viven aquí, fuera del AnimatedContent del player: si colgaran del
+    // NowPlaying expandido, cerrar el reproductor a mitad del permiso mataría el diálogo y el
+    // guardado quedaría a medias sin que nadie lo cancelara.
+
+    // MediaStore en API 30+: solo la Activity puede lanzar el IntentSender del sistema.
+    val systemWriteLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) playbackViewModel.retryPendingSave()
+        else playbackViewModel.cancelPendingSave()
+    }
+    LaunchedEffect(lyricsSaveState.pendingPermission) {
+        lyricsSaveState.pendingPermission?.let { sender ->
+            systemWriteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+            playbackViewModel.consumePendingPermission()
+        }
+    }
+
+    lyricsSaveState.options?.let { options ->
+        SaveLyricsDialog(
+            options = options,
+            onDismiss = { playbackViewModel.dismissSaveLyricsDialog() },
+            onConfirm = { mode, remember -> playbackViewModel.confirmSaveLyrics(mode, remember) }
+        )
+    }
+
+    // El consentimiento de escritura sobre OneDrive se explica ANTES de lanzar la pantalla de
+    // Microsoft: es un permiso sobre todo el drive y aparecer de la nada asusta con razón.
+    if (lyricsSaveState.needsCloudConsent) {
+        val activity = LocalActivity.current
+        AlertDialog(
+            onDismissRequest = { playbackViewModel.cancelPendingSave() },
+            title = { Text(stringResource(R.string.lyrics_save_consent_title)) },
+            text = { Text(stringResource(R.string.lyrics_save_consent_message)) },
+            confirmButton = {
+                TextButton(
+                    onClick = { activity?.let { playbackViewModel.grantCloudWriteConsent(it) } },
+                    enabled = activity != null
+                ) { Text(stringResource(R.string.lyrics_save_consent_confirm)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { playbackViewModel.cancelPendingSave() }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            }
+        )
     }
 
     // Hoja del ECUALIZADOR PROPIO (5/10 bandas + float): el botón de la barra del NowPlaying
@@ -190,6 +251,7 @@ fun BoxScope.PlayerOverlay(
                         onNext = { playbackViewModel.next() },
                         onPrevious = { playbackViewModel.previous() },
                         onSeek = { playbackViewModel.seekTo(it) },
+                        onSeekBy = { playbackViewModel.seekBy(it) },
                         onShuffleToggle = { playbackViewModel.toggleShuffle() },
                         onRepeatToggle = { playbackViewModel.toggleRepeatMode() },
                         onSkipToIndex = { playbackViewModel.skipToIndex(it) },
@@ -204,6 +266,7 @@ fun BoxScope.PlayerOverlay(
                         },
                         onFetchLyrics = { force -> playbackViewModel.fetchLyrics(force) },
                         onSearchLyricsManually = { playbackViewModel.searchLyricsCandidates() },
+                        onSaveLyrics = { playbackViewModel.requestSaveLyrics() },
                         onSelectLyricsCandidate = { candidate ->
                             playbackViewModel.selectLyricsFromCandidate(candidate)
                             snackbarManager.show(context.getString(R.string.lyrics_refresh_updated))
@@ -251,6 +314,7 @@ fun BoxScope.PlayerOverlay(
                     playbackState = playbackState,
                     currentPositionFlow = playbackViewModel.currentPosition,
                     durationFlow = playbackViewModel.duration,
+                    bufferedPositionFlow = playbackViewModel.bufferedPosition,
                     isShuffleEnabled = playbackViewModel.isShuffleEnabled.collectAsStateWithLifecycle().value,
                     repeatMode = playbackViewModel.repeatMode.collectAsStateWithLifecycle().value,
                     playlist = playbackViewModel.playlist.collectAsStateWithLifecycle().value,
@@ -259,9 +323,13 @@ fun BoxScope.PlayerOverlay(
                     keepScreenOn = keepScreenOn,
                     solidBackground = nowPlayingSolidBackground,
                     wavyProgress = nowPlayingWavyProgress,
+                    detailedFormat = nowPlayingDetailedFormat,
+                    onToggleDetailedFormat = playbackViewModel::toggleDetailedFormat,
+                    gesturesEnabled = playerGestures,
                     playlists = libraryUiState.playlists,
                     sleepTimer = playbackViewModel.sleepTimer.collectAsStateWithLifecycle().value,
                     eqEnabled = playbackViewModel.eqEnabled.collectAsStateWithLifecycle().value,
+                    isSavingLyrics = lyricsSaveState.isSaving,
                     playerActions = playerActions,
                     navigationActions = navigationActions,
                     toolbarConfig = playbackViewModel.toolbarConfig.collectAsStateWithLifecycle().value,
@@ -282,11 +350,22 @@ fun BoxScope.PlayerOverlay(
                     // (PlaylistList) y "añadir canciones" es un botón redondo junto al aleatorio
                     // en el detalle (DetailPlayButtons). La capa flotante es solo el MiniPlayer.
 
-                    // MiniPlayer a todo el ancho. currentSong directo: solo es null
-                    // sin sesión (arranque antes del restore) o tras stop() — en ambos casos la
-                    // píldora NO debe mostrarse (retenerla dejaba una píldora fantasma tras logout).
-                    val song = currentSong
-                    if (song != null && !(onLibraryRoute && libraryUiState.isSelectionMode)) {
+                    // MiniPlayer a todo el ancho.
+                    //
+                    // La VISIBILIDAD la decide `currentSong`: solo es null sin sesión (arranque
+                    // antes del restore) o tras stop(), y en ambos casos la píldora NO debe
+                    // mostrarse (retenerla dejaba una píldora fantasma tras logout).
+                    //
+                    // Los DATOS salen de `nowPlayingUiState.song`, que es la fila de Room y no el
+                    // objeto que el reproductor cargó al empezar a sonar. `currentSong` se queda
+                    // congelado en lo que había entonces, así que todo lo que la BD escriba después
+                    // sobre el tema en curso —carátula reparada, colores, letras, la descarga que
+                    // termina— lo veía el NowPlaying y no el mini. Se compara el id para no pintar
+                    // los datos del tema anterior en el instante en que cambia la canción.
+                    val song = currentSong?.let { current ->
+                        nowPlayingUiState.song?.takeIf { it.id == current.id } ?: current
+                    }
+                    if (song != null) {
                         MiniPlayer(
                             song = song,
                             isPlaying = playbackState == PlaybackState.PLAYING,
@@ -303,6 +382,11 @@ fun BoxScope.PlayerOverlay(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = ComponentConfig.FloatingBarSideMargin)
+                                // Deslizar hacia arriba abre el reproductor: es el gesto inverso
+                                // al de cerrarlo, y sin él la píldora solo respondía al tap.
+                                .miniPlayerExpandDrag(playerGestures) {
+                                    appState.playerExpanded = true
+                                }
                         )
                     }
                 }

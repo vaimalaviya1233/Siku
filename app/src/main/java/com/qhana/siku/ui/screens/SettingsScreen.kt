@@ -1,7 +1,12 @@
 package com.qhana.siku.ui.screens
 
+import android.content.Intent
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -19,20 +24,30 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.qhana.siku.R
+import com.qhana.siku.data.model.LibraryTabId
+import com.qhana.siku.data.model.LibraryTabState
+import com.qhana.siku.data.model.LibraryTabsConfig
+import com.qhana.siku.data.model.LyricsSaveMode
 import com.qhana.siku.data.model.PlayerToolbarAction
 import com.qhana.siku.data.model.PlayerToolbarConfig
 import com.qhana.siku.data.model.ReplayGainMode
 import com.qhana.siku.data.model.ToolbarActionState
 import com.qhana.siku.ui.components.DisconnectOneDriveDialog
-import com.qhana.siku.ui.components.LocalSourceCard
+import com.qhana.siku.ui.components.DeviceScanSourceCard
+import com.qhana.siku.ui.components.LocalFoldersSourceCard
+import com.qhana.siku.ui.components.rememberDeviceScanActivator
 import com.qhana.siku.ui.components.MaterialSymbol
+import com.qhana.siku.ui.components.PlayerGestureConfig
 import com.qhana.siku.ui.components.OneDriveSourceCard
+import com.qhana.siku.ui.components.rememberOneDriveFolderChanger
+import com.qhana.siku.ui.components.StorageLimitCard
 import com.qhana.siku.ui.components.rememberListItemShape
 import com.qhana.siku.ui.navigation.Screen
 import com.qhana.siku.ui.viewmodel.BackupViewModel
@@ -54,14 +69,14 @@ fun SettingsScreen(
     onNavigate: (String) -> Unit,
     sourcesViewModel: SourcesViewModel = hiltViewModel()
 ) {
-    val localFolderUri by sourcesViewModel.localFolderUri.collectAsStateWithLifecycle()
+    val hasLocalSource by sourcesViewModel.hasLocalSource.collectAsStateWithLifecycle()
 
     // Subtítulo dinámico de Fuentes, como el resumen de estado de Ajustes de Android.
     val sourcesSubtitle = when {
-        isLoggedIn && localFolderUri != null ->
+        isLoggedIn && hasLocalSource ->
             stringResource(R.string.settings_source_onedrive) + " · " + stringResource(R.string.settings_source_local)
         isLoggedIn -> stringResource(R.string.settings_source_onedrive)
-        localFolderUri != null -> stringResource(R.string.settings_source_local)
+        hasLocalSource -> stringResource(R.string.settings_source_local)
         else -> stringResource(R.string.settings_cat_sources_empty)
     }
 
@@ -203,7 +218,19 @@ fun SettingsSourcesScreen(
 ) {
     val context = LocalContext.current
     val activity = context as? android.app.Activity
-    val localFolderUri by sourcesViewModel.localFolderUri.collectAsStateWithLifecycle()
+    val localFolderUris by sourcesViewModel.localFolderUris.collectAsStateWithLifecycle()
+    val scanWholeDevice by sourcesViewModel.scanWholeDevice.collectAsStateWithLifecycle()
+    val hasLocalSource by sourcesViewModel.hasLocalSource.collectAsStateWithLifecycle()
+    // ¿Hay carpetas (o guardadas al activar el dispositivo) a las que volver? Con nube conectada
+    // (isLoggedIn) tampoco hay riesgo de quedarse sin biblioteca. De aquí sale si se puede apagar el
+    // escaneo del dispositivo o quitar la última carpeta sin caer en el onboarding.
+    val hasLocalFallback by sourcesViewModel.hasLocalFallback.collectAsStateWithLifecycle()
+
+    val activateDeviceScan = rememberDeviceScanActivator(
+        permission = sourcesViewModel.audioPermission,
+        hasPermission = sourcesViewModel::hasAudioPermission,
+        onActivate = { sourcesViewModel.setScanWholeDevice(true) }
+    )
 
     // Desconectar borra las canciones de OneDrive y sus descargas: confirmar antes.
     var showDisconnectDialog by remember { mutableStateOf(false) }
@@ -221,19 +248,53 @@ fun SettingsSourcesScreen(
         title = stringResource(R.string.sources_header),
         onBackClick = onBackClick
     ) {
-        OneDriveSourceCard(
-            isConnected = isLoggedIn,
-            isLoading = authLoading,
-            onConnect = { activity?.let(onConnectOneDrive) },
-            onDisconnect = { showDisconnectDialog = true }
+        // Local primero (la app es local-first) y la nube después, mismo orden que el onboarding.
+        val canDisableDeviceScan = isLoggedIn || hasLocalFallback
+        DeviceScanSourceCard(
+            isEnabled = scanWholeDevice,
+            onEnable = activateDeviceScan,
+            onDisable = { sourcesViewModel.setScanWholeDevice(false) },
+            // Sin carpetas a las que volver ni nube, apagarlo dejaría la biblioteca vacía.
+            canDisable = canDisableDeviceScan
+        )
+
+        // Explica por qué el botón "Desactivar" está en gris: no dejar al usuario sin biblioteca.
+        if (scanWholeDevice && !canDisableDeviceScan) {
+            Text(
+                text = stringResource(R.string.source_device_disable_locked),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp, start = 4.dp, end = 4.dp)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        LocalFoldersSourceCard(
+            folderUris = localFolderUris,
+            onFolderPicked = { sourcesViewModel.addLocalFolder(it) },
+            onRemoveFolder = sourcesViewModel::removeLocalFolder,
+            onScanWholeDevice = activateDeviceScan,
+            // Con nube conectada, quitar la última carpeta es seguro (queda OneDrive).
+            hasOtherSource = isLoggedIn
         )
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        LocalSourceCard(
-            folderUri = localFolderUri,
-            onFolderPicked = sourcesViewModel::setLocalFolder,
-            onRemoveFolder = sourcesViewModel::clearLocalFolder
+        val oneDriveFolder by sourcesViewModel.oneDriveFolderPath.collectAsStateWithLifecycle()
+        // En Ajustes SÍ se advierte: aquí ya hay biblioteca, y cambiar de carpeta se lleva por
+        // delante las canciones que queden fuera.
+        val changeOneDriveFolder = rememberOneDriveFolderChanger(warnBeforeChange = true) { path ->
+            sourcesViewModel.setOneDriveFolder(path)
+        }
+
+        OneDriveSourceCard(
+            isConnected = isLoggedIn,
+            isLoading = authLoading,
+            onConnect = { activity?.let(onConnectOneDrive) },
+            onDisconnect = { showDisconnectDialog = true },
+            folderPath = oneDriveFolder,
+            onChangeFolder = changeOneDriveFolder
         )
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -243,7 +304,7 @@ fun SettingsSourcesScreen(
             icon = "sync",
             title = stringResource(R.string.sources_rescan),
             description = stringResource(R.string.sources_rescan_desc),
-            enabled = isLoggedIn || localFolderUri != null,
+            enabled = isLoggedIn || hasLocalSource,
             onClick = { sourcesViewModel.rescanSources(requiresNetwork = isLoggedIn) }
         )
     }
@@ -409,6 +470,153 @@ fun SettingsPlaybackScreen(
             }
         }
 
+        Spacer(modifier = Modifier.height(16.dp))
+
+        LyricsSaveSetting(
+            mode = uiState.playbackSettings.lyricsSaveMode,
+            folderUri = uiState.playbackSettings.lyricsFolderUri,
+            onModeChange = { viewModel.setLyricsSaveMode(it) },
+            onFolderChange = { viewModel.setLyricsFolder(it) }
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Gestos del reproductor. UN solo switch para los cuatro (ver MusicPreferences): son el
+        // mismo contrato y trocearlo obligaría a razonar sobre gestos aún no descubiertos. La
+        // descripción los ENUMERA porque, apagados, no hay forma de que el usuario sepa qué se
+        // está perdiendo — un gesto que nadie te contó no existe.
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                MaterialSymbol("swipe", size = 24.sp)
+
+                Spacer(modifier = Modifier.width(16.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.settings_player_gestures),
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        text = stringResource(
+                            R.string.settings_player_gestures_desc,
+                            PlayerGestureConfig.SeekStepSeconds
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(16.dp))
+
+                Switch(
+                    checked = uiState.playerGestures,
+                    onCheckedChange = { viewModel.setPlayerGestures(it) }
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Dónde guardar las letras y, para la música del dispositivo, en qué carpeta dejar los `.lrc`.
+ *
+ * La opción "preguntar cada vez" tiene que seguir estando: el diálogo del reproductor la puede
+ * apagar con un check, y sin una vuelta atrás quedaría atrapado en la elección de aquel día.
+ */
+@Composable
+private fun LyricsSaveSetting(
+    mode: LyricsSaveMode,
+    folderUri: String?,
+    onModeChange: (LyricsSaveMode) -> Unit,
+    onFolderChange: (String?) -> Unit
+) {
+    val context = LocalContext.current
+    // El árbol se retiene con permiso persistente: sin esto el acceso muere al reiniciar la app
+    // y el usuario vería "sin carpeta" sin haber tocado nada.
+    val folderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            }
+            onFolderChange(uri.toString())
+        }
+    }
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = stringResource(R.string.settings_lyrics_save_title),
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+
+            val modes = listOf(
+                LyricsSaveMode.ASK to stringResource(R.string.settings_lyrics_save_ask),
+                LyricsSaveMode.LRC_FILE to stringResource(R.string.settings_lyrics_save_lrc),
+                LyricsSaveMode.EMBEDDED to stringResource(R.string.settings_lyrics_save_embedded)
+            )
+            modes.forEach { (value, label) ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .selectable(
+                            selected = mode == value,
+                            role = Role.RadioButton,
+                            onClick = { onModeChange(value) }
+                        )
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(selected = mode == value, onClick = null)
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(text = label, style = MaterialTheme.typography.bodyLarge)
+                }
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+
+            Text(
+                text = stringResource(R.string.settings_lyrics_folder_title),
+                style = MaterialTheme.typography.bodyLarge
+            )
+            Text(
+                text = stringResource(R.string.settings_lyrics_folder_summary),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = folderUri?.let { Uri.decode(it.substringAfterLast('/')) }
+                    ?: stringResource(R.string.settings_lyrics_folder_none),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+            Row(modifier = Modifier.padding(top = 4.dp)) {
+                TextButton(onClick = { folderPicker.launch(null) }) {
+                    Text(stringResource(R.string.settings_lyrics_folder_choose))
+                }
+                if (folderUri != null) {
+                    TextButton(onClick = { onFolderChange(null) }) {
+                        Text(stringResource(R.string.settings_lyrics_folder_clear))
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -422,6 +630,7 @@ private fun PlayerToolbarAction.labelRes(): Int = when (this) {
     PlayerToolbarAction.SLEEP_TIMER -> R.string.toolbar_action_sleep
     PlayerToolbarAction.ADD_TO_PLAYLIST -> R.string.toolbar_action_add_playlist
     PlayerToolbarAction.DOWNLOAD -> R.string.toolbar_action_download
+    PlayerToolbarAction.SHARE -> R.string.np_share
 }
 
 private fun PlayerToolbarAction.iconName(): String = when (this) {
@@ -433,6 +642,7 @@ private fun PlayerToolbarAction.iconName(): String = when (this) {
     PlayerToolbarAction.SLEEP_TIMER -> "bedtime"
     PlayerToolbarAction.ADD_TO_PLAYLIST -> "playlist_add"
     PlayerToolbarAction.DOWNLOAD -> "download"
+    PlayerToolbarAction.SHARE -> "share"
 }
 
 /**
@@ -532,9 +742,6 @@ fun SettingsDownloadsScreen(
     sourcesViewModel: SourcesViewModel = hiltViewModel()
 ) {
     val storageLimitGb by viewModel.storageLimitGb.collectAsStateWithLifecycle()
-    // Estado local del slider: se siembra del valor persistido y se guarda al soltar.
-    var sliderValue by remember(storageLimitGb) { mutableStateOf(storageLimitGb.coerceIn(0f, 200f)) }
-    val gb = sliderValue.toInt()
 
     // ¿Hay alguna fuente de NUBE? Del registro de fuentes, no de OneDrive en particular:
     // un proveedor cloud futuro cuenta sin tocar este gate.
@@ -545,45 +752,17 @@ fun SettingsDownloadsScreen(
         title = stringResource(R.string.settings_downloads_header),
         onBackClick = onBackClick
     ) {
-        Surface(
-            shape = RoundedCornerShape(12.dp),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = stringResource(R.string.download_storage_limit_title),
-                    style = MaterialTheme.typography.titleSmall
-                )
-                Text(
-                    text = if (hasCloudSource) stringResource(R.string.download_storage_limit_desc)
-                    else stringResource(R.string.settings_downloads_cloud_only),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                // Número grande SIEMPRE visible: es el valor persistido, así al volver a entrar
-                // se ve el tope actual sin tener que arrastrar (el tooltip del thumb solo sale al
-                // arrastrar, por eso NO alcanza por sí solo).
-                Text(
-                    text = if (gb <= 0) stringResource(R.string.download_storage_limit_unlimited)
-                    else stringResource(R.string.download_storage_limit_value, gb.toString()),
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = if (hasCloudSource) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.primary.copy(alpha = 0.38f)
-                )
-                // Slider Expressive (thumb de barra fina). El track ondulado NO existe en el
-                // Slider de esta versión de material3 (solo en WavyProgressIndicator).
-                Slider(
-                    value = sliderValue,
-                    onValueChange = { sliderValue = it },
-                    valueRange = 0f..200f,
-                    onValueChangeFinished = { viewModel.setStorageLimitGb(gb.toFloat()) },
-                    enabled = hasCloudSource
-                )
-            }
-        }
+        // Mismo componente que el onboarding (ver StorageLimitCard): acá con el radio de las
+        // tarjetas de Ajustes y con el aviso de "solo con nube" como descripción al estar
+        // deshabilitado.
+        StorageLimitCard(
+            limitGb = storageLimitGb,
+            onLimitChangeFinished = viewModel::setStorageLimitGb,
+            enabled = hasCloudSource,
+            description = if (hasCloudSource) stringResource(R.string.download_storage_limit_desc)
+            else stringResource(R.string.settings_downloads_cloud_only),
+            shape = RoundedCornerShape(12.dp)
+        )
 
         Spacer(modifier = Modifier.height(8.dp))
 
@@ -635,12 +814,15 @@ fun SettingsDownloadsScreen(
 @Composable
 fun SettingsAppearanceScreen(
     onBackClick: () -> Unit,
+    /** Navega a las sub-pantallas de personalización (pestañas, barra del reproductor). */
+    onNavigate: (String) -> Unit,
     viewModel: LibraryViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val isRegenerating = uiState.isRegeneratingColors
     val nowPlayingSolidBackground = uiState.nowPlayingSolidBackground
     val nowPlayingWavyProgress = uiState.nowPlayingWavyProgress
+    val nowPlayingDetailedFormat = uiState.nowPlayingDetailedFormat
 
     SettingsScaffold(
         title = stringResource(R.string.settings_appearance_header),
@@ -745,18 +927,124 @@ fun SettingsAppearanceScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Personalización de la barra del reproductor (orden + barra/overflow de cada acción).
-        val toolbarConfig by viewModel.toolbarConfig.collectAsStateWithLifecycle()
+        // Chip de formato del NowPlaying: solo el contenedor (FLAC) o la ficha técnica
+        // (FLAC · 16 bit · 44.1 kHz). El mismo ajuste se conmuta tocando el chip en el
+        // reproductor; ambos escriben la misma preferencia.
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                MaterialSymbol("graphic_eq", size = 24.sp)
+
+                Spacer(modifier = Modifier.width(16.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.settings_detailed_format),
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        text = stringResource(R.string.settings_detailed_format_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(16.dp))
+
+                Switch(
+                    checked = nowPlayingDetailedFormat,
+                    onCheckedChange = { viewModel.setNowPlayingDetailedFormat(it) }
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Las dos personalizaciones con lista drag & drop viven en su propia pantalla: metidas
+        // aquí ocupaban Apariencia entera y enterraban el resto de ajustes.
+        SettingsActionRow(
+            icon = "tab",
+            title = stringResource(R.string.settings_tabs_header),
+            description = stringResource(R.string.settings_tabs_desc),
+            enabled = true,
+            onClick = { onNavigate(Screen.SettingsTabs.route) }
+        )
+
+        Spacer(modifier = Modifier.height(2.dp))
+
+        SettingsActionRow(
+            icon = "bottom_navigation",
+            title = stringResource(R.string.settings_player_bar_header),
+            description = stringResource(R.string.settings_player_bar_desc),
+            enabled = true,
+            onClick = { onNavigate(Screen.SettingsPlayerBar.route) }
+        )
+
+        // El "laboratorio de color" (7 sliders de tuning del extractor) se eliminó con el
+        // cambio a QuantizerCelebi + Score: ese pipeline no tiene parámetros que ajustar. El
+        // visor de candidatos, que sí sigue siendo útil, vive donde se usa: el diálogo de
+        // long-press sobre la carátula del NowPlaying (NowPlayingColorPicker).
+    }
+}
+
+/** Pestañas de la biblioteca: orden (drag & drop) + cuáles se muestran. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsTabsScreen(
+    onBackClick: () -> Unit,
+    viewModel: LibraryViewModel = hiltViewModel()
+) {
+    val tabs by viewModel.libraryTabs.collectAsStateWithLifecycle()
+
+    SettingsScaffold(
+        title = stringResource(R.string.settings_tabs_header),
+        onBackClick = onBackClick
+    ) {
         Surface(
             shape = RoundedCornerShape(12.dp),
             color = MaterialTheme.colorScheme.surfaceContainerHigh
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    text = stringResource(R.string.settings_player_bar_header),
-                    style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.padding(bottom = 4.dp)
+                    text = stringResource(R.string.settings_tabs_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 8.dp)
                 )
+                LibraryTabsCustomizer(
+                    config = tabs,
+                    onConfigChange = { viewModel.setLibraryTabs(it) }
+                )
+            }
+        }
+    }
+}
+
+/** Barra del reproductor: orden (drag & drop) + barra flotante vs overflow de cada acción. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsPlayerBarScreen(
+    onBackClick: () -> Unit,
+    viewModel: LibraryViewModel = hiltViewModel()
+) {
+    val toolbarConfig by viewModel.toolbarConfig.collectAsStateWithLifecycle()
+
+    SettingsScaffold(
+        title = stringResource(R.string.settings_player_bar_header),
+        onBackClick = onBackClick
+    ) {
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
                 Text(
                     text = stringResource(R.string.settings_player_bar_desc),
                     style = MaterialTheme.typography.bodySmall,
@@ -769,11 +1057,109 @@ fun SettingsAppearanceScreen(
                 )
             }
         }
+    }
+}
 
-        // El "laboratorio de color" (7 sliders de tuning del extractor) se eliminó con el
-        // cambio a QuantizerCelebi + Score: ese pipeline no tiene parámetros que ajustar. El
-        // visor de candidatos, que sí sigue siendo útil, vive donde se usa: el diálogo de
-        // long-press sobre la carátula del NowPlaying (NowPlayingColorPicker).
+/** Etiqueta legible de cada pestaña para la lista de personalización. */
+private fun LibraryTabId.labelRes(): Int = when (this) {
+    LibraryTabId.HOME -> R.string.tab_home
+    LibraryTabId.SONGS -> R.string.tab_all
+    LibraryTabId.ARTISTS -> R.string.common_artists
+    LibraryTabId.ALBUMS -> R.string.common_albums
+    LibraryTabId.GENRES -> R.string.common_genres
+    LibraryTabId.PLAYLISTS -> R.string.tab_playlists
+}
+
+private fun LibraryTabId.iconName(): String = when (this) {
+    LibraryTabId.HOME -> "home"
+    LibraryTabId.SONGS -> "library_music"
+    LibraryTabId.ARTISTS -> "artist"
+    LibraryTabId.ALBUMS -> "album"
+    LibraryTabId.GENRES -> "genres"
+    LibraryTabId.PLAYLISTS -> "playlist_play"
+}
+
+/**
+ * Lista reordenable (drag & drop) de las pestañas de la biblioteca, con un switch de visibilidad
+ * por fila. Gemela de [PlayerBarCustomizer] —mismo gotcha de `ReorderableItem` para recuperar el
+ * `draggableHandle`— con un tope invertido: en vez de un MÁXIMO de acciones en barra, aquí hay un
+ * MÍNIMO de pestañas visibles ([LibraryTabsConfig.MIN_VISIBLE]), porque quedarse sin ninguna
+ * dejaría la biblioteca vacía y sin forma de recuperarla desde el propio pager.
+ *
+ * Estado local para que el arrastre sea fluido (sin round-trip a DataStore por frame); se
+ * re-siembra si [config] cambia desde fuera, y cada cambio persiste vía [onConfigChange].
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LibraryTabsCustomizer(
+    config: List<LibraryTabState>,
+    onConfigChange: (List<LibraryTabState>) -> Unit
+) {
+    var items by remember { mutableStateOf(config) }
+    LaunchedEffect(config) { items = config }
+
+    val visibleCount = items.count { it.visible }
+    val atMin = visibleCount <= LibraryTabsConfig.MIN_VISIBLE
+
+    sh.calvin.reorderable.ReorderableColumn(
+        list = items,
+        onSettle = { from, to ->
+            val newList = items.toMutableList().apply { add(to, removeAt(from)) }
+            items = newList
+            onConfigChange(newList)
+        },
+        modifier = Modifier.fillMaxWidth()
+    ) { _, item, isDragging ->
+        key(item.tab) {
+            ReorderableItem {
+                val itemScope = this
+                Surface(
+                    tonalElevation = if (isDragging) 6.dp else 0.dp,
+                    color = Color.Transparent,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                    ) {
+                        Box(modifier = with(itemScope) { Modifier.draggableHandle() }.padding(8.dp)) {
+                            MaterialSymbol("drag_indicator", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        MaterialSymbol(
+                            item.tab.iconName(),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(end = 12.dp)
+                        )
+                        Text(
+                            text = stringResource(item.tab.labelRes()),
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(
+                            checked = item.visible,
+                            // Deshabilitar SOLO la última encendida: apagarla dejaría la
+                            // biblioteca sin pestañas.
+                            enabled = !item.visible || !atMin,
+                            onCheckedChange = { checked ->
+                                val newList = items.map {
+                                    if (it.tab == item.tab) it.copy(visible = checked) else it
+                                }
+                                items = newList
+                                onConfigChange(newList)
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+    if (atMin) {
+        Text(
+            text = stringResource(R.string.settings_tabs_min),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 8.dp)
+        )
     }
 }
 

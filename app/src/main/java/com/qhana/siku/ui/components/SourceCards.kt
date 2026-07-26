@@ -2,6 +2,8 @@ package com.qhana.siku.ui.components
 
 import android.content.Intent
 import android.net.Uri
+import android.provider.Settings
+import android.text.format.Formatter
 import androidx.activity.compose.ManagedActivityResultLauncher
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -19,21 +21,32 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
+import com.qhana.siku.data.config.AppConfig
 
 /**
  * Tarjeta de una fuente de música. La comparten el onboarding de primer arranque y la sección
@@ -54,8 +67,11 @@ fun SourceCard(
     modifier: Modifier = Modifier,
     statusText: String? = null,
     isLoading: Boolean = false,
+    primaryActionEnabled: Boolean = true,
     secondaryActionLabel: String? = null,
-    onSecondaryAction: (() -> Unit)? = null
+    onSecondaryAction: (() -> Unit)? = null,
+    /** El rojo señala lo que BORRA (quitar una carpeta). Una acción neutra no debe llevarlo. */
+    secondaryActionDestructive: Boolean = true
 ) {
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -63,47 +79,12 @@ fun SourceCard(
         color = MaterialTheme.colorScheme.surfaceContainerHigh
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = if (isConfigured) MaterialTheme.colorScheme.primaryContainer
-                    else MaterialTheme.colorScheme.surfaceContainerHighest,
-                    modifier = Modifier.size(48.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        MaterialSymbol(
-                            icon = icon,
-                            size = 26.sp,
-                            fill = isConfigured,
-                            color = if (isConfigured) MaterialTheme.colorScheme.onPrimaryContainer
-                            else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.width(16.dp))
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(text = title, style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        text = statusText ?: description,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-
-                if (isConfigured) {
-                    Spacer(modifier = Modifier.width(8.dp))
-                    MaterialSymbol(
-                        icon = "check_circle",
-                        size = 22.sp,
-                        fill = true,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-            }
+            SourceCardHeader(
+                icon = icon,
+                title = title,
+                subtitle = statusText ?: description,
+                isConfigured = isConfigured
+            )
 
             Spacer(modifier = Modifier.height(12.dp))
 
@@ -123,14 +104,22 @@ fun SourceCard(
                 } else {
                     if (secondaryActionLabel != null && onSecondaryAction != null) {
                         TextButton(onClick = onSecondaryAction) {
-                            Text(secondaryActionLabel, color = MaterialTheme.colorScheme.error)
+                            Text(
+                                text = secondaryActionLabel,
+                                color = if (secondaryActionDestructive) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.primary
+                            )
                         }
                         Spacer(modifier = Modifier.width(8.dp))
                     }
                     if (isConfigured) {
-                        OutlinedButton(onClick = onPrimaryAction) { Text(primaryActionLabel) }
+                        OutlinedButton(onClick = onPrimaryAction, enabled = primaryActionEnabled) {
+                            Text(primaryActionLabel)
+                        }
                     } else {
-                        Button(onClick = onPrimaryAction) { Text(primaryActionLabel) }
+                        Button(onClick = onPrimaryAction, enabled = primaryActionEnabled) {
+                            Text(primaryActionLabel)
+                        }
                     }
                 }
             }
@@ -149,35 +138,144 @@ fun OneDriveSourceCard(
     isLoading: Boolean,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** Carpeta que se escanea; cadena vacía = toda la cuenta. */
+    folderPath: String = "",
+    onChangeFolder: (() -> Unit)? = null
 ) {
+    val folderLabel = if (folderPath.isBlank()) stringResource(R.string.source_onedrive_folder_root)
+    else folderPath
     SourceCard(
         modifier = modifier,
         icon = "cloud",
         title = stringResource(R.string.source_onedrive_title),
         description = stringResource(R.string.source_onedrive_desc),
-        statusText = if (isConnected) stringResource(R.string.source_onedrive_connected) else null,
+        // Conectado, lo que importa ya no es "hay cuenta" sino QUÉ se está escaneando: una
+        // biblioteca vacía casi siempre es la carpeta equivocada, y así se ve sin buscarla.
+        statusText = if (isConnected) {
+            stringResource(R.string.source_onedrive_connected) + " · " +
+                stringResource(R.string.source_onedrive_folder, folderLabel)
+        } else null,
         isConfigured = isConnected,
         isLoading = isLoading,
         primaryActionLabel = stringResource(
             if (isConnected) R.string.source_onedrive_disconnect else R.string.source_onedrive_connect
         ),
-        onPrimaryAction = if (isConnected) onDisconnect else onConnect
+        onPrimaryAction = if (isConnected) onDisconnect else onConnect,
+        secondaryActionLabel = if (isConnected && onChangeFolder != null) {
+            stringResource(R.string.source_onedrive_change_folder)
+        } else null,
+        onSecondaryAction = if (isConnected) onChangeFolder else null,
+        // Cambiar de carpeta no es "quitar": el rojo de la acción secundaria está reservado
+        // para lo que borra (ver LocalFoldersSourceCard).
+        secondaryActionDestructive = false
     )
 }
 
 /**
- * Tarjeta de la carpeta local. Lanza el picker SAF y persiste el permiso de lectura, para que
- * la carpeta siga siendo legible tras reiniciar la app.
+ * Devuelve la acción "activar el escaneo del dispositivo", ya resuelto el permiso de lectura de
+ * audio: si falta, lo pide; si el usuario lo deniega —o el sistema dejó de preguntar tras dos
+ * negativas—, emite el diálogo que lleva a los ajustes de la app, en vez de dejar la opción
+ * muerta sin explicación.
+ *
+ * Existe como gate reutilizable porque hay DOS caminos hacia el mismo modo (la tarjeta del
+ * dispositivo y el diálogo de quitar la última carpeta), y uno de ellos se saltaba el permiso.
+ *
+ * Este es el ÚNICO sitio de la app que pide el permiso de audio: es el único modo que lo necesita
+ * (las carpetas SAF se autorizan al elegirlas y la nube no lo usa para nada), así que quien no lo
+ * active nunca ve el diálogo del sistema.
  */
 @Composable
-fun LocalSourceCard(
-    folderUri: String?,
+fun rememberDeviceScanActivator(
+    permission: String,
+    hasPermission: () -> Boolean,
+    onActivate: () -> Unit
+): () -> Unit {
+    val context = LocalContext.current
+    var showPermissionDenied by remember { mutableStateOf(false) }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) onActivate() else showPermissionDenied = true
+    }
+
+    if (showPermissionDenied) {
+        AlertDialog(
+            onDismissRequest = { showPermissionDenied = false },
+            title = { Text(stringResource(R.string.source_device_permission_title)) },
+            text = { Text(stringResource(R.string.source_device_permission_body)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    showPermissionDenied = false
+                    context.startActivity(
+                        Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.fromParts("package", context.packageName, null)
+                        )
+                    )
+                }) { Text(stringResource(R.string.source_device_permission_settings)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPermissionDenied = false }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            }
+        )
+    }
+
+    return { if (hasPermission()) onActivate() else permissionLauncher.launch(permission) }
+}
+
+/**
+ * Tarjeta del escaneo COMPLETO del dispositivo: toda la música que el sistema indexa, sin elegir
+ * carpetas. El permiso lo resuelve [rememberDeviceScanActivator] antes de llegar a [onEnable].
+ */
+@Composable
+fun DeviceScanSourceCard(
+    isEnabled: Boolean,
+    onEnable: () -> Unit,
+    onDisable: () -> Unit,
+    modifier: Modifier = Modifier,
+    canDisable: Boolean = true
+) {
+    SourceCard(
+        modifier = modifier,
+        icon = "smartphone",
+        title = stringResource(R.string.source_device_title),
+        description = stringResource(R.string.source_device_desc),
+        statusText = if (isEnabled) stringResource(R.string.source_device_active) else null,
+        isConfigured = isEnabled,
+        // Sin carpetas (ni guardadas) ni nube a las que volver, apagar el escaneo dejaría la
+        // biblioteca vacía y expulsaría al onboarding: se bloquea el botón mientras es el caso.
+        primaryActionEnabled = !isEnabled || canDisable,
+        primaryActionLabel = stringResource(
+            if (isEnabled) R.string.source_device_disable else R.string.source_device_enable
+        ),
+        onPrimaryAction = { if (isEnabled) onDisable() else onEnable() }
+    )
+}
+
+/**
+ * Tarjeta de las carpetas de música. A diferencia del resto de fuentes admite VARIAS, así que
+ * lleva su propia lista en vez de la acción única de [SourceCard]: cada carpeta se puede quitar
+ * por separado, que es lo que permite dejar de escanear "Descargas" conservando "Music".
+ *
+ * Quitar una carpeta NO borra archivos — solo salen del índice de la app — pero eso no es obvio
+ * desde el botón, así que se confirma diciéndolo.
+ */
+@Composable
+fun LocalFoldersSourceCard(
+    folderUris: Set<String>,
     onFolderPicked: (String) -> Unit,
-    onRemoveFolder: () -> Unit,
-    modifier: Modifier = Modifier
+    onRemoveFolder: (String) -> Unit,
+    onScanWholeDevice: () -> Unit,
+    modifier: Modifier = Modifier,
+    hasOtherSource: Boolean = false
 ) {
     val context = LocalContext.current
+    var pendingRemoval by remember { mutableStateOf<String?>(null) }
+
     val folderPicker: ManagedActivityResultLauncher<Uri?, Uri?> = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
@@ -189,20 +287,319 @@ fun LocalSourceCard(
         }
     }
 
-    SourceCard(
-        modifier = modifier,
-        icon = "folder",
-        title = stringResource(R.string.source_local_title),
-        description = stringResource(R.string.source_local_desc),
-        statusText = folderUri?.let { displayFolderName(it) },
-        isConfigured = folderUri != null,
-        primaryActionLabel = stringResource(
-            if (folderUri == null) R.string.settings_local_pick else R.string.settings_local_change
-        ),
-        onPrimaryAction = { folderPicker.launch(null) },
-        secondaryActionLabel = if (folderUri != null) stringResource(R.string.settings_local_remove) else null,
-        onSecondaryAction = if (folderUri != null) onRemoveFolder else null
-    )
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            SourceCardHeader(
+                icon = "folder",
+                title = stringResource(R.string.source_local_title),
+                subtitle = if (folderUris.isEmpty()) stringResource(R.string.source_local_desc)
+                else pluralStringResource(R.plurals.source_local_count, folderUris.size, folderUris.size),
+                isConfigured = folderUris.isNotEmpty()
+            )
+
+            if (folderUris.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(12.dp))
+                // Ordenadas por nombre: el Set del DataStore no garantiza orden, y sin esto las
+                // carpetas se reordenarían solas entre recomposiciones.
+                folderUris.sortedBy { displayFolderName(it).lowercase() }.forEach { uri ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        MaterialSymbol(
+                            icon = "folder_open",
+                            size = 20.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = displayFolderName(uri),
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = { pendingRemoval = uri }) {
+                            MaterialSymbol(
+                                icon = "close",
+                                size = 20.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                if (folderUris.isEmpty()) {
+                    Button(onClick = { folderPicker.launch(null) }) {
+                        Text(stringResource(R.string.settings_local_pick))
+                    }
+                } else {
+                    OutlinedButton(onClick = { folderPicker.launch(null) }) {
+                        Text(stringResource(R.string.settings_local_add))
+                    }
+                }
+            }
+        }
+    }
+
+    val removing = pendingRemoval
+    if (removing != null) {
+        val isLast = folderUris.size == 1
+        // Es la última carpeta Y no hay otra fuente (nube): quitarla dejaría al usuario sin música
+        // y lo expulsaría al onboarding. En ese caso NO se ofrece "Quitar": solo cambiar a escanear
+        // todo el dispositivo (conserva una fuente) o cancelar (conserva la carpeta). Con nube
+        // conectada, o si no es la última, quitarla es seguro y sí se ofrece.
+        val lockedLast = isLast && !hasOtherSource
+        AlertDialog(
+            onDismissRequest = { pendingRemoval = null },
+            title = { Text(stringResource(R.string.local_folder_remove_title, displayFolderName(removing))) },
+            text = {
+                Text(
+                    stringResource(
+                        when {
+                            lockedLast -> R.string.local_folder_remove_last_locked_body
+                            isLast -> R.string.local_folder_remove_last_body
+                            else -> R.string.local_folder_remove_body
+                        }
+                    )
+                )
+            },
+            confirmButton = {
+                Row {
+                    // Con la última carpeta se ofrece cambiar a escanear todo ahí mismo, en vez de
+                    // obligar a buscarlo después (y es la ÚNICA salida cuando no hay otra fuente).
+                    if (isLast) {
+                        TextButton(onClick = {
+                            pendingRemoval = null
+                            onScanWholeDevice()
+                        }) { Text(stringResource(R.string.local_folder_remove_scan_all)) }
+                    }
+                    if (!lockedLast) {
+                        TextButton(onClick = {
+                            pendingRemoval = null
+                            onRemoveFolder(removing)
+                        }) {
+                            Text(
+                                stringResource(R.string.settings_local_remove),
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRemoval = null }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            }
+        )
+    }
+}
+
+/**
+ * Tarjeta ÚNICA de "música del teléfono" para el ONBOARDING: reúne en una sola tarjeta las dos
+ * formas de la música local —escanear todo el dispositivo o elegir carpetas— que en Ajustes van en
+ * tarjetas separadas ([DeviceScanSourceCard] + [LocalFoldersSourceCard]). En el primer arranque son
+ * demasiada superficie para lo primero que se ve, y presentar "todo el dispositivo" y "unas
+ * carpetas" como dos opciones de la MISMA decisión es más claro que como dos fuentes distintas.
+ *
+ * Los modos son EXCLUYENTES y lo resuelve la capa de datos: activar el escaneo completo vacía las
+ * carpetas, y elegir una carpeta desactiva el escaneo completo. Por eso aquí basta con mostrar el
+ * estado activo (chip del dispositivo o lista de carpetas) y ofrecer ambas acciones siempre.
+ *
+ * A diferencia de [LocalFoldersSourceCard] (Ajustes), quitar una carpeta es DIRECTO, sin diálogo:
+ * en el onboarding nada se ha escaneado todavía y la verificación de "estás quitando la última
+ * carpeta" (con su oferta de escanear todo) solo tiene sentido sobre una biblioteca ya poblada.
+ *
+ * @param onScanWholeDevice acción ya resuelto el permiso (ver [rememberDeviceScanActivator]).
+ */
+@Composable
+fun PhoneMusicSourceCard(
+    scanWholeDevice: Boolean,
+    folderUris: Set<String>,
+    onScanWholeDevice: () -> Unit,
+    onDisableScan: () -> Unit,
+    onFolderPicked: (String) -> Unit,
+    onRemoveFolder: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+
+    val folderPicker: ManagedActivityResultLauncher<Uri?, Uri?> = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            context.contentResolver.takePersistableUriPermission(
+                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+            onFolderPicked(uri.toString())
+        }
+    }
+
+    val isConfigured = scanWholeDevice || folderUris.isNotEmpty()
+    val subtitle = when {
+        scanWholeDevice -> stringResource(R.string.source_device_active)
+        folderUris.isNotEmpty() ->
+            pluralStringResource(R.plurals.source_local_count, folderUris.size, folderUris.size)
+        else -> stringResource(R.string.source_phone_music_desc)
+    }
+
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            SourceCardHeader(
+                icon = "library_music",
+                title = stringResource(R.string.source_phone_music_title),
+                subtitle = subtitle,
+                isConfigured = isConfigured
+            )
+
+            // Estado activo: o el chip de "todo el dispositivo" (con su quitar), o la lista de
+            // carpetas. Nunca ambos: son modos excluyentes.
+            if (scanWholeDevice) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    MaterialSymbol(
+                        icon = "smartphone",
+                        size = 20.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = stringResource(R.string.source_device_title),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = onDisableScan) {
+                        MaterialSymbol(
+                            icon = "close",
+                            size = 20.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            } else if (folderUris.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(12.dp))
+                // Ordenadas por nombre: el Set del DataStore no garantiza orden.
+                folderUris.sortedBy { displayFolderName(it).lowercase() }.forEach { uri ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        MaterialSymbol(
+                            icon = "folder_open",
+                            size = 20.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = displayFolderName(uri),
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        // Sin diálogo: en el onboarding quitar es reversible y de bajo riesgo.
+                        IconButton(onClick = { onRemoveFolder(uri) }) {
+                            MaterialSymbol(
+                                icon = "close",
+                                size = 20.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Con el escaneo completo activo NO se ofrece nada más: "escanear todo" y "elegir
+            // carpetas" son modos excluyentes, así que dejar el botón "Añadir carpeta" sería
+            // contradictorio. La única salida es el aspa del chip de arriba (desactivar). Con el
+            // dispositivo apagado sí conviven las dos acciones de la misma decisión.
+            if (!scanWholeDevice) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(onClick = onScanWholeDevice) {
+                        Text(stringResource(R.string.source_device_enable))
+                    }
+                    Button(onClick = { folderPicker.launch(null) }) {
+                        Text(stringResource(R.string.settings_local_add))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Cabecera compartida por [SourceCard] y la tarjeta de carpetas (que necesita su propio cuerpo). */
+@Composable
+private fun SourceCardHeader(
+    icon: String,
+    title: String,
+    subtitle: String,
+    isConfigured: Boolean
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = if (isConfigured) MaterialTheme.colorScheme.primaryContainer
+            else MaterialTheme.colorScheme.surfaceContainerHighest,
+            modifier = Modifier.size(48.dp)
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                MaterialSymbol(
+                    icon = icon,
+                    size = 26.sp,
+                    fill = isConfigured,
+                    color = if (isConfigured) MaterialTheme.colorScheme.onPrimaryContainer
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.width(16.dp))
+
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = title, style = MaterialTheme.typography.titleMedium)
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        if (isConfigured) {
+            Spacer(modifier = Modifier.width(8.dp))
+            MaterialSymbol(
+                icon = "check_circle",
+                size = 22.sp,
+                fill = true,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+    }
 }
 
 /**
@@ -211,6 +608,87 @@ fun LocalSourceCard(
  */
 private fun displayFolderName(treeUri: String): String =
     Uri.decode(treeUri.substringAfterLast("%3A", treeUri))
+
+/**
+ * Tope de almacenamiento para el audio descargado de la nube (0 = sin límite). Igual que
+ * [SourceCard], lo comparten el onboarding y Ajustes → Descargas: la decisión se ofrece al
+ * conectar la nube (antes del primer sync masivo, que es cuando se llena el teléfono) y se
+ * puede cambiar después sin que las dos pantallas diverjan.
+ *
+ * El máximo del slider NO es una constante: se deriva del tamaño real del volumen donde la app
+ * guarda el audio. Ofrecer un tope mayor que el disco sería ruido (equivale a "sin límite", que
+ * ya es el 0), y una constante fija se queda corta o larga según el dispositivo.
+ *
+ * @param limitGb valor persistido; siembra el slider y se muestra mientras no se arrastre.
+ * @param onLimitChangeFinished se llama al SOLTAR, no en cada frame del arrastre: fijar el tope
+ *        dispara el desalojo LRU del excedente, que no debe correr en cada píxel.
+ */
+@Composable
+fun StorageLimitCard(
+    limitGb: Float,
+    onLimitChangeFinished: (Float) -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    description: String = stringResource(R.string.download_storage_limit_desc),
+    shape: Shape = RoundedCornerShape(20.dp)
+) {
+    val context = LocalContext.current
+    // Volumen donde viven los archivos de la app: total para el techo del slider, libre para
+    // el aviso. `remember` sin claves: el tamaño del disco no cambia mientras la app vive.
+    val (maxGb, freeSpaceText) = remember {
+        val filesDir = context.filesDir
+        (filesDir.totalSpace / AppConfig.BYTES_PER_GB) to
+            Formatter.formatShortFileSize(context, filesDir.usableSpace)
+    }
+    var sliderValue by remember(limitGb, maxGb) { mutableFloatStateOf(limitGb.coerceIn(0f, maxGb)) }
+    val gb = sliderValue.toInt()
+
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = shape,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = stringResource(R.string.download_storage_limit_title),
+                style = MaterialTheme.typography.titleSmall
+            )
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            // Número grande SIEMPRE visible: es el valor persistido, así al volver a entrar se
+            // ve el tope actual sin tener que arrastrar (el tooltip del thumb solo sale al
+            // arrastrar, por eso NO alcanza por sí solo).
+            Text(
+                text = if (gb <= 0) stringResource(R.string.download_storage_limit_unlimited)
+                else stringResource(R.string.download_storage_limit_value, gb.toString()),
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                color = if (enabled) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.primary.copy(alpha = 0.38f)
+            )
+            // Slider Expressive (thumb de barra fina). El track ondulado NO existe en el Slider
+            // de esta versión de material3 (solo en WavyProgressIndicator).
+            Slider(
+                value = sliderValue,
+                onValueChange = { sliderValue = it },
+                valueRange = 0f..maxGb,
+                onValueChangeFinished = { onLimitChangeFinished(gb.toFloat()) },
+                enabled = enabled
+            )
+            // Referencia para decidir: un tope mayor que el espacio libre no cabe hoy.
+            Text(
+                text = stringResource(R.string.download_storage_free_space, freeSpaceText),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
 
 /** Confirmación previa a desconectar OneDrive: enumera qué se borra y qué se conserva. */
 @Composable

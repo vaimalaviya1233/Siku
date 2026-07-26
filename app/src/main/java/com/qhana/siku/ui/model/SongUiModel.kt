@@ -17,6 +17,13 @@ data class SongUiModel(
     val durationText: String,
     val imageUrl: String?,
     val isDownloaded: Boolean,
+    /**
+     * ¿La canción viene de una fuente en la nube? Gobierna el indicador de estado del archivo
+     * (descargada / se transmitirá): una canción del propio dispositivo no tiene ese estado.
+     * Por `sourceType`, NO por `isLocalAudio`: una de nube ya descargada es `file://` y SÍ
+     * conserva el indicador.
+     */
+    val isCloud: Boolean,
     val isActive: Boolean = false // Si está sonando o seleccionada
 )
 
@@ -38,6 +45,7 @@ fun Song.toUiModel(isActive: Boolean = false): SongUiModel {
         durationText = durationFormatted,
         imageUrl = albumArtUriString,
         isDownloaded = isLocalAudio,
+        isCloud = sourceType.isCloud,
         isActive = isActive
     )
 }

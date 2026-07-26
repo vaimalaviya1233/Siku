@@ -13,12 +13,14 @@ import com.qhana.siku.data.source.MusicSource
 import com.qhana.siku.data.source.MusicSourceRegistry
 import com.qhana.siku.data.source.SourceAuthException
 import com.qhana.siku.data.util.NetworkManager
+import com.qhana.siku.data.util.NetworkStatus
 import io.mockk.MockKAnnotations
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.impl.annotations.RelaxedMockK
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -46,6 +48,9 @@ class SyncManagerTest {
     @RelaxedMockK lateinit var sourceRegistry: MusicSourceRegistry
     @RelaxedMockK lateinit var oneDriveSource: MusicSource
     @RelaxedMockK lateinit var artistImageRepository: com.qhana.siku.data.repository.ArtistImageRepository
+    @RelaxedMockK lateinit var lightMetadataFetcher: LightMetadataFetcher
+    @RelaxedMockK lateinit var artworkHealingManager: ArtworkHealingManager
+    @RelaxedMockK lateinit var snackbarManager: com.qhana.siku.data.util.SnackbarManager
 
     private lateinit var syncManager: SyncManager
 
@@ -67,7 +72,7 @@ class SyncManagerTest {
         syncManager = SyncManager(
             context, musicRepository, musicPreferences, networkManager,
             musicDownloader, requestCoordinator, authManager, sourceRegistry,
-            artistImageRepository
+            artistImageRepository, lightMetadataFetcher, artworkHealingManager, snackbarManager
         )
 
         // Defaults seguros: sin trabajo pendiente, sin pausas, red y WiFi disponibles
@@ -77,6 +82,13 @@ class SyncManagerTest {
         every { requestCoordinator.shouldPauseScan() } returns false
         every { networkManager.isWifi() } returns true
         every { networkManager.isAvailable() } returns true
+        // StateFlow REAL y no el mock relajado: las esperas de red hacen `first {}` sobre él y
+        // un mock completa el flujo sin emitir nada, lo que haría estallar la espera con
+        // NoSuchElementException en vez de agotar su plazo. Nunca cambia de valor a propósito
+        // — quien quiera simular "sin WiFi" mueve `isWifi()`, que es lo que evalúa la espera;
+        // así el timeout vence (instantáneo con virtual time) y la cola cierra con su motivo.
+        every { networkManager.status } returns
+            MutableStateFlow(NetworkStatus(isAvailable = true, isUnmetered = true))
         coEvery { musicRepository.countSongsNeedingWork() } returns 0
         coEvery { musicRepository.getEarliestRetryAt() } returns null
         coEvery { musicRepository.getDownloadAttempts(any()) } returns 0
