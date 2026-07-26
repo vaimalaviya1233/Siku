@@ -166,7 +166,14 @@ class LightMetadataFetcher @Inject constructor(
             }
         }
 
-        val artBytes = meta.artwork ?: run {
+        // if/else explícito y no un `?: run { }`: esta clase tiene su propio método `run`, que
+        // como miembro gana a `kotlin.run` en la resolución — el lambda se pasaría como el
+        // `isStopped: () -> Boolean` de ese método y todo lo de dentro (returns no locales,
+        // llamada suspend) dejaría de compilar por motivos que no se leen en el error.
+        val embedded = meta.artwork
+        val artBytes = if (embedded != null) {
+            embedded
+        } else {
             // `fetchArtwork == null` es la fuente diciendo que leyó la cabecera y no había
             // bloque de imagen; que la petición devuelva null es que no se pudo traer. Lo
             // primero es concluyente y lo segundo no, y por eso no comparten camino.
