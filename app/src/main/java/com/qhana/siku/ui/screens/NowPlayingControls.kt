@@ -899,6 +899,14 @@ internal fun BottomActionBar(
                         // indeterminada al preparar. Es el MISMO lenguaje que los indicadores
                         // lineales de sync y del gestor de descargas (antes acá había un
                         // LoadingIndicator, que morfea formas en vez de ondular).
+                        //
+                        // Color = `toolbarContentColor` (el del glifo), NO el acento del álbum:
+                        // es la MISMA razón por la que el toggle activo dejó de usar
+                        // inverseSurface. Con carátula acromática el tema es Monochrome, y ahí
+                        // MCU coloca `primary` y `primaryContainer` del mismo lado tonal (oscuro:
+                        // T100 sobre T85; claro: T0 sobre T25) → la onda quedaba invisible sobre
+                        // el contenedor de la barra. El par container/onContainer tiene contraste
+                        // garantizado por construcción sea cual sea el seed.
                         val density = LocalDensity.current
                         val waveStroke = remember(density) {
                             Stroke(
@@ -910,16 +918,16 @@ internal fun BottomActionBar(
                             CircularWavyProgressIndicator(
                                 progress = { downloadProgress },
                                 modifier = Modifier.size(ToolbarDownloadIndicatorSize),
-                                color = playButtonColor,
-                                trackColor = playButtonColor.copy(alpha = TOOLBAR_DOWNLOAD_TRACK_ALPHA),
+                                color = toolbarContentColor,
+                                trackColor = toolbarContentColor.copy(alpha = TOOLBAR_DOWNLOAD_TRACK_ALPHA),
                                 stroke = waveStroke,
                                 trackStroke = waveStroke
                             )
                         } else {
                             CircularWavyProgressIndicator(
                                 modifier = Modifier.size(ToolbarDownloadIndicatorSize),
-                                color = playButtonColor,
-                                trackColor = playButtonColor.copy(alpha = TOOLBAR_DOWNLOAD_TRACK_ALPHA),
+                                color = toolbarContentColor,
+                                trackColor = toolbarContentColor.copy(alpha = TOOLBAR_DOWNLOAD_TRACK_ALPHA),
                                 stroke = waveStroke,
                                 trackStroke = waveStroke
                             )
@@ -1032,10 +1040,11 @@ private val ToolbarDownloadIndicatorSize = 36.dp
 
 
 /**
- * Opacidad del track del anillo de descarga. Se deriva del MISMO color del indicador (en vez de
- * un rol del esquema) porque la barra flotante es vibrant: cualquier `surface*` cae encima del
- * `primaryContainer` del contenedor y el track desaparece. Atenuado lo justo para que el recorrido
- * pendiente se lea sin competir con la onda activa ni con el glifo.
+ * Opacidad del track del anillo de descarga. Se deriva del MISMO color del indicador
+ * (`onPrimaryContainer`, en vez de un rol suelto del esquema) porque la barra flotante es vibrant:
+ * cualquier `surface*` cae encima del `primaryContainer` del contenedor y el track desaparece.
+ * Atenuado lo justo para que el recorrido pendiente se lea sin competir con la onda activa ni con
+ * el glifo.
  */
 private const val TOOLBAR_DOWNLOAD_TRACK_ALPHA = 0.3f
 

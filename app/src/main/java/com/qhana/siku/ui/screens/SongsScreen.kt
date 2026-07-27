@@ -558,9 +558,12 @@ private fun SearchArtistCard(artist: ArtistSummary, onClick: () -> Unit) {
                 .background(MaterialTheme.colorScheme.surfaceContainerHighest),
             contentAlignment = Alignment.Center
         ) {
-            if (artist.thumbUrl != null) {
+            // Foto del artista → carátula de alguno de sus álbumes → placeholder (misma cascada
+            // que la pestaña Artistas y el detalle).
+            val artistArt = artist.thumbUrl ?: artist.fallbackArtUri
+            if (artistArt != null) {
                 AsyncImage(
-                    model = artist.thumbUrl,
+                    model = artistArt,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()

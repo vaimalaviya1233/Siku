@@ -215,7 +215,10 @@ interface SongDao {
         fun buildArtistsQuery(sort: String, sourceFilters: Set<SongSourceFilter>): SimpleSQLiteQuery {
             val sb = StringBuilder(
                 "SELECT s.artist AS name, COUNT(*) AS songCount, COUNT(DISTINCT s.album) AS albumCount, " +
-                    "a.imageUrl AS imageUrl, a.thumbUrl AS thumbUrl " +
+                    "a.imageUrl AS imageUrl, a.thumbUrl AS thumbUrl, " +
+                    // Respaldo cuando el artista no tiene foto: una carátula cualquiera de las
+                    // suyas. Ya estamos agrupando por artista, así que sale gratis.
+                    "MAX(s.albumArtUriString) AS fallbackArtUri " +
                     "FROM songs s LEFT JOIN artists a ON a.name = s.artist WHERE 1=1"
             )
             val args = mutableListOf<Any>()

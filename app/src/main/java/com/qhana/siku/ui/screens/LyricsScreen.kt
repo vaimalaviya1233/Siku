@@ -29,6 +29,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -79,6 +80,22 @@ private val SyncedTopPadding = 32.dp
  * fade o el inset, el hueco reservado en la lista lo sigue solo.
  */
 private val SyncedBottomPadding = ControlsFadeHeight + ControlsBottomInset + 24.dp
+
+/**
+ * Cuánto acento lleva el "glow" del fundido inferior, y a partir de qué luminancia se considera
+ * que el fondo es CLARO y por tanto no lo lleva.
+ *
+ * El tinte solo funciona sobre fondo oscuro. Con fondo claro el acento es `primary` (tono 40),
+ * así que mezclar hacia él OSCURECE: el degradado pasa de claro → tintado → claro otra vez y esa
+ * luminancia no monótona se lee como una FRANJA gris cruzando el texto justo encima de los
+ * controles (el pico cae en el stop 0.50, a ~10dp del borde de los botones). En claro el fundido
+ * va sin tinte: alpha monótona de 0 a 1, invisible por construcción.
+ *
+ * Se decide por la luminancia REAL del fondo, no por `isSystemInDarkTheme()`: el color lo provee
+ * el caller y el criterio tiene que valer para el color que de verdad se está pintando.
+ */
+private const val GlowAccentRatio = 0.25f
+private const val LightBackgroundLuminance = 0.5f
 
 /** Marca que LrcLib devuelve para las pistas sin letra por ser instrumentales. */
 private const val INSTRUMENTAL_SENTINEL = "[INSTRUMENTAL]"
@@ -272,8 +289,20 @@ fun LyricsScreen(
 
         // Floating Controls at Bottom (Lifted Up + Colored Fade Effect)
         val bottomGlow = remember(backgroundColor, accentColor) {
-            // Mezclamos el fondo oscuro con un 25% del color de acento para que "brille" con color
-            Color(androidx.core.graphics.ColorUtils.blendARGB(backgroundColor.toArgb(), accentColor.toArgb(), 0.25f))
+            // Fondo oscuro: se mezcla con [GlowAccentRatio] del acento para que el fundido "brille"
+            // con color. Fondo claro: sin tinte (ver [LightBackgroundLuminance]) — mezclar ahí
+            // oscurece y el pico de luminancia se ve como una franja sobre los controles.
+            if (backgroundColor.luminance() < LightBackgroundLuminance) {
+                Color(
+                    androidx.core.graphics.ColorUtils.blendARGB(
+                        backgroundColor.toArgb(),
+                        accentColor.toArgb(),
+                        GlowAccentRatio
+                    )
+                )
+            } else {
+                backgroundColor
+            }
         }
 
         Box(

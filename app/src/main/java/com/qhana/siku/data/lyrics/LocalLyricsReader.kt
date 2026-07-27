@@ -46,8 +46,18 @@ class LocalLyricsReader @Inject constructor(
 
     suspend fun read(song: Song, includeRemote: Boolean = false): String? = withContext(Dispatchers.IO) {
         val location = locationResolver.resolve(song)
-        readLrcFile(song, location, includeRemote)?.let { return@withContext it }
-        readEmbedded(song, location, includeRemote)
+        readLrcFile(song, location, includeRemote)?.let {
+            Log.d(TAG, "Letra de '${song.title}' leída de un archivo .lrc")
+            return@withContext it
+        }
+        readEmbedded(song, location, includeRemote)?.let {
+            Log.d(TAG, "Letra de '${song.title}' leída del tag del archivo")
+            return@withContext it
+        }
+        // Diagnóstico: sin esto, "no había letra local" y "la busqué en el sitio equivocado" son
+        // indistinguibles desde fuera, y el usuario solo ve que la app se va a la red.
+        Log.d(TAG, "Sin letra local para '${song.title}' (ubicación: ${location.javaClass.simpleName})")
+        null
     }
 
     // --- Archivo .lrc -------------------------------------------------------------------------
@@ -60,27 +70,40 @@ class LocalLyricsReader @Inject constructor(
                     ?: if (includeRemote) cloudLyricsStore.readLrc(song) else null
             }
 
-            is AudioLocation.SafDocument ->
-                safSibling(location.uri, lrcNameFor(displayNameOf(location.uri) ?: return null))
-                    ?.let { readUriText(it) }
+            // El `let` y no un `?: return`: si no se puede saber el nombre del documento, se
+            // renuncia al `.lrc` pero NO al tag embebido, que sigue siendo alcanzable.
+            is AudioLocation.SafDocument -> displayNameOf(location.uri)?.let { name ->
+                safSibling(location.uri, name)?.let { readUriText(it) }
+            }
 
             // MediaStore no permite leer archivos no-media ajenos: el `.lrc` de al lado es
             // invisible aunque exista. Solo se puede mirar la carpeta que el usuario haya
             // concedido a propósito para las letras.
-            is AudioLocation.MediaStoreItem -> readFromLyricsFolder(song)
+            is AudioLocation.MediaStoreItem -> readFromLyricsFolder(song, location.uri)
 
             AudioLocation.Cloud -> if (includeRemote) cloudLyricsStore.readLrc(song) else null
         }
 
-    /** Carpeta de letras elegida en Ajustes: se busca por nombre de canción, sin listar el árbol. */
-    private fun readFromLyricsFolder(song: Song): String? {
+    /**
+     * Carpeta de letras elegida en Ajustes. El `.lrc` se busca en la MISMA subcarpeta que escribe
+     * [LyricsWriter] (la jerarquía de la canción, ver [lyricsSubdirectoryOf]): plano colisionaría
+     * entre álbumes y devolvería la letra de otra canción.
+     *
+     * El id del documento se construye en vez de listar el árbol: si no existe, la lectura falla y
+     * devolvemos null, más barato que enumerar carpetas en cada cambio de canción.
+     */
+    private fun readFromLyricsFolder(song: Song, audioUri: Uri): String? {
         val treeUri = musicPreferences.loadLyricsFolderUri()?.let(Uri::parse) ?: return null
-        val baseName = song.relativePath?.substringAfterLast('/') ?: song.title
-        val target = DocumentsContract.buildDocumentUriUsingTree(
-            treeUri,
-            "${DocumentsContract.getTreeDocumentId(treeUri)}/${lrcNameFor(baseName)}"
-        )
-        return readUriText(target)
+        val baseName = displayNameOf(audioUri)
+            ?: song.relativePath?.substringAfterLast('/')
+            ?: song.title
+        val subdirectory = lyricsSubdirectoryOf(context, audioUri, song)
+        val documentId = buildString {
+            append(DocumentsContract.getTreeDocumentId(treeUri))
+            if (subdirectory.isNotEmpty()) append('/').append(subdirectory)
+            append('/').append(lrcNameFor(baseName))
+        }
+        return readUriText(DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId))
     }
 
     // --- Tag embebido -------------------------------------------------------------------------
@@ -124,11 +147,38 @@ class LocalLyricsReader @Inject constructor(
      * documento en vez de listar la carpeta — si no existe, la lectura falla y devolvemos null,
      * que es más barato que enumerar cientos de archivos por cada canción.
      */
-    private fun safSibling(uri: Uri, name: String): Uri? = runCatching {
+    private fun safSibling(uri: Uri, audioName: String): Uri? = runCatching {
         val documentId = DocumentsContract.getDocumentId(uri)
         val parentId = documentId.substringBeforeLast('/', "")
-        if (parentId.isEmpty()) return null
-        DocumentsContract.buildDocumentUriUsingTree(uri, "$parentId/$name")
+        if (parentId.isEmpty()) {
+            Log.d(TAG, "El documento no tiene carpeta padre en su id: $documentId")
+            return null
+        }
+
+        // Dos convenciones conviven en la práctica: `Numb.lrc` (la habitual) y `Numb.mp3.lrc`
+        // (la que produce algún exportador, conservando la extensión del audio). Se aceptan las
+        // dos, y la comparación es insensible a mayúsculas.
+        val base = audioName.substringBeforeLast('.')
+        val accepted = setOf(
+            "$base.$LRC_EXTENSION".lowercase(),
+            "$audioName.$LRC_EXTENSION".lowercase()
+        )
+
+        val children = DocumentsContract.buildChildDocumentsUriUsingTree(uri, parentId)
+        val projection = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME
+        )
+        context.contentResolver.query(children, projection, null, null, null)?.use { cursor ->
+            while (cursor.moveToNext()) {
+                val name = cursor.getString(1) ?: continue
+                if (name.lowercase() in accepted) {
+                    return@runCatching DocumentsContract.buildDocumentUriUsingTree(uri, cursor.getString(0))
+                }
+            }
+        }
+        Log.d(TAG, "Sin .lrc para '$audioName' en la carpeta (se buscaba: $accepted)")
+        null
     }.getOrNull()
 
     private fun displayNameOf(uri: Uri): String? = runCatching {

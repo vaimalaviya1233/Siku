@@ -346,14 +346,16 @@
     <string name="lyrics_save_warn_consent">You\'ll be asked for write permission on OneDrive.</string>
     <string name="lyrics_save_blocked_format">This format doesn\'t support lyrics inside the file.</string>
     <string name="lyrics_save_blocked_not_downloaded">Download the song to write inside it.</string>
-    <string name="lyrics_save_blocked_no_folder">Choose a folder for lyrics in Settings.</string>
+    <string name="lyrics_save_blocked_no_folder">Android doesn\'t allow creating files next to your music when scanning the whole device. Choose a folder for lyrics in Settings, or use folder mode.</string>
+    <!-- %1$s = name of the chosen lyrics folder -->
+    <string name="lyrics_save_effect_lyrics_folder">It will be saved in “%1$s”, not next to the song: Android doesn\'t allow that when scanning the whole device. Other players won\'t find it there.</string>
     <string name="lyrics_save_blocked_no_remote">The matching cloud file is unknown.</string>
     <string name="lyrics_save_ok_lrc">Lyrics saved to an .lrc file</string>
     <string name="lyrics_save_ok_embedded">Lyrics saved inside the song</string>
     <string name="lyrics_save_err_empty">There are no lyrics to save</string>
     <string name="lyrics_save_err_format">This format doesn\'t support lyrics inside the file</string>
     <string name="lyrics_save_err_not_downloaded">Download the song first</string>
-    <string name="lyrics_save_err_no_folder">Choose a folder for lyrics in Settings</string>
+    <string name="lyrics_save_err_no_folder">Choose a folder for lyrics in Settings: Android won\'t let us write next to your music in this mode</string>
     <string name="lyrics_save_err_permission">No permission to modify the file</string>
     <string name="lyrics_save_err_wifi">You need Wi‑Fi to upload the song</string>
     <string name="lyrics_save_consent_denied">Without write permission the lyrics can\'t be saved to OneDrive</string>
@@ -367,7 +369,7 @@
     <string name="settings_lyrics_save_lrc">Always to an .lrc file</string>
     <string name="settings_lyrics_save_embedded">Always inside the song</string>
     <string name="settings_lyrics_folder_title">Lyrics folder</string>
-    <string name="settings_lyrics_folder_summary">Where to keep the .lrc files of the music on this device</string>
+    <string name="settings_lyrics_folder_summary">Only for “all the music on this device” mode: Android doesn\'t allow creating the .lrc files next to your music, so they are kept here mirroring their subfolders. Folder mode doesn\'t need this.</string>
     <string name="settings_lyrics_folder_none">No folder chosen</string>
     <string name="settings_lyrics_folder_choose">Choose folder</string>
     <string name="settings_lyrics_folder_clear">Remove</string>
@@ -380,6 +382,13 @@
     <string name="eq_reset">Reset</string>
     <string name="eq_open_system">System equalizer</string>
     <string name="eq_bands_label">%1$d bands</string>
+    <string name="eq_boost_section">Boost</string>
+    <string name="eq_boost_bass">Bass</string>
+    <string name="eq_boost_treble">Treble</string>
+    <string name="eq_headroom_label">Peak gain: %1$s dB</string>
+    <string name="eq_headroom_ok">Plenty of headroom: no clipping.</string>
+    <string name="eq_headroom_caution">May clip at high volume.</string>
+    <string name="eq_headroom_risk">Will clip unless you turn the volume down.</string>
     <string name="eq_preset_flat">Flat</string>
     <string name="eq_preset_rock">Rock</string>
     <string name="eq_preset_pop">Pop</string>
@@ -442,6 +451,8 @@
     <string name="settings_cat_playback_desc">Volume normalization (ReplayGain)</string>
     <string name="settings_cat_downloads_desc">Storage cap for downloads</string>
     <string name="settings_cat_appearance_desc">Player colors and background</string>
+    <string name="settings_cat_gestures_desc">Swiping and tapping in the player</string>
+    <string name="settings_gestures_header">Gestures</string>
     <string name="settings_downloads_header">Downloads</string>
     <string name="settings_volume_header">Volume (ReplayGain)</string>
     <string name="settings_volume_desc">Evens out perceived loudness across songs using the file\'s ReplayGain tags. It only attenuates, never boosts.</string>
@@ -602,10 +613,13 @@
     <string name="artist_picker_title">Choose artist</string>
     <string name="artist_picker_subtitle">Deezer results for \"%1$s\"</string>
     <string name="artist_picker_empty">No results on Deezer</string>
+    <string name="artist_picker_none">None of these</string>
+    <string name="artist_picker_none_desc">Leaves the artist with no photo: their album art is used instead</string>
 
     <!-- ==================== Color picker ==================== -->
     <string name="color_picker_title">Select color</string>
     <string name="color_picker_prompt">Tap a color to apply it:</string>
+    <string name="color_picker_no_art">This song doesn\'t have album art to analyze yet</string>
 
     <!-- ==================== Library: tabs / sync / sorting / logout ==================== -->
     <string name="tab_all">Songs</string>
@@ -666,6 +680,8 @@
     <string name="sync_failed_suffix">" · %1$d failed"</string>
     <string name="sync_up_to_date">Library up to date</string>
     <string name="sync_scanning">Scanning library</string>
+    <string name="sync_reading_tags">Reading song details</string>
+    <string name="sync_organizing_art">Organizing album art</string>
     <string name="sync_looking_for_changes">Looking for changes…</string>
     <string name="sync_error_auth">Couldn\'t authenticate with the music source</string>
     <!-- %1$s = configured folder that wasn't found on OneDrive -->

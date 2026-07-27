@@ -25,6 +25,7 @@ import com.qhana.siku.ui.screens.PlaylistDetailScreen
 import com.qhana.siku.ui.screens.SettingsAppearanceScreen
 import com.qhana.siku.ui.screens.SettingsBackupScreen
 import com.qhana.siku.ui.screens.SettingsDownloadsScreen
+import com.qhana.siku.ui.screens.SettingsGesturesScreen
 import com.qhana.siku.ui.screens.SettingsPlaybackScreen
 import com.qhana.siku.ui.screens.SettingsPlayerBarScreen
 import com.qhana.siku.ui.screens.SettingsScreen
@@ -380,6 +381,14 @@ fun AppNavHost(
                 onBackClick = { navController.popBackStack() },
                 onNavigate = { route -> appState.navigate(route) }
             )
+        }
+
+        composable(
+            route = Screen.SettingsGestures.route,
+            enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
+            popExitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) }
+        ) {
+            SettingsGesturesScreen(onBackClick = { navController.popBackStack() })
         }
 
         composable(

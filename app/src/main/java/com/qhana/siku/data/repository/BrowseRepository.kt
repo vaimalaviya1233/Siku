@@ -33,6 +33,16 @@ class BrowseRepository @Inject constructor(
 
     fun getArtistInfo(name: String): Flow<ArtistEntity?> = artistDao.getArtistFlow(name)
 
+    /**
+     * Foto de cada artista pedido (miniatura si la hay, si no la grande), omitiendo los que no
+     * tienen ninguna. Reactivo: si el backfill la resuelve más tarde —o el usuario la cambia o
+     * la quita en el picker— quien observe se entera.
+     */
+    fun getArtistPhotos(names: List<String>): Flow<Map<String, String>> =
+        artistDao.getArtistsByNameFlow(names).map { rows ->
+            rows.mapNotNull { row -> (row.thumbUrl ?: row.imageUrl)?.let { row.name to it } }.toMap()
+        }
+
     fun getAlbums(
         sort: AlbumSortOrder,
         sourceFilters: Set<SongSourceFilter> = emptySet()

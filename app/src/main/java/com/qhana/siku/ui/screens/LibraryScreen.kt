@@ -728,6 +728,9 @@ fun LibraryScreen(
                         is LibraryBannerState.Scanning -> {
                             ScanProgressBanner(state.progress, state.message)
                         }
+                        is LibraryBannerState.Preparing -> {
+                            PrepareProgressBanner(state.current, state.total, state.message)
+                        }
                         is LibraryBannerState.Downloading -> {
                             DownloadSummaryBanner(
                                 active = 1,
@@ -1267,6 +1270,55 @@ private fun SyncCompleteBanner(newSongs: Int, downloaded: Int, failed: Int, dele
             color = palette.accent.copy(alpha = 0.8f),
             maxLines = 1
         )
+    }
+}
+
+/**
+ * Fase de preparación: la app está trabajando pero todavía no bajando audio. El TÍTULO es el
+ * nombre de la fase (no un rótulo fijo), porque el propósito del banner aquí es justamente decir
+ * cuál de todas está corriendo — antes estas fases no publicaban nada y el banner se quedaba en
+ * "Escaneando biblioteca" durante minutos, que es indistinguible de haberse colgado.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun PrepareProgressBanner(current: Int, total: Int, message: String) {
+    val palette = bannerGreen()
+    BannerCard(
+        icon = "info",
+        iconContainer = palette.accent,
+        containerColor = palette.container,
+        contentColor = palette.accent
+    ) {
+        Text(
+            message,
+            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+            maxLines = 1
+        )
+        if (total > 0) {
+            Text(
+                stringResource(R.string.sync_progress, current, total, ""),
+                style = MaterialTheme.typography.bodySmall,
+                color = palette.accent.copy(alpha = 0.8f)
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        // Determinada cuando la fase sabe cuánto le queda; indeterminada cuando no, en vez de
+        // dibujar una barra clavada en cero que parecería otra vez que no avanza.
+        if (total > 0) {
+            LinearWavyProgressIndicator(
+                progress = { current.toFloat() / total },
+                color = palette.accent,
+                trackColor = palette.accent.copy(alpha = 0.25f),
+                modifier = Modifier.fillMaxWidth()
+            )
+        } else {
+            LinearWavyProgressIndicator(
+                color = palette.accent,
+                trackColor = palette.accent.copy(alpha = 0.25f),
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        Spacer(Modifier.height(2.dp))
     }
 }
 

@@ -136,6 +136,15 @@ class ScanWorker @AssistedInject constructor(
                             state.total,
                             if (state.failed > 0) applicationContext.getString(R.string.sync_failed_suffix, state.failed) else ""
                         )
+                    // Las fases de preparación llevan su propio nombre también aquí: la
+                    // notificación es lo único visible con la app en segundo plano, y es donde
+                    // más caro sale que un minuto de trabajo real parezca un cuelgue.
+                    is SyncStatus.Preparing ->
+                        state.message to (
+                            if (state.total > 0)
+                                applicationContext.getString(R.string.sync_progress, state.current, state.total, "")
+                            else applicationContext.getString(R.string.notif_checking_changes)
+                            )
                     // La espera de red también se cuenta en la notificación: el foreground
                     // service sigue vivo durante ella, así que sin esto la barra se queda
                     // anunciando una descarga que ya no avanza.

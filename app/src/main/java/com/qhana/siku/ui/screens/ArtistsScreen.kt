@@ -227,11 +227,16 @@ private fun ArtistRow(
                 .then(sharedModifier),
             contentAlignment = Alignment.Center
         ) {
-            if (artist.thumbUrl != null) {
+            // Misma cascada que el detalle: foto del artista → carátula de alguno de sus álbumes
+            // → placeholder. Sin el paso intermedio, decir "ninguno de estos" en el picker dejaba
+            // la fila con el icono genérico, que se lee como un fallo de carga y no como la
+            // decisión que fue.
+            val artistArt = artist.thumbUrl ?: artist.fallbackArtUri
+            if (artistArt != null) {
                 val context = LocalContext.current
-                val request = remember(artist.thumbUrl) {
+                val request = remember(artistArt) {
                     ImageRequest.Builder(context)
-                        .data(artist.thumbUrl)
+                        .data(artistArt)
                         // Thumbnail fijo (patrón de AlbumArt): decode chico y hit de caché
                         // determinista, en vez de decodificar los 250px de Deezer.
                         .size(ComponentConfig.ThumbnailSize)

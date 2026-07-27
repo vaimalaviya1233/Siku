@@ -6,7 +6,15 @@ package com.qhana.siku.data.repository
 sealed class LyricsResult {
     data class Found(val lyrics: String) : LyricsResult()
     object NotFound : LyricsResult()
-    data class Error(val message: String) : LyricsResult()
+
+    /**
+     * @param isOffline el fallo fue no poder ALCANZAR el servidor (DNS, ruta, conexión), no una
+     *        respuesta suya. Se distingue aquí, donde se conoce el tipo de excepción, porque es lo
+     *        único que sabe de verdad si hay internet: la comprobación previa de conectividad da
+     *        `true` con una red conectada que no llega a ninguna parte, y entonces al usuario le
+     *        salía en pantalla el texto crudo `Unable to resolve host "lrclib.net"`.
+     */
+    data class Error(val message: String, val isOffline: Boolean = false) : LyricsResult()
 }
 
 /**
@@ -40,7 +48,9 @@ data class LyricsCandidate(
 sealed class LyricsCandidatesResult {
     data class Found(val candidates: List<LyricsCandidate>) : LyricsCandidatesResult()
     object Empty : LyricsCandidatesResult()
-    data class Error(val message: String) : LyricsCandidatesResult()
+
+    /** @param isOffline ver [LyricsResult.Error]. */
+    data class Error(val message: String, val isOffline: Boolean = false) : LyricsCandidatesResult()
 }
 
 /**

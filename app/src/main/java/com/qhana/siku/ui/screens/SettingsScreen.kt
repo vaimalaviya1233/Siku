@@ -1,7 +1,6 @@
 package com.qhana.siku.ui.screens
 
 import android.content.Intent
-import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
@@ -31,6 +30,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.qhana.siku.R
+import com.qhana.siku.data.lyrics.safFolderDisplayName
 import com.qhana.siku.data.model.LibraryTabId
 import com.qhana.siku.data.model.LibraryTabState
 import com.qhana.siku.data.model.LibraryTabsConfig
@@ -133,6 +133,15 @@ fun SettingsScreen(
             route = Screen.SettingsAppearance.route,
             iconShape = MaterialShapes.Cookie6Sided.toShape(),
             container = Color(0xFFC2185B), // rosa
+            content = onBlob
+        ),
+        SettingsCategory(
+            icon = "swipe",
+            title = stringResource(R.string.settings_gestures_header),
+            subtitle = stringResource(R.string.settings_cat_gestures_desc),
+            route = Screen.SettingsGestures.route,
+            iconShape = MaterialShapes.Cookie4Sided.toShape(),
+            container = Color(0xFF00838F), // turquesa
             content = onBlob
         )
     )
@@ -478,13 +487,30 @@ fun SettingsPlaybackScreen(
             onModeChange = { viewModel.setLyricsSaveMode(it) },
             onFolderChange = { viewModel.setLyricsFolder(it) }
         )
+    }
+}
 
-        Spacer(modifier = Modifier.height(16.dp))
+/**
+ * Gestos: cómo se maneja el reproductor con el dedo. Categoría propia — vivía dentro de
+ * Reproducción, cuyo encabezado es "Volumen (ReplayGain)", y ahí no tenía nada que ver con lo
+ * que la rodeaba ni había forma de encontrarlo.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsGesturesScreen(
+    onBackClick: () -> Unit,
+    viewModel: LibraryViewModel = hiltViewModel()
+) {
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
-        // Gestos del reproductor. UN solo switch para los cuatro (ver MusicPreferences): son el
-        // mismo contrato y trocearlo obligaría a razonar sobre gestos aún no descubiertos. La
-        // descripción los ENUMERA porque, apagados, no hay forma de que el usuario sepa qué se
-        // está perdiendo — un gesto que nadie te contó no existe.
+    SettingsScaffold(
+        title = stringResource(R.string.settings_gestures_header),
+        onBackClick = onBackClick
+    ) {
+        // UN solo switch para los cuatro gestos (ver MusicPreferences): son el mismo contrato y
+        // trocearlo obligaría a razonar sobre gestos aún no descubiertos. La descripción los
+        // ENUMERA porque, apagados, no hay forma de que el usuario sepa qué se está perdiendo —
+        // un gesto que nadie te contó no existe.
         Surface(
             shape = RoundedCornerShape(12.dp),
             color = MaterialTheme.colorScheme.surfaceContainerHigh
@@ -601,7 +627,7 @@ private fun LyricsSaveSetting(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Text(
-                text = folderUri?.let { Uri.decode(it.substringAfterLast('/')) }
+                text = folderUri?.let { safFolderDisplayName(it) }
                     ?: stringResource(R.string.settings_lyrics_folder_none),
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.padding(top = 8.dp)

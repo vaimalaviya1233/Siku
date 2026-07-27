@@ -436,7 +436,19 @@ class ArtworkRepository @Inject constructor(
         // DESCARTÓ (21 jul 2026): mandaba a gris portadas que sí tienen color, como el sepia
         // verdoso de Parasomnia, cuyos candidatos el algoritmo extrae correctamente. No
         // reintroducirlo sin un caso real que lo justifique.
-        if (candidates.isEmpty()) return neutral
+        if (candidates.isEmpty()) {
+            // El caso "sin matiz" era el único que no dejaba rastro, y es justo el que hay que
+            // poder distinguir de "sí tenía color pero el tema lo descartó" (ver [isAchromatic]).
+            // El croma máximo dice a qué distancia quedó del corte de Score (5.0): un 4.8 es una
+            // carátula EN EL FILO; un 0.3 es blanco y negro de verdad.
+            val maxChroma = populationByColor.keys.maxOfOrNull { Hct.fromInt(it).chroma } ?: 0.0
+            appLogger.log(
+                COLOR_LOG_CATEGORY,
+                "${logId ?: "debug"}: sin matiz — croma máx ${"%.1f".format(maxChroma)} " +
+                    "en ${populationByColor.size} colores → gris neutro"
+            )
+            return neutral
+        }
 
         val seed = Hct.fromInt(candidates.first().color)
         // El croma del seed es el otro número que hace falta para calibrar: es lo que decide si
@@ -446,7 +458,9 @@ class ArtworkRepository @Inject constructor(
         val seedHex = "#%06X".format(0xFFFFFF and candidates.first().color)
         appLogger.log(
             COLOR_LOG_CATEGORY,
-            "${logId ?: "debug"}: seed $seedHex croma ${seed.chroma.toInt()}"
+            // Con decimal: el corte de Score está en 5.0 y un seed de 5.4 (carátula sepia apenas
+            // teñida) se lee igual que uno de 5.9 si se trunca, justo donde hay que discriminar.
+            "${logId ?: "debug"}: seed $seedHex croma ${"%.1f".format(seed.chroma)}"
         )
         return Pair(
             seed.withTone(LIGHT_THEME_ACCENT_TONE).toInt(),
@@ -454,7 +468,25 @@ class ArtworkRepository @Inject constructor(
         )
     }
 
-    private companion object {
+    companion object {
+        /**
+         * ¿Este acento es ACROMÁTICO (un gris) y no un color de verdad? Lo pregunta el tema para
+         * decidir entre seedear el `ColorScheme` o irse al esquema neutro (`PaletteStyle.Monochrome`).
+         *
+         * Se mide con el **croma HCT** —la misma métrica con la que [Score] decidió si la carátula
+         * tenía algún matiz aprovechable— y NO con la saturación HSV, que depende del brillo: el
+         * MISMO acento cae a un lado u otro del umbral según el tono al que se lo re-encuadre. El
+         * par de una carátula sepia de croma 5.6 (Train of Thought) sale #645D54 en T40 (saturación
+         * 0.160) y #CFC5B9 en T80 (0.106), así que un umbral HSV de 0.15 la daba por cromática en
+         * tema claro y por gris en oscuro — el tema oscuro tiraba a Monochrome un color que el
+         * pipeline había extraído bien. Es el mismo error de fondo que ya se corrigió en la
+         * extracción: umbrales de claridad que no son comparables entre sí.
+         *
+         * El neutro de una carátula sin matiz ([processBitmapColors]) se construye con croma 0
+         * EXACTO, así que el caso B&N real sigue detectándose por construcción.
+         */
+        fun isAchromatic(argb: Int): Boolean = Hct.fromInt(argb).chroma < MIN_ACCENT_CHROMA
+
         // Entradas del caché de colores en RAM (~16KB): cubre bibliotecas medianas-grandes
         // sin re-extraer al scrollear.
         private const val COLOR_CACHE_ENTRIES = 2000
@@ -472,9 +504,11 @@ class ArtworkRepository @Inject constructor(
         private const val MIN_OPAQUE_ALPHA = 128
         private const val OPAQUE_ALPHA_MASK = 0xFF000000.toInt()
 
-        // Croma HCT mínimo para considerar que un color TIENE matiz. Solo se usa para decidir si
-        // el color actual puede emparejarse con un candidato en el selector: un neutro (croma 0)
-        // no proviene de ninguno y emparejarlo por hue daría un resultado arbitrario.
+        // Croma HCT mínimo para considerar que un color TIENE matiz. Es el MISMO corte que aplica
+        // Score al filtrar candidatos (CUTOFF_CHROMA = 5.0), y a propósito: lo que el ranking
+        // aceptó como acento no puede luego declararse gris. Dos usos: [isAchromatic] (¿seedea el
+        // tema o va a Monochrome?) y el emparejado del selector — un neutro (croma 0) no proviene
+        // de ningún candidato y emparejarlo por hue daría un resultado arbitrario.
         private const val MIN_ACCENT_CHROMA = 5.0
 
         // Categoría propia en AppLogger: el diagnóstico de color no es un error ni pertenece a

@@ -16,7 +16,13 @@ data class ArtistSummary(
     val songCount: Int,
     val albumCount: Int,
     val imageUrl: String?,
-    val thumbUrl: String?
+    val thumbUrl: String?,
+    /**
+     * Carátula de alguno de sus álbumes, para cuando no hay foto — y muy en particular cuando no
+     * la hay A PROPÓSITO (el usuario respondió "ninguno de estos" en el picker porque Deezer solo
+     * ofrecía homónimos). Sale de la misma agregación, así que no cuesta una consulta aparte.
+     */
+    val fallbackArtUri: String? = null
 )
 
 @Dao
@@ -36,6 +42,15 @@ interface ArtistDao {
 
     @Query("SELECT * FROM artists WHERE name = :name")
     suspend fun getArtist(name: String): ArtistEntity?
+
+    /**
+     * Fotos de un puñado de artistas concretos. Lo usa "Seguir escuchando" del inicio, que
+     * necesita la foto del ARTISTA y no la carátula que se guardó en el contexto: el snapshot
+     * del contexto es de cuando se reprodujo, y la foto puede llegar después (backfill) o
+     * cambiar (picker manual, "ninguno de estos").
+     */
+    @Query("SELECT * FROM artists WHERE name IN (:names)")
+    fun getArtistsByNameFlow(names: List<String>): Flow<List<ArtistEntity>>
 
     /**
      * Artistas de la biblioteca con foto pendiente de resolver: sin fila en `artists`, o sin

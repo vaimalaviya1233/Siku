@@ -175,7 +175,11 @@ fun ArtistDetailScreen(
             item {
                 ArtistImmersiveHeader(
                     artistName = artistName,
-                    imageUrl = artistInfo?.imageUrl,
+                    // Cascada: foto del artista → carátula de su primer álbum → placeholder. El
+                    // paso intermedio existe porque el usuario puede DECIDIR que no tenga foto
+                    // ("ninguno de estos" en el picker) cuando Deezer solo ofrece homónimos, y
+                    // un header con el icono genérico se lee como un fallo de carga.
+                    imageUrl = artistInfo?.imageUrl ?: albums.firstNotNullOfOrNull { it.albumArtUri },
                     albumCount = albums.size,
                     songCount = songs.size,
                     sharedTransitionScope = sharedTransitionScope,
@@ -388,6 +392,7 @@ fun ArtistDetailScreen(
             candidates = (pickerState as? ArtistPickerState.Loaded)?.candidates,
             errorMessage = (pickerState as? ArtistPickerState.Error)?.message,
             onCandidateSelected = { viewModel.selectArtistCandidate(artistName, it) },
+            onNoneSelected = { viewModel.clearArtistImage(artistName) },
             onDismiss = { viewModel.dismissArtistPicker() }
         )
     }

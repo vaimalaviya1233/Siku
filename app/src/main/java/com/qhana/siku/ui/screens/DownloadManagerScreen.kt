@@ -323,7 +323,9 @@ fun ActiveDownloadsTab(
                         .height(300.dp), 
                     contentAlignment = Alignment.Center
                 ) {
-                    if (syncStatus is SyncStatus.Downloading || syncStatus is SyncStatus.Scanning) {
+                    if (syncStatus is SyncStatus.Downloading || syncStatus is SyncStatus.Scanning ||
+                        syncStatus is SyncStatus.Preparing
+                    ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             LoadingIndicator(modifier = Modifier.size(48.dp))
                             Spacer(modifier = Modifier.height(16.dp))

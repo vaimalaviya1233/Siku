@@ -2,6 +2,7 @@ package com.qhana.siku.data.coordinator
 
 import android.util.Log
 import com.qhana.siku.data.config.AppConfig
+import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.repository.IMusicRepository
 import com.qhana.siku.data.source.MusicSourceRegistry
 import com.qhana.siku.data.util.AudioFileAnalyzer
@@ -37,9 +38,17 @@ class LightMetadataFetcher @Inject constructor(
 
     /**
      * @param isStopped stop cooperativo (logout / pull-to-refresh): se consulta por canción.
+     * @param onProgress (procesadas, total) tras CADA canción. Esta fase puede durar varios
+     *        minutos —dos peticiones por canción, y las de Graph van serializadas por el rate
+     *        limiter—, así que sin este aviso el banner se queda en el paso anterior todo ese
+     *        rato y la app aparenta estar colgada. Cuenta canciones MIRADAS, no actualizadas:
+     *        es lo que hace que el número avance de forma pareja aunque muchas no aporten nada.
      * @return cuántas filas se actualizaron con texto.
      */
-    suspend fun run(isStopped: () -> Boolean): Int = coroutineScope {
+    suspend fun run(
+        isStopped: () -> Boolean,
+        onProgress: (done: Int, total: Int) -> Unit = { _, _ -> }
+    ): Int = coroutineScope {
         val pending = musicRepository.getSongsNeedingLightMetadata()
         if (pending.isEmpty()) return@coroutineScope 0
 
@@ -50,66 +59,28 @@ class LightMetadataFetcher @Inject constructor(
         // otra mitad del gate (getAlbumArtUri), para álbumes resueltos en un scan anterior.
         val albumArtThisRun = java.util.concurrent.ConcurrentHashMap<String, String>()
         val updated = java.util.concurrent.atomic.AtomicInteger(0)
+        val processed = java.util.concurrent.atomic.AtomicInteger(0)
         // Canciones cuya cabecera se leyó ENTERA y no traía imagen. Se sellan al final, en una
         // sola escritura, para que dejen de aparecer como pendientes en cada sync.
         val noArtwork = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
         val semaphore = Semaphore(PARALLELISM)
 
+        onProgress(0, pending.size)
+
         val jobs = pending.map { song ->
             launch(Dispatchers.IO) {
                 if (isStopped()) return@launch
-                semaphore.withPermit {
-                    if (isStopped()) return@withPermit
-                    try {
-                        // Atajo SIN red: a esta fila solo le falta la portada y su álbum ya
-                        // tiene una conocida, así que basta con repartirla. Importa porque es
-                        // el caso mayoritario de las que entran aquí por carátula pendiente y
-                        // no por falta de tags — sin él, pedir la cabecera para acabar
-                        // ejecutando un UPDATE sería una petición HTTP tirada por canción.
-                        if (song.artist != AppConfig.UNKNOWN_ARTIST && !AppConfig.isUnknownAlbum(song.album)) {
-                            val known = albumArtThisRun[song.album]
-                                ?: musicRepository.getAlbumArtUri(song.album)
-                            if (known != null) {
-                                musicRepository.setAlbumArt(song.album, known)
-                                albumArtThisRun[song.album] = known
-                                return@withPermit
-                            }
-                        }
-
-                        val meta = sourceRegistry.fetchLightMetadata(song) ?: return@withPermit
-                        val album = meta.album?.takeIf { it.isNotBlank() } ?: song.album
-
-                        // Los tags van PRIMERO: son lo que hace la biblioteca legible, y no
-                        // deben quedar rehenes de que la portada (que a menudo cuesta una
-                        // segunda petición) llegue bien. Que una fila se quede con sus tags y
-                        // sin imagen ya no la condena: sigue siendo candidata de esta fase por
-                        // la carátula pendiente, no solo por el artista.
-                        if (meta.hasText) {
-                            musicRepository.updateLightMetadata(
-                                songId = song.id,
-                                title = meta.title?.takeIf { it.isNotBlank() } ?: song.title,
-                                artist = meta.artist?.takeIf { it.isNotBlank() } ?: song.artist,
-                                album = album,
-                                genre = meta.genre?.takeIf { it.isNotBlank() },
-                                durationMs = meta.durationMs
-                            )
-                            updated.incrementAndGet()
-                        }
-
-                        when (applyArtwork(song.id, album, meta, albumArtThisRun, isStopped)) {
-                            // La cabecera contestó: este archivo no tiene portada. Sellarlo es
-                            // lo que mantiene barata la fase — sin esto, cada sync volvería a
-                            // pedir la cabecera de todo álbum que legítimamente no trae imagen.
-                            ArtOutcome.NO_ART -> noArtwork.add(song.id)
-                            // Resuelta (la fila ya tiene URI y sale sola de la lista) o no se
-                            // pudo mirar: en ninguno de los dos casos hay nada que sellar.
-                            ArtOutcome.RESOLVED, ArtOutcome.UNAVAILABLE -> Unit
-                        }
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Metadata ligera falló para ${song.title}: ${e.message}")
+                // El contador va en un `finally` que envuelve el permiso entero, no al final del
+                // camino feliz: muchas canciones salen antes de tiempo (atajo sin red, fuente sin
+                // tags, stop), y contarlas solo al terminar bien dejaba el progreso parado justo
+                // cuando más deprisa se estaba avanzando.
+                try {
+                    semaphore.withPermit {
+                        if (isStopped()) return@withPermit
+                        processSong(song, albumArtThisRun, noArtwork, updated, isStopped)
                     }
+                } finally {
+                    onProgress(processed.incrementAndGet(), pending.size)
                 }
             }
         }
@@ -118,6 +89,69 @@ class LightMetadataFetcher @Inject constructor(
         val total = updated.get()
         Log.i(TAG, "Metadata ligera: $total actualizadas, ${noArtwork.size} sin portada")
         total
+    }
+
+    /**
+     * Resuelve UNA canción. Extraída del bucle a propósito: dentro del `launch` solo queda el
+     * permiso y el contador, así que se ve de un vistazo que el progreso avanza pase lo que pase.
+     *
+     * Traga sus excepciones (salvo la cancelación): el fallo de una canción no debe llevarse por
+     * delante la fase entera, y lo que no se resuelva sigue pendiente para el próximo sync.
+     */
+    private suspend fun processSong(
+        song: Song,
+        albumArtThisRun: MutableMap<String, String>,
+        noArtwork: MutableSet<String>,
+        updated: java.util.concurrent.atomic.AtomicInteger,
+        isStopped: () -> Boolean
+    ) {
+        try {
+            // Atajo SIN red: a esta fila solo le falta la portada y su álbum ya tiene una
+            // conocida, así que basta con repartirla. Importa porque es el caso mayoritario de
+            // las que entran aquí por carátula pendiente y no por falta de tags — sin él, pedir
+            // la cabecera para acabar ejecutando un UPDATE sería una petición HTTP tirada.
+            if (song.artist != AppConfig.UNKNOWN_ARTIST && !AppConfig.isUnknownAlbum(song.album)) {
+                val known = albumArtThisRun[song.album] ?: musicRepository.getAlbumArtUri(song.album)
+                if (known != null) {
+                    musicRepository.setAlbumArt(song.album, known)
+                    albumArtThisRun[song.album] = known
+                    return
+                }
+            }
+
+            val meta = sourceRegistry.fetchLightMetadata(song) ?: return
+            val album = meta.album?.takeIf { it.isNotBlank() } ?: song.album
+
+            // Los tags van PRIMERO: son lo que hace la biblioteca legible, y no deben quedar
+            // rehenes de que la portada (que a menudo cuesta una segunda petición) llegue bien.
+            // Que una fila se quede con sus tags y sin imagen ya no la condena: sigue siendo
+            // candidata de esta fase por la carátula pendiente, no solo por el artista.
+            if (meta.hasText) {
+                musicRepository.updateLightMetadata(
+                    songId = song.id,
+                    title = meta.title?.takeIf { it.isNotBlank() } ?: song.title,
+                    artist = meta.artist?.takeIf { it.isNotBlank() } ?: song.artist,
+                    album = album,
+                    genre = meta.genre?.takeIf { it.isNotBlank() },
+                    durationMs = meta.durationMs
+                )
+                updated.incrementAndGet()
+            }
+
+            when (applyArtwork(song.id, album, meta, albumArtThisRun, isStopped)) {
+                // La cabecera contestó: este archivo no tiene portada. Sellarlo es lo que
+                // mantiene barata la fase — sin esto, cada sync volvería a pedir la cabecera de
+                // todo álbum que legítimamente no trae imagen.
+                ArtOutcome.NO_ART -> noArtwork.add(song.id)
+                // Resuelta (la fila ya tiene URI y sale sola de la lista) o no se pudo mirar:
+                // en ninguno de los dos casos hay nada que sellar.
+                ArtOutcome.RESOLVED, ArtOutcome.UNAVAILABLE -> Unit
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Metadata ligera falló para ${song.title}: ${e.message}")
+        }
     }
 
     /**

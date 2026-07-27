@@ -45,6 +45,8 @@ fun ArtistPickerSheet(
     candidates: List<DeezerArtistCandidate>?,
     errorMessage: String?,
     onCandidateSelected: (DeezerArtistCandidate) -> Unit,
+    /** "Ninguno de estos": deja al artista sin foto (la pantalla cae a la carátula del álbum). */
+    onNoneSelected: () -> Unit,
     onDismiss: () -> Unit
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
@@ -122,6 +124,30 @@ fun ArtistPickerSheet(
                         )
                     }
                 }
+            }
+
+            // "Ninguno de estos" va FUERA del LazyColumn y al final: es la conclusión de haber
+            // mirado la lista, y dentro quedaría al fondo de un scroll de hasta 480dp. Se muestra
+            // también sin resultados o con error — "Deezer no encuentra a este artista" es
+            // justamente cuando uno quiere zanjarlo y quedarse con la carátula del álbum.
+            if (!isLoading) {
+                HorizontalDivider()
+                ListItem(
+                    headlineContent = { Text(stringResource(R.string.artist_picker_none)) },
+                    supportingContent = { Text(stringResource(R.string.artist_picker_none_desc)) },
+                    leadingContent = {
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            MaterialSymbol("person_off", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    },
+                    modifier = Modifier.clickable { onNoneSelected() }
+                )
             }
         }
     }

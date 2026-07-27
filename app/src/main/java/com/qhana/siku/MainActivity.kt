@@ -23,6 +23,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.qhana.siku.data.repository.ArtworkRepository
 import com.qhana.siku.data.util.AppLogger
 import com.qhana.siku.data.util.SnackbarManager
 import com.qhana.siku.service.MusicPlaybackService
@@ -92,21 +93,21 @@ class MainActivity : ComponentActivity() {
             val themeNowPlaying by themePlaybackViewModel.nowPlayingUiState.collectAsStateWithLifecycle()
             val isThemeDark = isSystemInDarkTheme()
             val chosenArgb = themeNowPlaying.albumColors?.let { if (isThemeDark) it.secondary else it.primary }
-            // Carátula ACROMÁTICA (saturación ~0: negro/blanco/gris, p. ej. Stream of Consciousness):
+            // Carátula ACROMÁTICA (sin matiz: negro/blanco/gris, p. ej. Stream of Consciousness):
             // NO hereda el acento anterior ni deja que el PaletteStyle le invente un matiz (rosa)
             // — usa un esquema NEUTRO en grises (monochrome) que solo sigue el claro/oscuro.
             //
+            // El veredicto lo da el CROMA HCT (ArtworkRepository.isAchromatic), no la saturación
+            // HSV: esta última depende del tono, así que el mismo acento se declaraba cromático en
+            // tema claro y gris en oscuro (ver el KDoc — era el bug de Train of Thought).
+            //
             // NO aplica a un color elegido A MANO: ahí el usuario ya decidió, y muchos colores
-            // legítimos de una carátula (un verde grisáceo como #A7BBB2 = saturación 0.11) caen
-            // por debajo del umbral. Filtrarlos hacía que elegirlos en el selector no cambiara
-            // NADA del tema, que es como se detectó esto.
+            // legítimos de una carátula caen bajo cualquier umbral. Filtrarlos hacía que elegirlos
+            // en el selector no cambiara NADA del tema, que es como se detectó esto.
             // Paréntesis obligatorios: `?:` liga MENOS que `&&`, así que sin ellos el compilador
             // lee `(!manual && Boolean?) ?: false` y no tipa.
-            val isAchromatic = !themeNowPlaying.hasManualColor && (chosenArgb?.let { argb ->
-                val hsv = FloatArray(3)
-                android.graphics.Color.colorToHSV(argb, hsv)
-                hsv[1] < 0.15f
-            } ?: false)
+            val isAchromatic = !themeNowPlaying.hasManualColor &&
+                (chosenArgb?.let { ArtworkRepository.isAchromatic(it) } ?: false)
             // Seed CROMÁTICO: color del álbum solo si tiene croma. Se mantiene el ÚLTIMO cromático
             // mientras se extraen los colores de la nueva canción — al cambiar de canción el UiState
             // nace con albumColors=null un instante y, sin esto, el tema saltaba al dynamic del

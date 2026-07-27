@@ -82,6 +82,9 @@ fun EqualizerSheet(
     enabled: Boolean,
     bandCount: Int,
     gains: List<Float>,
+    bassBoost: Float,
+    trebleBoost: Float,
+    headroomDb: Float,
     customPresets: List<EqCustomPreset>,
     conflictWarningSuppressed: Boolean,
     onSuppressConflictWarning: () -> Unit,
@@ -93,6 +96,9 @@ fun EqualizerSheet(
     onDeleteCustomPreset: (String) -> Unit,
     onBandChange: (band: Int, db: Float) -> Unit,
     onBandChangeFinished: () -> Unit,
+    onBassBoostChange: (Float) -> Unit,
+    onTrebleBoostChange: (Float) -> Unit,
+    onBoostChangeFinished: () -> Unit,
     onReset: () -> Unit,
     onOpenSystemEq: () -> Unit,
     onDismiss: () -> Unit
@@ -217,6 +223,35 @@ fun EqualizerSheet(
                     )
                 }
             }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Refuerzos: peakings ANCHOS (80 Hz / 10 kHz), no shelves — ver el kdoc del processor.
+            // Son ADITIVOS sobre la curva de arriba, por eso justo debajo va el headroom.
+            Text(
+                text = stringResource(R.string.eq_boost_section),
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            BoostSlider(
+                labelRes = R.string.eq_boost_bass,
+                value = bassBoost,
+                enabled = enabled,
+                onValueChange = onBassBoostChange,
+                onValueChangeFinished = onBoostChangeFinished
+            )
+            BoostSlider(
+                labelRes = R.string.eq_boost_treble,
+                value = trebleBoost,
+                enabled = enabled,
+                onValueChange = onTrebleBoostChange,
+                onValueChangeFinished = onBoostChangeFinished
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            HeadroomIndicator(headroomDb = headroomDb, enabled = enabled)
 
             Spacer(modifier = Modifier.height(8.dp))
 
@@ -484,6 +519,120 @@ private fun SavePresetDialog(
             }
         }
     )
+}
+
+/**
+ * Slider de un refuerzo (0..MAX_BOOST_DB). Mismo reparto de anchos que las bandas para que las
+ * dos secciones queden alineadas en columna.
+ */
+@Composable
+private fun BoostSlider(
+    labelRes: Int,
+    value: Float,
+    enabled: Boolean,
+    onValueChange: (Float) -> Unit,
+    onValueChangeFinished: () -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Text(
+            text = stringResource(labelRes),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(56.dp)
+        )
+        Slider(
+            value = value,
+            onValueChange = onValueChange,
+            onValueChangeFinished = onValueChangeFinished,
+            valueRange = 0f..EqualizerAudioProcessor.MAX_BOOST_DB,
+            enabled = enabled,
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            text = String.format(Locale.getDefault(), "%+.1f", value),
+            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+            color = if (enabled) MaterialTheme.colorScheme.onSurface
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(48.dp),
+            textAlign = androidx.compose.ui.text.style.TextAlign.End
+        )
+    }
+}
+
+// Umbrales CALIBRADOS con la medición, no elegidos a ojo. La regla que los fija: un preset de
+// fábrica por sí solo NUNCA debe avisar — ya compensado, el más agresivo (Bass/Dance) llega a
+// +6.0 dB, y si eso pintara en color el indicador se volvería ruido visual que se ignora. El
+// aviso tiene que aparecer justo donde empieza el problema real: preset + refuerzo (+11.4 dB),
+// que es exactamente la combinación que sonó a ruido en julio.
+
+/** Desde aquí la curva satura a volumen alto (~84 % o más). */
+private const val HEADROOM_CAUTION_DB = 9f
+
+/** Desde aquí satura en casi cualquier volumen de escucha normal (seguro solo bajo ~76 %). */
+private const val HEADROOM_RISK_DB = 14f
+
+/**
+ * Cuánto puede ganar la señal sobre su nivel original con la curva actual (bandas + refuerzos).
+ * Es INFORMATIVO: no se corrige por detrás. Existe porque lo que hizo que los refuerzos sonaran a
+ * ruido en julio no fue la forma de los filtros, sino que se sumaban al preset hasta +12..14 dB
+ * sin que nada lo dijera.
+ */
+@Composable
+private fun HeadroomIndicator(headroomDb: Float, enabled: Boolean) {
+    val risky = headroomDb >= HEADROOM_RISK_DB
+    val caution = headroomDb >= HEADROOM_CAUTION_DB
+    val container = when {
+        !enabled -> MaterialTheme.colorScheme.surfaceContainerHigh
+        risky -> MaterialTheme.colorScheme.errorContainer
+        caution -> MaterialTheme.colorScheme.tertiaryContainer
+        else -> MaterialTheme.colorScheme.surfaceContainerHigh
+    }
+    val content = when {
+        !enabled -> MaterialTheme.colorScheme.onSurfaceVariant
+        risky -> MaterialTheme.colorScheme.onErrorContainer
+        caution -> MaterialTheme.colorScheme.onTertiaryContainer
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val messageRes = when {
+        risky -> R.string.eq_headroom_risk
+        caution -> R.string.eq_headroom_caution
+        else -> R.string.eq_headroom_ok
+    }
+    Surface(
+        shape = MaterialTheme.shapes.large,
+        color = container,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
+            MaterialSymbol(
+                icon = if (risky || caution) "warning" else "graphic_eq",
+                size = 20.sp,
+                color = content
+            )
+            Spacer(Modifier.width(12.dp))
+            Column {
+                Text(
+                    text = stringResource(
+                        R.string.eq_headroom_label,
+                        String.format(Locale.getDefault(), "%+.1f", headroomDb)
+                    ),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = content
+                )
+                Text(
+                    text = stringResource(messageRes),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = content
+                )
+            }
+        }
+    }
 }
 
 private fun formatBandLabel(hz: Float): String = if (hz >= 1000f) {

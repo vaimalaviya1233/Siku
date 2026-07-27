@@ -50,7 +50,7 @@ class LyricsRepository @Inject constructor(
         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
             LyricsCandidatesResult.Error("Timeout")
         } catch (e: IOException) {
-            LyricsCandidatesResult.Error(e.message ?: "Network error")
+            LyricsCandidatesResult.Error(e.message ?: "Network error", isOffline = e.isUnreachable())
         } catch (e: retrofit2.HttpException) {
             if (e.code() == 404) LyricsCandidatesResult.Empty
             else LyricsCandidatesResult.Error("HTTP ${e.code()}")
@@ -72,7 +72,7 @@ class LyricsRepository @Inject constructor(
                 else -> LyricsResult.NotFound
             }
         } catch (e: IOException) {
-            LyricsResult.Error(e.message ?: "Network error")
+            LyricsResult.Error(e.message ?: "Network error", isOffline = e.isUnreachable())
         } catch (e: retrofit2.HttpException) {
             if (e.code() == 404) LyricsResult.NotFound
             else LyricsResult.Error("HTTP ${e.code()}")
@@ -81,6 +81,19 @@ class LyricsRepository @Inject constructor(
         } catch (e: Exception) {
             LyricsResult.Error(e.message ?: "Unknown error")
         }
+    }
+
+    /**
+     * ¿El fallo fue no llegar al servidor? `UnknownHostException` es el caso típico sin datos ni
+     * WiFi (el DNS no resuelve), y los otros dos cubren la red conectada que no encamina a
+     * internet. Un timeout NO cuenta: ahí el servidor puede existir y estar lento, y decirle al
+     * usuario "no hay conexión" sería mentirle.
+     */
+    private fun IOException.isUnreachable(): Boolean = when (this) {
+        is java.net.UnknownHostException,
+        is java.net.ConnectException,
+        is java.net.NoRouteToHostException -> true
+        else -> false
     }
 
     private fun LrcLibResponse.toCandidate(): LyricsCandidate? {

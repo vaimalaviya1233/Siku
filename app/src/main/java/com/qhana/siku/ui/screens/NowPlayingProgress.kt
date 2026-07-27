@@ -93,7 +93,13 @@ internal fun ProgressSlider(
 
     // Fracción del búfer: solo en streaming (ver [showBuffer]) y mientras quede algo por cargar
     // —una vez descargada entera, el nivel lleno de un tercer color sería ruido permanente.
-    val bufferedFraction by remember {
+    //
+    // La clave `showBuffer` es OBLIGATORIA: es un Boolean plano, no un State, así que el
+    // `derivedStateOf` lo CAPTURA y sin re-crearlo se queda con el valor del primer paso. Ese era
+    // el bug de "el búfer no desaparece cuando termina la descarga": la canción pasa de STREAMING
+    // a DOWNLOADED en cuanto la fila de BD trae el `file://`, showBuffer llega en false... y el
+    // derivado seguía leyendo el true de cuando abrió el reproductor.
+    val bufferedFraction by remember(showBuffer) {
         derivedStateOf {
             if (!showBuffer || duration <= 0L) 0f
             else (bufferedPosition.toFloat() / duration.toFloat())

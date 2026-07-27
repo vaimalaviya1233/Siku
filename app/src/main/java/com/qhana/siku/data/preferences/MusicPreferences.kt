@@ -34,8 +34,10 @@ import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -56,50 +58,79 @@ class MusicPreferences(context: Context) {
     private val dataStore: DataStore<Preferences> = context.musicPrefsDataStore
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    // Caché en memoria: llena sync al construir, luego se mantiene al día con un collect.
-    @Volatile
-    private var cache: Preferences = runBlocking {
-        try {
-            dataStore.data.first()
-        } catch (_: Exception) {
-            emptyPreferences()
+    /**
+     * ESTADO EN MEMORIA = la única fuente de verdad, y también lo que emiten los flows
+     * reactivos. Se llena sync al construir (una vez; la clase es `@Singleton`) y a partir de
+     * ahí solo lo escribe [update]. El disco es un destino, no una fuente.
+     *
+     * Antes había DOS verdades: `loadX()` leía este caché (síncrono, ya actualizado) mientras
+     * los `xFlow` leían `dataStore.data` (asíncrono, va por detrás). Un `collect` de
+     * `dataStore.data` reasignaba además el caché, así que el disco podía hacer RETROCEDER el
+     * estado en RAM — dos escritores para el mismo estado, justo lo que la app tiene prohibido
+     * en otro sitio por haber costado ya un bug. Con esto, escribir una preferencia se ve en el
+     * mismo frame en todo lo que la observe, sin esperar al disco ni depender de su orden.
+     */
+    private val prefs = MutableStateFlow(
+        runBlocking {
+            try {
+                dataStore.data.first()
+            } catch (_: Exception) {
+                emptyPreferences()
+            }
         }
-    }
+    )
+
+    private val cache: Preferences get() = prefs.value
+
+    /**
+     * Cola FIFO de volcados a disco con UN SOLO consumidor. Cada escritura vuelca el snapshot
+     * COMPLETO (clear + volcado), así que el orden importa: con un `launch` por escritura sobre
+     * `Dispatchers.IO` —lo que había antes— dos volcados casi simultáneos corren en hilos
+     * distintos y nada garantiza que el más nuevo llegue el último. Cuando se invertían, el
+     * snapshot viejo pisaba al nuevo y la preferencia recién guardada desaparecía del disco (y,
+     * cuando los flows leían de ahí, también de la UI). Ya había mordido con las carpetas
+     * locales y se parcheó fusionando esas dos escrituras a mano; esto lo arregla para todas.
+     */
+    private val diskWrites = Channel<Preferences>(Channel.UNLIMITED)
 
     init {
         scope.launch {
-            dataStore.data
-                .catch { /* propagaremos si aparece */ }
-                .collect { cache = it }
+            for (snapshot in diskWrites) {
+                try {
+                    dataStore.edit { target ->
+                        target.clear()
+                        @Suppress("UNCHECKED_CAST")
+                        snapshot.asMap().forEach { (k, v) -> target[k as Preferences.Key<Any>] = v }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("MusicPreferences", "Error persistiendo preferencias", e)
+                }
+            }
         }
     }
 
     private fun update(block: (MutablePreferences) -> Unit) {
-        // Aplicar al caché en memoria de forma SÍNCRONA para que `loadX()` posteriores
-        // vean el cambio inmediatamente. Sin esto hay race condition: por ejemplo
-        // `clearDeltaToken()` seguido de `loadDeltaToken()` en la misma función devuelve
-        // el token viejo porque `dataStore.edit` corre en background y el `collect` que
-        // refresca el caché aún no recibió el evento.
+        // Aplicar en memoria de forma SÍNCRONA para que `loadX()` posteriores vean el cambio
+        // inmediatamente. Sin esto hay race condition: por ejemplo `clearDeltaToken()` seguido
+        // de `loadDeltaToken()` en la misma función devolvería el token viejo, porque la
+        // escritura a disco corre en background.
         val mutated = cache.toMutablePreferences()
         block(mutated)
         val newCache = mutated.toPreferences()
-        cache = newCache
-        // Persistir a disco el SNAPSHOT del caché (no re-ejecutar `block`): así un `block`
-        // no idempotente —incremento, append— no se aplica dos veces sobre bases distintas
-        // (caché vs. disco) divergiendo. Como todas las escrituras pasan por aquí y el caché
-        // es la fuente de verdad sincronizada, clear()+volcado del caché es consistente.
-        scope.launch {
-            try {
-                dataStore.edit { prefs ->
-                    prefs.clear()
-                    @Suppress("UNCHECKED_CAST")
-                    newCache.asMap().forEach { (k, v) -> prefs[k as Preferences.Key<Any>] = v }
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("MusicPreferences", "Error persistiendo preferencias", e)
-            }
-        }
+        prefs.value = newCache
+        // Se persiste el SNAPSHOT (no se re-ejecuta `block`): así un `block` no idempotente
+        // —incremento, append— no se aplica dos veces sobre bases distintas (memoria vs. disco)
+        // divergiendo. `trySend` sobre un canal UNLIMITED nunca falla ni bloquea.
+        diskWrites.trySend(newCache)
     }
+
+    /**
+     * Flow derivado del estado en memoria. `distinctUntilChanged` porque [prefs] emite en CADA
+     * escritura de cualquier preferencia y un observador de una sola clave no debe recomponer
+     * porque se guardó la posición de reproducción.
+     */
+    private fun <T> prefFlow(read: (Preferences) -> T): Flow<T> =
+        prefs.map(read).distinctUntilChanged()
 
     // --- Sort order ---
 
@@ -264,7 +295,7 @@ class MusicPreferences(context: Context) {
      * `MutableStateFlow` local dejaría a una sin enterarse de lo que hizo la otra — el mismo
      * motivo por el que el toggle del ecualizador se observa por flow.
      */
-    val localFolderUrisFlow: Flow<Set<String>> = dataStore.data.map { readLocalFolderUris(it) }
+    val localFolderUrisFlow: Flow<Set<String>> = prefFlow { readLocalFolderUris(it) }
 
     private fun readLocalFolderUris(prefs: Preferences): Set<String> =
         prefs[KEY_LOCAL_FOLDER_URIS] ?: prefs[KEY_LOCAL_FOLDER_URI]?.let { setOf(it) } ?: emptySet()
@@ -311,7 +342,7 @@ class MusicPreferences(context: Context) {
 
     /** Reactivo: gobierna si en Ajustes se puede apagar el escaneo del dispositivo (habría a dónde volver). */
     val localFolderStashFlow: Flow<Set<String>> =
-        dataStore.data.map { it[KEY_LOCAL_FOLDER_URIS_STASH] ?: emptySet() }
+        prefFlow { it[KEY_LOCAL_FOLDER_URIS_STASH] ?: emptySet() }
 
     /**
      * ¿Indexar TODA la música del dispositivo (MediaStore) en vez de carpetas concretas?
@@ -320,7 +351,7 @@ class MusicPreferences(context: Context) {
     fun loadScanWholeDevice(): Boolean = cache[KEY_SCAN_WHOLE_DEVICE] == true
 
     /** Reactivo, por el mismo motivo que [localFolderUrisFlow]. */
-    val scanWholeDeviceFlow: Flow<Boolean> = dataStore.data.map { it[KEY_SCAN_WHOLE_DEVICE] == true }
+    val scanWholeDeviceFlow: Flow<Boolean> = prefFlow { it[KEY_SCAN_WHOLE_DEVICE] == true }
 
     fun saveScanWholeDevice(enabled: Boolean) = update {
         it[KEY_SCAN_WHOLE_DEVICE] = enabled
@@ -364,12 +395,12 @@ class MusicPreferences(context: Context) {
      * recuperar el offload) cuando cambia.
      */
     val eqEnabledFlow: Flow<Boolean> =
-        dataStore.data.map { it[KEY_EQ_ENABLED] ?: false }
+        prefFlow { it[KEY_EQ_ENABLED] ?: false }
 
     // --- Toolbar del NowPlaying (orden + barra/overflow de cada acción) ---
     // Reactivo: el NowPlaying observa el flow y la barra se reordena en vivo al guardar en Ajustes.
     val toolbarConfigFlow: Flow<List<ToolbarActionState>> =
-        dataStore.data.map { PlayerToolbarConfig.decode(it[KEY_TOOLBAR_CONFIG]) }
+        prefFlow { PlayerToolbarConfig.decode(it[KEY_TOOLBAR_CONFIG]) }
 
     fun loadToolbarConfig(): List<ToolbarActionState> =
         PlayerToolbarConfig.decode(cache[KEY_TOOLBAR_CONFIG])
@@ -382,7 +413,7 @@ class MusicPreferences(context: Context) {
     // Historial de "lugares" reanudables (álbum/artista/lista/favoritos/aleatorio/biblioteca), de
     // más reciente a más antiguo. Reactivo: la home se actualiza sola al grabar un contexto.
     val recentContextsFlow: Flow<List<PlaybackContext>> =
-        dataStore.data.map { PlaybackContext.decode(it[KEY_RECENT_CONTEXTS]) }
+        prefFlow { PlaybackContext.decode(it[KEY_RECENT_CONTEXTS]) }
 
     /** Antepone un contexto al historial (dedup por identidad + tope). Read-modify-write atómico. */
     fun recordContext(ctx: PlaybackContext) = update {
@@ -395,6 +426,14 @@ class MusicPreferences(context: Context) {
     /** Nº de bandas del EQ propio (5 o 10). */
     fun saveEqBandCount(count: Int) = update { it[KEY_EQ_BAND_COUNT] = count }
     fun loadEqBandCount(): Int = (cache[KEY_EQ_BAND_COUNT] ?: 5).let { if (it == 10) 10 else 5 }
+
+    // Refuerzos de graves/agudos: NO van por modo de bandas (a diferencia de las ganancias), son
+    // dos peakings anchos fijos que se suman a cualquier curva, así que alternar 5↔10 los conserva.
+    fun saveEqBassBoost(db: Float) = update { it[KEY_EQ_BASS_BOOST] = db }
+    fun loadEqBassBoost(): Float = cache[KEY_EQ_BASS_BOOST] ?: 0f
+
+    fun saveEqTrebleBoost(db: Float) = update { it[KEY_EQ_TREBLE_BOOST] = db }
+    fun loadEqTrebleBoost(): Float = cache[KEY_EQ_TREBLE_BOOST] ?: 0f
 
     // Las ganancias se guardan POR MODO (clave distinta para 5 y 10 bandas): al alternar
     // el nº de bandas se recupera la curva que el usuario tenía en ese modo, en vez de
@@ -441,7 +480,7 @@ class MusicPreferences(context: Context) {
 
     /** Reactivo: la hoja del EQ edita/aplica presets; puede haber varias instancias del ViewModel. */
     val customEqPresetsFlow: Flow<List<EqCustomPreset>> =
-        dataStore.data.map { parseCustomPresets(it[KEY_EQ_CUSTOM_PRESETS]) }
+        prefFlow { parseCustomPresets(it[KEY_EQ_CUSTOM_PRESETS]) }
 
     private fun parseCustomPresets(raw: String?): List<EqCustomPreset> {
         if (raw.isNullOrBlank()) return emptyList()
@@ -509,7 +548,7 @@ class MusicPreferences(context: Context) {
      * llamador — un olvido ahí produciría una biblioteca incoherente muy difícil de diagnosticar.
      */
     fun loadOneDriveFolderPath(): String = readOneDriveFolderPath(cache)
-    val oneDriveFolderPathFlow: Flow<String> = dataStore.data.map { readOneDriveFolderPath(it) }
+    val oneDriveFolderPathFlow: Flow<String> = prefFlow { readOneDriveFolderPath(it) }
 
     private fun readOneDriveFolderPath(prefs: Preferences): String =
         prefs[KEY_ONEDRIVE_FOLDER] ?: AppConfig.ONEDRIVE_DEFAULT_FOLDER
@@ -527,7 +566,7 @@ class MusicPreferences(context: Context) {
      */
     fun saveLyricsSaveMode(mode: LyricsSaveMode) = update { it[KEY_LYRICS_SAVE_MODE] = mode.name }
     fun loadLyricsSaveMode(): LyricsSaveMode = readLyricsSaveMode(cache)
-    val lyricsSaveModeFlow: Flow<LyricsSaveMode> = dataStore.data.map { readLyricsSaveMode(it) }
+    val lyricsSaveModeFlow: Flow<LyricsSaveMode> = prefFlow { readLyricsSaveMode(it) }
 
     private fun readLyricsSaveMode(prefs: Preferences): LyricsSaveMode =
         prefs[KEY_LYRICS_SAVE_MODE]?.let { runCatching { LyricsSaveMode.valueOf(it) }.getOrNull() }
@@ -542,7 +581,7 @@ class MusicPreferences(context: Context) {
         if (uri == null) it.remove(KEY_LYRICS_FOLDER_URI) else it[KEY_LYRICS_FOLDER_URI] = uri
     }
     fun loadLyricsFolderUri(): String? = cache[KEY_LYRICS_FOLDER_URI]
-    val lyricsFolderUriFlow: Flow<String?> = dataStore.data.map { it[KEY_LYRICS_FOLDER_URI] }
+    val lyricsFolderUriFlow: Flow<String?> = prefFlow { it[KEY_LYRICS_FOLDER_URI] }
 
     // --- Fotos de artistas (Deezer): política de red (Ajustes → Descargas) ---
 
@@ -560,7 +599,7 @@ class MusicPreferences(context: Context) {
 
     /** Reactivo: lo cambia LibraryViewModel (Ajustes) y lo observa PlaybackViewModel (botón EQ). */
     val useSystemEqFlow: Flow<Boolean> =
-        dataStore.data.map { it[KEY_USE_SYSTEM_EQ] ?: false }
+        prefFlow { it[KEY_USE_SYSTEM_EQ] ?: false }
 
     // --- Control de descargas (pausa / stop persistentes) ---
 
@@ -580,7 +619,7 @@ class MusicPreferences(context: Context) {
 
     /** Reactivo: lo cambia el Download Manager y lo observan el banner (Library) y el propio panel. */
     val downloadControlStateFlow: Flow<DownloadControlState> =
-        dataStore.data.map {
+        prefFlow {
             try {
                 DownloadControlState.valueOf(it[KEY_DOWNLOAD_CONTROL_STATE] ?: DownloadControlState.ACTIVE.name)
             } catch (_: Exception) {
@@ -596,7 +635,7 @@ class MusicPreferences(context: Context) {
     fun saveStopBannerDismissed(dismissed: Boolean) = update { it[KEY_STOP_BANNER_DISMISSED] = dismissed }
     fun loadStopBannerDismissed(): Boolean = cache[KEY_STOP_BANNER_DISMISSED] ?: false
     val stopBannerDismissedFlow: Flow<Boolean> =
-        dataStore.data.map { it[KEY_STOP_BANNER_DISMISSED] ?: false }
+        prefFlow { it[KEY_STOP_BANNER_DISMISSED] ?: false }
 
     /**
      * "No volver a mostrar": silencia el banner de descargas PARA SIEMPRE. Nadie lo resetea
@@ -606,7 +645,7 @@ class MusicPreferences(context: Context) {
     fun saveDownloadBannerMuted(muted: Boolean) = update { it[KEY_DOWNLOAD_BANNER_MUTED] = muted }
     fun loadDownloadBannerMuted(): Boolean = cache[KEY_DOWNLOAD_BANNER_MUTED] ?: false
     val downloadBannerMutedFlow: Flow<Boolean> =
-        dataStore.data.map { it[KEY_DOWNLOAD_BANNER_MUTED] ?: false }
+        prefFlow { it[KEY_DOWNLOAD_BANNER_MUTED] ?: false }
 
     // --- Tope de almacenamiento para descargas (caché LRU) ---
 
@@ -618,7 +657,7 @@ class MusicPreferences(context: Context) {
     fun saveStorageLimitBytes(bytes: Long) = update { it[KEY_STORAGE_LIMIT_BYTES] = bytes.coerceAtLeast(0L) }
     fun loadStorageLimitBytes(): Long = cache[KEY_STORAGE_LIMIT_BYTES] ?: 0L
     val storageLimitBytesFlow: Flow<Long> =
-        dataStore.data.map { it[KEY_STORAGE_LIMIT_BYTES] ?: 0L }
+        prefFlow { it[KEY_STORAGE_LIMIT_BYTES] ?: 0L }
 
     // --- Now Playing ---
 
@@ -634,7 +673,7 @@ class MusicPreferences(context: Context) {
      * alcanza para propagar el cambio en vivo.
      */
     val nowPlayingSolidBackgroundFlow: Flow<Boolean> =
-        dataStore.data.map { it[KEY_NOW_PLAYING_SOLID_BG] ?: false }
+        prefFlow { it[KEY_NOW_PLAYING_SOLID_BG] ?: false }
 
     /**
      * Barra de progreso ONDULADA (M3 Expressive) en el NowPlaying, en vez de la píldora plana.
@@ -649,7 +688,7 @@ class MusicPreferences(context: Context) {
 
     /** Reactivo por el mismo motivo que [nowPlayingSolidBackgroundFlow] (Ajustes ↔ NowPlaying). */
     val nowPlayingWavyProgressFlow: Flow<Boolean> =
-        dataStore.data.map { it[KEY_NOW_PLAYING_WAVY] ?: false }
+        prefFlow { it[KEY_NOW_PLAYING_WAVY] ?: false }
 
     /**
      * Chip de formato del NowPlaying EXTENDIDO (`FLAC · 16 bit · 44.1 kHz`) en vez de solo el
@@ -663,7 +702,7 @@ class MusicPreferences(context: Context) {
     fun loadNowPlayingDetailedFormat(): Boolean = cache[KEY_NOW_PLAYING_DETAILED_FORMAT] ?: false
 
     val nowPlayingDetailedFormatFlow: Flow<Boolean> =
-        dataStore.data.map { it[KEY_NOW_PLAYING_DETAILED_FORMAT] ?: false }
+        prefFlow { it[KEY_NOW_PLAYING_DETAILED_FORMAT] ?: false }
 
     /**
      * Gestos del reproductor: deslizar la carátula para cambiar de canción, deslizar hacia abajo
@@ -684,7 +723,7 @@ class MusicPreferences(context: Context) {
 
     /** Reactivo por el mismo motivo que [nowPlayingSolidBackgroundFlow] (Ajustes ↔ reproductor). */
     val playerGesturesFlow: Flow<Boolean> =
-        dataStore.data.map { it[KEY_PLAYER_GESTURES] ?: DEFAULT_PLAYER_GESTURES }
+        prefFlow { it[KEY_PLAYER_GESTURES] ?: DEFAULT_PLAYER_GESTURES }
 
     // --- Biblioteca ---
 
@@ -693,7 +732,7 @@ class MusicPreferences(context: Context) {
      * lo consume `LibraryScreen` (el pager se reconstruye en vivo al guardar).
      */
     val libraryTabsConfigFlow: Flow<List<LibraryTabState>> =
-        dataStore.data.map { LibraryTabsConfig.decode(it[KEY_LIBRARY_TABS_CONFIG]) }
+        prefFlow { LibraryTabsConfig.decode(it[KEY_LIBRARY_TABS_CONFIG]) }
 
     fun loadLibraryTabsConfig(): List<LibraryTabState> =
         LibraryTabsConfig.decode(cache[KEY_LIBRARY_TABS_CONFIG])
@@ -715,7 +754,7 @@ class MusicPreferences(context: Context) {
     fun loadGenrePartialMatch(): Boolean = cache[KEY_GENRE_PARTIAL_MATCH] ?: false
 
     val genrePartialMatchFlow: Flow<Boolean> =
-        dataStore.data.map { it[KEY_GENRE_PARTIAL_MATCH] ?: false }
+        prefFlow { it[KEY_GENRE_PARTIAL_MATCH] ?: false }
 
     // --- Tema ---
 
@@ -735,7 +774,7 @@ class MusicPreferences(context: Context) {
 
     /** Reactivo: lo cambia Ajustes y lo observa el tema en MainActivity (instancias distintas). */
     val themePaletteStyleFlow: Flow<String> =
-        dataStore.data.map { it[KEY_THEME_PALETTE_STYLE] ?: DEFAULT_PALETTE_STYLE }
+        prefFlow { it[KEY_THEME_PALETTE_STYLE] ?: DEFAULT_PALETTE_STYLE }
 
     companion object {
         private const val DATASTORE_NAME = "music_player_prefs"
@@ -756,6 +795,8 @@ class MusicPreferences(context: Context) {
         private val KEY_EQ_GAINS = stringPreferencesKey("eq_band_gains")
         private val KEY_EQ_GAINS_10 = stringPreferencesKey("eq_band_gains_10")
         private val KEY_EQ_BAND_COUNT = intPreferencesKey("eq_band_count")
+        private val KEY_EQ_BASS_BOOST = floatPreferencesKey("eq_bass_boost")
+        private val KEY_EQ_TREBLE_BOOST = floatPreferencesKey("eq_treble_boost")
         private val KEY_EQ_CUSTOM_PRESETS = stringPreferencesKey("eq_custom_presets")
         private val KEY_EQ_CONFLICT_WARNING_SUPPRESSED = booleanPreferencesKey("eq_conflict_warning_suppressed")
         private val KEY_USE_SYSTEM_EQ = booleanPreferencesKey("use_system_eq")

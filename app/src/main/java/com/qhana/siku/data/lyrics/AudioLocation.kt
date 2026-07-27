@@ -2,7 +2,9 @@ package com.qhana.siku.data.lyrics
 
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.provider.DocumentsContract
+import android.provider.MediaStore
 import com.qhana.siku.data.model.Song
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
@@ -103,10 +105,60 @@ class AudioLocationResolver @Inject constructor(
     }
 }
 
+/**
+ * Subcarpeta que le corresponde a una canción DENTRO de la carpeta de letras, sin el nombre del
+ * archivo (`Music/Rock/Album`). Cadena vacía si la canción está en la raíz de su volumen.
+ *
+ * Existe porque la carpeta de letras es un espacio PLANO por defecto y eso colisiona: `01 Intro.lrc`
+ * es el mismo nombre en todos los discos de una biblioteca rippeada, así que sin replicar la
+ * jerarquía cada álbum sobreescribiría la letra del anterior — y la lectura devolvería la de otra
+ * canción, que es peor que no encontrar ninguna.
+ *
+ * Se prefiere `RELATIVE_PATH` de MediaStore porque conserva las mayúsculas originales: derivarlo de
+ * `song.relativePath` funcionaría igual para evitar choques, pero está normalizado a minúsculas y
+ * crearía un árbol `music/rock/` paralelo al `Music/Rock/` real si el usuario elige como carpeta de
+ * letras la de su propia música.
+ */
+fun lyricsSubdirectoryOf(context: Context, uri: Uri, song: Song): String {
+    val fromMediaStore = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        runCatching {
+            context.contentResolver.query(
+                uri, arrayOf(MediaStore.MediaColumns.RELATIVE_PATH), null, null, null
+            )?.use { if (it.moveToFirst()) it.getString(0) else null }
+        }.getOrNull()
+    } else null
+
+    val raw = fromMediaStore ?: song.relativePath?.substringBeforeLast('/', "")
+    return raw?.trim('/').orEmpty()
+}
+
+/**
+ * Nombre legible de una carpeta concedida por SAF, para poder nombrarla en la UI. El tree URI trae
+ * el id del documento codificado (`…/tree/primary%3AMusic%2FLyrics`), así que se descodifica y se
+ * toma el último tramo: lo que el usuario reconoce como "la carpeta que elegí".
+ */
+fun safFolderDisplayName(treeUri: String): String =
+    Uri.decode(treeUri).substringAfterLast(':').substringAfterLast('/')
+
 /** Nombre del `.lrc` que acompaña a un archivo de audio: mismo nombre base, otra extensión. */
 fun lrcNameFor(audioFileName: String): String = "${audioFileName.substringBeforeLast('.')}.$LRC_EXTENSION"
 
 const val LRC_EXTENSION = "lrc"
 
-/** MIME con el que se crean los `.lrc` (SAF exige uno; no hay tipo registrado para LRC). */
-const val LRC_MIME_TYPE = "text/plain"
+/**
+ * MIME con el que se CREAN los `.lrc` vía SAF. `application/octet-stream` no es un descuido:
+ * **con `text/plain` el archivo acaba llamándose `Cancion.lrc.txt`**.
+ *
+ * `DocumentsProvider.createDocument` pasa por `FileUtils.splitFileName`, que exige que la extensión
+ * del nombre corresponda al MIME pedido y, si no, le AÑADE la del MIME. Como `MimeTypeMap` de
+ * Android no conoce `.lrc`, deduce `application/octet-stream` de la extensión; pidiendo `text/plain`
+ * los dos no coinciden y añade `.txt`. Pidiendo `application/octet-stream` sí coinciden y el nombre
+ * se respeta tal cual.
+ *
+ * Ojo: esto solo aplica a SAF. Para SUBIR el `.lrc` a la nube se usa [LRC_UPLOAD_MIME_TYPE], que es
+ * el tipo honesto del contenido y no pasa por esta lógica.
+ */
+const val LRC_MIME_TYPE = "application/octet-stream"
+
+/** El `.lrc` ES texto; al subirlo a la nube se declara como tal (ahí nadie renombra nada). */
+const val LRC_UPLOAD_MIME_TYPE = "text/plain"

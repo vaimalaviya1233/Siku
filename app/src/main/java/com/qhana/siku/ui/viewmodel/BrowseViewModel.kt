@@ -265,6 +265,18 @@ class BrowseViewModel @Inject constructor(
         }
     }
 
+    /**
+     * "Ninguno de estos": deja al artista sin foto de forma DELIBERADA (ver
+     * [ArtistImageRepository.clearArtistImage]). La pantalla cae entonces a la carátula de su
+     * primer álbum, o al placeholder si tampoco la hay.
+     */
+    fun clearArtistImage(artistName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            artistImageRepository.clearArtistImage(artistName)
+            _pickerState.value = ArtistPickerState.Hidden
+        }
+    }
+
     fun dismissArtistPicker() {
         searchJob?.cancel()
         _pickerState.value = ArtistPickerState.Hidden

@@ -83,7 +83,7 @@ class CloudLyricsStore @Inject constructor(
             token = token,
             writeScope = WRITE_SCOPE_MARKER,
             url = contentUrlFor(parentId, lrcNameFor(name)),
-            body = lyrics.toRequestBody(LRC_MIME_TYPE.toMediaType())
+            body = lyrics.toRequestBody(LRC_UPLOAD_MIME_TYPE.toMediaType())
         )
         Unit
     }

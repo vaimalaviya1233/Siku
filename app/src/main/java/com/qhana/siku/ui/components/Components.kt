@@ -80,6 +80,12 @@ internal object ComponentConfig {
  * queda tapado por la imagen voladora y "aparece de golpe" cuando la transición termina.
  * Lo eleva al mismo overlay (por encima, zIndex 1) y le da entrada/salida con fade.
  * No-op si no hay scopes (pantalla montada sin transición compartida).
+ *
+ * La elevación se ata a la transición de ESTA pantalla, no a la del scope: el
+ * [SharedTransitionScope] es ÚNICO para toda la app (MainActivity), así que el default
+ * `renderInOverlay = { isTransitionActive }` también se enciende cuando la carátula morfa de la
+ * píldora al NowPlaying — y entonces el título del detalle se dibujaba en el overlay, es decir
+ * SOBRE el player que estaba subiendo, quedándose flotando hasta que la animación terminaba.
  */
 @OptIn(ExperimentalSharedTransitionApi::class)
 fun overSharedElementsModifier(
@@ -88,7 +94,13 @@ fun overSharedElementsModifier(
 ): Modifier = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
     with(sharedTransitionScope) {
         Modifier
-            .renderInSharedTransitionScopeOverlay(zIndexInOverlay = 1f)
+            .renderInSharedTransitionScopeOverlay(
+                renderInOverlay = {
+                    val transition = animatedVisibilityScope.transition
+                    transition.currentState != transition.targetState
+                },
+                zIndexInOverlay = 1f
+            )
             .then(with(animatedVisibilityScope) {
                 Modifier.animateEnterExit(enter = fadeIn(), exit = fadeOut())
             })

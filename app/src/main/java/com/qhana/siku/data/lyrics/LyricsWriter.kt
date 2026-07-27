@@ -51,10 +51,15 @@ class LyricsWriter @Inject constructor(
             if (needsConsent) add(SaveEffect.NEEDS_CLOUD_CONSENT)
         }
 
+        // Modo MediaStore: el .lrc no puede ir junto a la canción y hay que decirlo — el usuario
+        // esperaría que otros reproductores lo leyeran, y desde una carpeta aparte no lo harán.
+        val lyricsFolder = musicPreferences.loadLyricsFolderUri()
+        val needsLyricsFolder = location is AudioLocation.MediaStoreItem
+
         val lrc = when {
             goesToCloud && song.remoteId == null -> SaveOption.Blocked(SaveBlocker.NO_REMOTE_HANDLE)
-            location is AudioLocation.MediaStoreItem && musicPreferences.loadLyricsFolderUri() == null ->
-                SaveOption.Blocked(SaveBlocker.NO_LYRICS_FOLDER)
+            needsLyricsFolder && lyricsFolder == null -> SaveOption.Blocked(SaveBlocker.NO_LYRICS_FOLDER)
+            needsLyricsFolder -> SaveOption.Available(cloudEffects + SaveEffect.SAVED_TO_LYRICS_FOLDER)
             else -> SaveOption.Available(cloudEffects)
         }
 
@@ -64,7 +69,12 @@ class LyricsWriter @Inject constructor(
             else -> SaveOption.Available(cloudEffects + SaveEffect.REWRITES_FILE)
         }
 
-        LyricsSaveOptions(lrc = lrc, embedded = embedded, uploadBytes = if (goesToCloud) song.size else 0L)
+        LyricsSaveOptions(
+            lrc = lrc,
+            embedded = embedded,
+            uploadBytes = if (goesToCloud) song.size else 0L,
+            lyricsFolderName = lyricsFolder?.let(::safFolderDisplayName)
+        )
     }
 
     suspend fun save(song: Song, lyrics: String, mode: LyricsSaveMode): LyricsSaveResult =
@@ -125,9 +135,14 @@ class LyricsWriter @Inject constructor(
             is AudioLocation.MediaStoreItem -> {
                 val treeUri = musicPreferences.loadLyricsFolderUri()?.let(Uri::parse)
                     ?: return LyricsSaveResult.Failed(FailureReason.NO_LYRICS_FOLDER)
-                val baseName = song.relativePath?.substringAfterLast('/') ?: song.title
-                val parent = DocumentsContract.buildDocumentUriUsingTree(
-                    treeUri, DocumentsContract.getTreeDocumentId(treeUri)
+                val baseName = displayNameOf(location.uri)
+                    ?: song.relativePath?.substringAfterLast('/')
+                    ?: song.title
+                // Se replica la jerarquía de la canción: la carpeta de letras es plana y los
+                // nombres de archivo se repiten entre álbumes (ver [lyricsSubdirectoryOf]).
+                val parent = ensureDirectoryPath(
+                    treeUri,
+                    lyricsSubdirectoryOf(context, location.uri, song)
                 )
                 writeDocument(parent, lrcNameFor(baseName), lyrics)
                 LyricsSaveResult.Success
@@ -180,6 +195,31 @@ class LyricsWriter @Inject constructor(
     } ?: song.relativePath ?: song.title
 
     /**
+     * Recorre (creando lo que falte) la ruta [relativeDir] dentro del árbol concedido, y devuelve
+     * el documento de la carpeta final. Con ruta vacía devuelve la raíz del árbol.
+     *
+     * Cada tramo se comprueba antes de crearlo por el mismo motivo que en [writeDocument]:
+     * `createDocument` sobre un nombre ocupado no falla, crea `Rock (1)` — y guardar dos letras del
+     * mismo álbum acabaría fabricando un árbol de carpetas duplicadas.
+     */
+    private fun ensureDirectoryPath(treeUri: Uri, relativeDir: String): Uri {
+        var current = DocumentsContract.buildDocumentUriUsingTree(
+            treeUri, DocumentsContract.getTreeDocumentId(treeUri)
+        )
+        relativeDir.split('/').filter { it.isNotBlank() }.forEach { segment ->
+            val candidate = DocumentsContract.buildDocumentUriUsingTree(
+                current, "${DocumentsContract.getDocumentId(current)}/$segment"
+            )
+            current = if (exists(candidate)) candidate else {
+                DocumentsContract.createDocument(
+                    context.contentResolver, current, DocumentsContract.Document.MIME_TYPE_DIR, segment
+                ) ?: error("No se pudo crear la carpeta $segment")
+            }
+        }
+        return current
+    }
+
+    /**
      * Crea el documento o, si ya existía, lo sobrescribe. Importa el orden: `createDocument` sobre
      * un nombre ocupado no falla, crea `nombre (1).lrc` — y el usuario acabaría con un reguero de
      * duplicados cada vez que reguarda la misma letra.
@@ -228,7 +268,9 @@ data class LyricsSaveOptions(
     val lrc: SaveOption,
     val embedded: SaveOption,
     /** Cuánto se subiría al re-subir el audio, para poder decirlo antes de hacerlo. */
-    val uploadBytes: Long
+    val uploadBytes: Long,
+    /** Carpeta de letras elegida, para nombrarla en [SaveEffect.SAVED_TO_LYRICS_FOLDER]. */
+    val lyricsFolderName: String? = null
 )
 
 sealed interface SaveOption {
@@ -243,6 +285,14 @@ enum class SaveEffect {
 
     /** Se sube a OneDrive (el `.lrc` son KB; el audio, decenas de MB). */
     UPLOADS_TO_CLOUD,
+
+    /**
+     * El `.lrc` va a la carpeta de letras y NO junto a la canción, porque en el modo "todo el
+     * dispositivo" el sistema no autoriza a crear archivos ahí. Es una restricción de Android, y el
+     * mensaje lo dice: si no, parece una carencia de la app y el usuario espera que otros
+     * reproductores encuentren la letra, que no lo harán.
+     */
+    SAVED_TO_LYRICS_FOLDER,
 
     /** Falta el permiso de escritura en OneDrive: habrá que concederlo primero. */
     NEEDS_CLOUD_CONSENT

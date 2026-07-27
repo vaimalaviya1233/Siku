@@ -47,6 +47,8 @@ data class HomeArtistPick(val artist: String, val songs: List<Song>)
 
 sealed class LibraryBannerState {
     data class Scanning(val progress: Int, val message: String) : LibraryBannerState()
+    /** Fase de preparación (tags remotos, carátulas). [total] = 0 ⇒ progreso indeterminado. */
+    data class Preparing(val current: Int, val total: Int, val message: String) : LibraryBannerState()
     data class Downloading(val current: Int, val total: Int, val failed: Int, val status: String) : LibraryBannerState()
     data class Complete(val newSongs: Int, val downloaded: Int, val failed: Int, val deleted: Int = 0) : LibraryBannerState()
     /** Cola detenida por el entorno (sin WiFi, sin red, batería): informativo, se reanuda sola. */
@@ -86,6 +88,9 @@ class LibraryViewModel @Inject constructor(
     private val snackbarManager: com.qhana.siku.data.util.SnackbarManager,
     private val repository: IMusicRepository,
     private val artworkRepository: ArtworkRepository,
+    // Solo para las fotos de artista de "Seguir escuchando"; el resto del browse vive en
+    // BrowseViewModel.
+    private val browseRepository: com.qhana.siku.data.repository.BrowseRepository,
     private val musicPreferences: MusicPreferences,
     private val musicController: MusicController,
     private val syncManager: SyncManager,
@@ -222,7 +227,29 @@ class LibraryViewModel @Inject constructor(
     // la biblioteca. Se mantienen vivas 5s tras perder el último suscriptor (cambio de tab).
     // "Seguir escuchando" = últimos CONTEXTOS reproducidos (álbum/artista/lista/favoritos/
     // aleatorio/biblioteca), no canciones sueltas del historial. Cada uno reanudable como tal.
+    //
+    // Un contexto de ARTISTA se pinta con la FOTO del artista, no con la carátula que quedó
+    // guardada al reproducirlo: la tarjeta representa al artista y esa carátula es la de su
+    // primer álbum, que ya sale en el carrusel de álbumes. Se resuelve aquí y no al grabar el
+    // contexto porque la foto es tardía y mutable (la trae el backfill de Deezer, y el picker
+    // la cambia o la quita); un snapshot se quedaría con lo que hubiera en ese instante.
+    // El coverUri guardado sigue siendo el fallback: artista sin foto → su carátula.
     val recentContexts: StateFlow<List<PlaybackContext>> = musicPreferences.recentContextsFlow
+        .flatMapLatest { contexts ->
+            val artistNames = contexts.filterIsInstance<PlaybackContext.Artist>().map { it.name }
+            if (artistNames.isEmpty()) {
+                flowOf(contexts)
+            } else {
+                browseRepository.getArtistPhotos(artistNames).map { photos ->
+                    contexts.map { ctx ->
+                        if (ctx is PlaybackContext.Artist) {
+                            photos[ctx.name]?.let { ctx.copy(coverUri = it) } ?: ctx
+                        } else ctx
+                    }
+                }
+            }
+        }
+        .flowOn(Dispatchers.IO)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** Antepone un contexto al historial de "Seguir escuchando" (dedup + tope). */
@@ -288,7 +315,10 @@ class LibraryViewModel @Inject constructor(
             repository.getTopGenres(GENRE_MIN_COUNT, GENRE_CHIP_LIMIT),
             syncManager.state
         ) { genres, sync ->
-            val settling = sync is SyncStatus.Scanning || sync is SyncStatus.Downloading
+            // `Preparing` cuenta como asentándose: la metadata ligera escribe géneros canción a
+            // canción, que es exactamente lo que hace saltar de línea a la fila de chips.
+            val settling = sync is SyncStatus.Scanning || sync is SyncStatus.Downloading ||
+                sync is SyncStatus.Preparing
             if (settling) null else genres.map { it.name }
         }
             .filterNotNull()
@@ -407,6 +437,9 @@ class LibraryViewModel @Inject constructor(
                             LibraryBannerState.Scanning(status.found, status.message)
                         is SyncStatus.Downloading -> LibraryBannerState.Downloading(
                             status.current, status.total, status.failed, status.message
+                        )
+                        is SyncStatus.Preparing -> LibraryBannerState.Preparing(
+                            status.current, status.total, status.message
                         )
                         is SyncStatus.Error -> LibraryBannerState.Error(status.message)
                         // Detenido por el entorno: se anuncia igual mientras se espera que

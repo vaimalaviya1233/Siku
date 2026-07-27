@@ -27,9 +27,9 @@ data class NowPlayingUiState(
     val albumColors: AlbumColors? = null,
     /**
      * El color de esta canción lo eligió el usuario a mano. Lo necesita el tema: un color
-     * elegido explícitamente se respeta AUNQUE sea de baja saturación, mientras que uno
-     * extraído con tan poco croma se manda al esquema neutro (ver `isAchromatic` en
-     * MainActivity). Sin este flag, elegir un verde grisáceo del selector no cambiaba nada.
+     * elegido explícitamente se respeta AUNQUE apenas tenga croma, mientras que uno extraído
+     * igual de apagado se manda al esquema neutro (ver `ArtworkRepository.isAchromatic`).
+     * Sin este flag, elegir un verde grisáceo del selector no cambiaba nada.
      */
     val hasManualColor: Boolean = false,
     val lyrics: String? = null,

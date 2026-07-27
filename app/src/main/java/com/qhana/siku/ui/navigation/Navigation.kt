@@ -33,6 +33,10 @@ sealed class Screen(val route: String) {
     data object SettingsPlayback : Screen("settings/playback")
     data object SettingsDownloads : Screen("settings/downloads")
     data object SettingsAppearance : Screen("settings/appearance")
+    // Categoría propia y NO una tarjeta dentro de Reproducción: los gestos son la forma de
+    // interactuar con la app, no un ajuste de audio — bajo el encabezado "Volumen (ReplayGain)"
+    // nadie los iba a encontrar.
+    data object SettingsGestures : Screen("settings/gestures")
 
     // Personalizaciones con lista propia: viven fuera de Apariencia para que esa pantalla no
     // se convierta en un muro de opciones (dos listas drag & drop la ocupaban entera).

@@ -79,6 +79,7 @@ fun SaveLyricsDialog(
                     description = stringResource(R.string.lyrics_save_option_lrc_desc),
                     option = options.lrc,
                     uploadBytes = options.uploadBytes,
+                    lyricsFolderName = options.lyricsFolderName,
                     isLrc = true,
                     selected = selected == LyricsSaveMode.LRC_FILE,
                     onSelect = { selected = LyricsSaveMode.LRC_FILE }
@@ -89,6 +90,7 @@ fun SaveLyricsDialog(
                     description = stringResource(R.string.lyrics_save_option_embedded_desc),
                     option = options.embedded,
                     uploadBytes = options.uploadBytes,
+                    lyricsFolderName = options.lyricsFolderName,
                     isLrc = false,
                     selected = selected == LyricsSaveMode.EMBEDDED,
                     onSelect = { selected = LyricsSaveMode.EMBEDDED }
@@ -137,6 +139,7 @@ private fun SaveOptionRow(
     description: String,
     option: SaveOption,
     uploadBytes: Long,
+    lyricsFolderName: String?,
     isLrc: Boolean,
     selected: Boolean,
     onSelect: () -> Unit
@@ -170,7 +173,7 @@ private fun SaveOptionRow(
                 when (option) {
                     is SaveOption.Available -> option.effects.forEach { effect ->
                         Text(
-                            text = effectText(effect, uploadBytes, isLrc),
+                            text = effectText(effect, uploadBytes, isLrc, lyricsFolderName),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.tertiary
                         )
@@ -197,9 +200,18 @@ private fun titleColorFor(enabled: Boolean) =
  * y para el audio callarlo sería esconder lo único que de verdad cuesta.
  */
 @Composable
-private fun effectText(effect: SaveEffect, uploadBytes: Long, isLrc: Boolean): String = when (effect) {
+private fun effectText(
+    effect: SaveEffect,
+    uploadBytes: Long,
+    isLrc: Boolean,
+    lyricsFolderName: String?
+): String = when (effect) {
     SaveEffect.REWRITES_FILE -> stringResource(R.string.lyrics_save_warn_rewrites)
     SaveEffect.NEEDS_CLOUD_CONSENT -> stringResource(R.string.lyrics_save_warn_consent)
+    SaveEffect.SAVED_TO_LYRICS_FOLDER -> stringResource(
+        R.string.lyrics_save_effect_lyrics_folder,
+        lyricsFolderName.orEmpty()
+    )
     SaveEffect.UPLOADS_TO_CLOUD ->
         if (isLrc || uploadBytes <= 0L) stringResource(R.string.lyrics_save_warn_upload_small)
         else stringResource(

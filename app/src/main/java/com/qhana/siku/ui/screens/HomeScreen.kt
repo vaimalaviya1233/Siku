@@ -551,8 +551,14 @@ private fun HomeCarouselCard(
                     .data(art)
                     .apply {
                         if (cacheKey != null) {
-                            memoryCacheKey(cacheKey)
-                            diskCacheKey(cacheKey)
+                            // La clave lleva la IMAGEN, no solo la identidad de la tarjeta. Con
+                            // `artist:Nombre` a secas, cambiar lo que la tarjeta muestra —la foto
+                            // del artista que llega del backfill, "ninguno de estos", una carátula
+                            // reparada— seguía sirviendo la anterior desde el caché de memoria y
+                            // el de DISCO, que además sobrevive al reinicio.
+                            val key = "$cacheKey@$art"
+                            memoryCacheKey(key)
+                            diskCacheKey(key)
                         }
                     }
                     .crossfade(200)

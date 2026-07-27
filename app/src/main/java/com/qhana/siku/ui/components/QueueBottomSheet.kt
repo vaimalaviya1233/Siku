@@ -271,6 +271,7 @@ fun QueueBottomSheet(
 /**
  * Row individual de la cola - Optimizado con Surface para mejor rendimiento de renderizado
  */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun QueueItemRow(
     song: SongUiModel,
@@ -328,23 +329,30 @@ private fun QueueItemRow(
             // Reutiliza SongItem con la misma apariencia de Library. showActiveBackground=false:
             // el resaltado del item en reproducción lo pinta la Surface de TODA la fila (arriba),
             // no un recuadro de SongItem solo alrededor del contenido (weight 1f) que competía.
+            //
+            // "Quitar de la cola" va como trailingContent, NO como hermano del SongItem en este
+            // Row: el `ListItem` de M3 aplica sus 16dp de padding end DESPUÉS de su trailing, así
+            // que un botón colgado fuera quedaba con esos 16dp SUMADOS al aire propio de ambos
+            // botones (≈45dp entre el glifo de nube y la X, contra los ~33 del resto de listas) y
+            // rematando a 18dp del borde de la tarjeta en vez de a los 16 del spec. Dentro del
+            // slot, el espaciado con el indicador de estado y el margen al borde son los mismos
+            // que en artista/álbum/lista, que es de donde sale el ritmo de estas filas.
+            val removeDesc = stringResource(R.string.queue_remove_song)
             SongItem(
                 song = song,
                 isPlaying = isCurrentSong,
                 showActiveBackground = false,
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f),
+                trailingContent = {
+                    IconButton(
+                        onClick = onRemove,
+                        shapes = IconButtonDefaults.shapes(),
+                        modifier = Modifier.semantics { contentDescription = removeDesc }
+                    ) {
+                        MaterialSymbol("close", color = colors.onSurfaceVariantColor, size = 20.sp)
+                    }
+                }
             )
-
-            // Quitar de la cola.
-            val removeDesc = stringResource(R.string.queue_remove_song)
-            IconButton(
-                onClick = onRemove,
-                modifier = Modifier
-                    .padding(end = 4.dp)
-                    .semantics { contentDescription = removeDesc }
-            ) {
-                MaterialSymbol("close", color = colors.onSurfaceVariantColor, size = 20.sp)
-            }
         }
     }
 }

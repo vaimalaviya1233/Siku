@@ -361,7 +361,14 @@ class SyncManager @Inject constructor(
                 // Solo en WiFi: pedir cabeceras de cientos de canciones no debe gastar datos.
                 if (!stopSignal.value && networkManager.isWifi()) {
                     try {
-                        lightMetadataFetcher.run(isStopped = { stopSignal.value })
+                        lightMetadataFetcher.run(
+                            isStopped = { stopSignal.value },
+                            onProgress = { done, total ->
+                                _state.value = SyncStatus.Preparing(
+                                    done, total, context.getString(R.string.sync_reading_tags)
+                                )
+                            }
+                        )
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
@@ -382,13 +389,20 @@ class SyncManager @Inject constructor(
                 // único efecto sería sellarlas sin haberlas podido intentar. Después de las
                 // descargas, en cambio, cada fila tiene su álbum real y las que se bajaron
                 // traen su portada — que es justo lo que las demás pueden heredar.
-                if (!stopSignal.value) artworkHealingManager.resolvePendingArtwork()
+                // Sin cifras: estas dos fases no saben de antemano cuánto trabajo tienen (lo
+                // habitual es que sea nada), pero pueden abrir y analizar archivos uno a uno en
+                // una biblioteca recién descargada. Anunciarlas evita el mismo malentendido que
+                // la metadata ligera: silencio prolongado con el banner del paso anterior puesto.
+                if (!stopSignal.value) {
+                    _state.value = SyncStatus.Preparing(0, 0, context.getString(R.string.sync_organizing_art))
+                    artworkHealingManager.resolvePendingArtwork()
 
-                // Poda de carátulas huérfanas: AQUÍ y no antes. Es el primer punto en el que ya
-                // no queda nada escribiendo portadas (el escaneo flusheó sus lotes, la metadata
-                // ligera terminó y la cola de descargas también), así que "sin referencias"
-                // significa de verdad "sobra". Ver ArtworkHealingManager.pruneCovers.
-                if (!stopSignal.value) artworkHealingManager.pruneCovers()
+                    // Poda de carátulas huérfanas: AQUÍ y no antes. Es el primer punto en el que
+                    // ya no queda nada escribiendo portadas (el escaneo flusheó sus lotes, la
+                    // metadata ligera terminó y la cola de descargas también), así que "sin
+                    // referencias" significa de verdad "sobra". Ver ArtworkHealingManager.pruneCovers.
+                    if (!stopSignal.value) artworkHealingManager.pruneCovers()
+                }
 
                 // Fotos de artista (Deezer) pendientes: mismo rol que los healings de arriba
                 // (reparación post-scan), pero fire-and-forget en el scope — no retrasa el
@@ -1319,6 +1333,19 @@ sealed class SyncStatus(val message: String, val isRunning: Boolean) {
     // Sin defaults a propósito: `currentMessage` acaba en el banner de la biblioteca, así que
     // debe venir SIEMPRE de recursos (un default literal se colaba en inglés en la UI en español).
     data class Scanning(val found: Int, val currentMessage: String) : SyncStatus(currentMessage, true)
+    /**
+     * Trabajo previo o posterior a las descargas que NO es escanear ni bajar audio: leer los tags
+     * remotos, resolver carátulas, podar sobrantes.
+     *
+     * Existe porque esas fases se hacían en silencio y el banner conservaba el último estado del
+     * escaneo. La metadata ligera puede tardar varios minutos en una biblioteca grande (dos
+     * peticiones por canción, y las de Graph están serializadas por el rate limiter), así que
+     * "Escaneando biblioteca" quieto ese rato se lee, con toda la razón, como que la app se colgó.
+     *
+     * [total] = 0 cuando la fase no sabe cuántos elementos tiene por delante; el banner muestra
+     * entonces progreso indeterminado en vez de un "0 de 0".
+     */
+    data class Preparing(val current: Int, val total: Int, val currentMessage: String) : SyncStatus(currentMessage, true)
     data class Downloading(val current: Int, val total: Int, val failed: Int, val currentMessage: String) : SyncStatus(currentMessage, true)
     /**
      * La cola dejó de avanzar por una condición del entorno (sin WiFi, sin red, batería baja)

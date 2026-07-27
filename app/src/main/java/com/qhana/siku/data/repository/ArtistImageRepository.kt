@@ -210,6 +210,23 @@ class ArtistImageRepository @Inject constructor(
         )
     }
 
+    /**
+     * "Ninguno de estos" del picker: el artista se queda SIN foto, y a propósito. Se guarda como
+     * `manuallySet` sin URL, que es lo que hace que la decisión aguante: tanto [ensureArtistImage]
+     * como el backfill saltan las filas manuales, así que el auto-match no volverá a ponerle la
+     * foto equivocada que el usuario acaba de rechazar. Sin esa marca, una fila con `imageUrl`
+     * nula es indistinguible de un not-found y se reintentaría a los 14 días.
+     */
+    suspend fun clearArtistImage(artistName: String) {
+        artistDao.upsertArtist(
+            ArtistEntity(
+                name = artistName,
+                manuallySet = true,
+                fetchedAt = System.currentTimeMillis()
+            )
+        )
+    }
+
     private fun DeezerArtistDto.toCandidate() = DeezerArtistCandidate(
         deezerId = id,
         name = name.orEmpty(),

@@ -297,10 +297,15 @@ class MusicPlaybackService : MediaSessionService() {
      * y se retoma en la misma posición (tirón de <1s, solo al alternar el EQ).
      */
     private fun applyEqEnabled(enabled: Boolean) {
-        val p = player ?: return
         if (equalizerProcessor.isEnabled() == enabled) return
         appLogger.log("SERVICE", "Ecualizador ${if (enabled) "ACTIVADO" else "DESACTIVADO"}: reconstruyendo pipeline de audio")
+        // El flag se aplica ANTES de mirar el player: es el estado del processor y debe seguir a
+        // la preferencia siempre. Si se salía por `player == null` sin tocarlo, el
+        // distinctUntilChanged del colector ya no volvería a emitir ese valor y el processor se
+        // quedaba desincronizado hasta el siguiente toggle.
         equalizerProcessor.setEnabled(enabled)
+        // Sin player no hay pipeline que rehacer: la armará `onCreate` con el flag ya puesto.
+        val p = player ?: return
         applyOffloadPreference(p)
 
         if (p.mediaItemCount == 0 || p.playbackState == Player.STATE_IDLE) return
@@ -334,6 +339,8 @@ class MusicPlaybackService : MediaSessionService() {
             com.qhana.siku.player.audio.EqualizerAudioProcessor.bandsFor(eqBandCount),
             musicPreferences.loadEqBandGains(eqBandCount)
         )
+        equalizerProcessor.setBassBoost(musicPreferences.loadEqBassBoost())
+        equalizerProcessor.setTrebleBoost(musicPreferences.loadEqTrebleBoost())
 
         // setExtensionRendererMode se quitó: no hay renderers de extensión empaquetados,
         // así que no tenía efecto. setEnableDecoderFallback sí importa (cae a otro decoder

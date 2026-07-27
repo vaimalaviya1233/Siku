@@ -41,6 +41,7 @@ import com.qhana.siku.domain.usecase.PlaybackErrorRecoveryUseCase
 import com.qhana.siku.domain.usecase.MusicPlaybackUseCase
 import com.qhana.siku.player.MusicController
 import com.qhana.siku.player.PlaybackCoordinator
+import com.qhana.siku.player.audio.EqCurve
 import com.qhana.siku.player.audio.EqualizerAudioProcessor
 import com.qhana.siku.ui.components.EqPresets
 import com.qhana.siku.ui.state.LyricsFailure
@@ -188,6 +189,31 @@ class PlaybackViewModel @Inject constructor(
     )
     val eqGains: StateFlow<List<Float>> = _eqGains.asStateFlow()
 
+    // Refuerzos de graves/agudos: dos peakings anchos ADITIVOS sobre la curva del EQ (no se
+    // compensan a propósito). Ver el kdoc de EqualizerAudioProcessor.
+    private val _eqBassBoost = MutableStateFlow(musicPreferences.loadEqBassBoost())
+    val eqBassBoost: StateFlow<Float> = _eqBassBoost.asStateFlow()
+
+    private val _eqTrebleBoost = MutableStateFlow(musicPreferences.loadEqTrebleBoost())
+    val eqTrebleBoost: StateFlow<Float> = _eqTrebleBoost.asStateFlow()
+
+    /**
+     * Pico en dB de la curva completa: el headroom que hace falta para que un máster a fondo de
+     * escala no recorte. Es INFORMATIVO — no se corrige por detrás (el auto-preamp está descartado
+     * dos veces); la hoja lo muestra para que el usuario vea cuándo se está pasando, que es
+     * justo lo que faltaba cuando los refuerzos de julio sonaron a ruido.
+     */
+    val eqHeadroomDb: StateFlow<Float> = combine(
+        _eqGains, _eqBandCount, _eqBassBoost, _eqTrebleBoost
+    ) { gains, bandCount, bass, treble ->
+        EqCurve.peakGainDb(
+            gains.toFloatArray(),
+            EqualizerAudioProcessor.bandsFor(bandCount),
+            bass,
+            treble
+        )
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, 0f)
+
     /** Preferencia de Ajustes: el botón EQ del NowPlaying abre el panel del sistema. */
     val useSystemEq: StateFlow<Boolean> = musicPreferences.useSystemEqFlow
         .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadUseSystemEq())
@@ -265,10 +291,35 @@ class PlaybackViewModel @Inject constructor(
     fun commitEqGains() =
         musicPreferences.saveEqBandGains(_eqBandCount.value, _eqGains.value.toFloatArray())
 
+    /** Refuerzo de graves EN VIVO; se persiste al soltar ([commitEqBoosts]). */
+    fun setEqBassBoost(db: Float) {
+        equalizerProcessor.setBassBoost(db)
+        _eqBassBoost.value = db
+    }
+
+    /** Refuerzo de agudos EN VIVO; se persiste al soltar ([commitEqBoosts]). */
+    fun setEqTrebleBoost(db: Float) {
+        equalizerProcessor.setTrebleBoost(db)
+        _eqTrebleBoost.value = db
+    }
+
+    fun commitEqBoosts() {
+        musicPreferences.saveEqBassBoost(_eqBassBoost.value)
+        musicPreferences.saveEqTrebleBoost(_eqTrebleBoost.value)
+    }
+
     fun resetEq() {
         val flat = FloatArray(_eqBandCount.value)
         equalizerProcessor.setBandGains(flat)
         _eqGains.value = flat.toList()
+        // "Restablecer" = EQ neutro de verdad, refuerzos incluidos: dejarlos puestos con la curva
+        // plana daría un "restablecido" que sigue coloreando el sonido.
+        equalizerProcessor.setBassBoost(0f)
+        equalizerProcessor.setTrebleBoost(0f)
+        _eqBassBoost.value = 0f
+        _eqTrebleBoost.value = 0f
+        musicPreferences.saveEqBassBoost(0f)
+        musicPreferences.saveEqTrebleBoost(0f)
         // Aplana AMBOS modos, no solo el visible: "Restablecer" = EQ neutro; que el otro
         // modo conserve una curva escondida sorprendería al alternar 5↔10 después.
         musicPreferences.saveEqBandGains(5, FloatArray(5))
@@ -864,8 +915,19 @@ class PlaybackViewModel @Inject constructor(
                     }
                     is LyricsResult.Error -> {
                         if (currentSong.value?.id != song.id) return@launch
-                        _nowPlayingUiState.update { it.copy(lyricsFailure = LyricsFailure.PROVIDER_ERROR, lyricsError = result.message) }
-                        if (force) snackbarManager.show(context.getString(R.string.common_error_format, result.message))
+                        // No se pudo ni llegar a LrcLib: eso es "sin conexión", con su propio
+                        // estado vacío. Mostrar el mensaje del proveedor aquí significaba pintarle
+                        // al usuario un `Unable to resolve host "lrclib.net"` en la pantalla.
+                        if (result.isOffline) {
+                            val offlineMsg = context.getString(R.string.common_no_offline_connection)
+                            _nowPlayingUiState.update {
+                                it.copy(lyricsFailure = LyricsFailure.NO_NETWORK, lyricsError = offlineMsg)
+                            }
+                            if (force) snackbarManager.show(offlineMsg)
+                        } else {
+                            _nowPlayingUiState.update { it.copy(lyricsFailure = LyricsFailure.PROVIDER_ERROR, lyricsError = result.message) }
+                            if (force) snackbarManager.show(context.getString(R.string.common_error_format, result.message))
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -906,8 +968,19 @@ class PlaybackViewModel @Inject constructor(
                 is LyricsCandidatesResult.Empty -> _nowPlayingUiState.update {
                     it.copy(isSearchingCandidates = false, lyricsCandidates = emptyList())
                 }
+                // Sin poder alcanzar el servidor, el mensaje es "sin conexión" y no el texto crudo
+                // de la excepción: la comprobación de red de arriba da `true` con una red
+                // conectada que no llega a internet, así que este es el filtro que de verdad
+                // atrapa el caso (ver [LyricsResult.Error.isOffline]).
                 is LyricsCandidatesResult.Error -> _nowPlayingUiState.update {
-                    it.copy(isSearchingCandidates = false, lyricsSearchError = result.message)
+                    it.copy(
+                        isSearchingCandidates = false,
+                        lyricsSearchError = if (result.isOffline) {
+                            context.getString(R.string.common_no_offline_connection)
+                        } else {
+                            result.message
+                        }
+                    )
                 }
             }
         }
@@ -1112,8 +1185,29 @@ class PlaybackViewModel @Inject constructor(
         }
     }
 
+    /**
+     * El tema en curso con TODO lo que llegó DESPUÉS de encolarlo. `currentSong` es el snapshot en
+     * MEMORIA del player: se congeló al armar la cola, así que no ve la carátula que reparó el
+     * healing ni la que dejó la descarga al terminar. La fila del uiState sí (dominio 2 = Room).
+     *
+     * Importa sobre todo en STREAMING, que es justo donde la carátula suele llegar tarde: con el
+     * snapshot del player, `albumArtUriString` era null y el long-press de la carátula salía por
+     * el `?: return` — el selector de color no abría NUNCA en una canción sin descargar.
+     * Es el mismo criterio con el que el MiniPlayer elige qué `Song` pintar (ver PlayerOverlay).
+     */
+    private fun activeSong(): Song? {
+        val current = currentSong.value ?: return null
+        return _nowPlayingUiState.value.song?.takeIf { it.id == current.id } ?: current
+    }
+
     fun showDebugInfo(isDarkTheme: Boolean) {
-        val uri = currentSong.value?.albumArtUriString ?: return
+        val uri = activeSong()?.albumArtUriString
+        if (uri == null) {
+            // Sin carátula no hay nada que analizar, y un long-press que no hace NADA se lee como
+            // que la app se colgó. Se dice en voz alta.
+            snackbarManager.show(context.getString(R.string.color_picker_no_art))
+            return
+        }
         val savedColors = _nowPlayingUiState.value.albumColors
         viewModelScope.launch {
             artworkRepository.debugExtractColors(uri, isDarkTheme, savedColors)?.let { d ->
@@ -1124,10 +1218,10 @@ class PlaybackViewModel @Inject constructor(
     fun clearDebugInfo() { _nowPlayingUiState.update { it.copy(debugInfo = null) } }
 
     fun overrideSongColor(color: Int, isDarkTheme: Boolean) {
-        val current = currentSong.value ?: return
+        val current = activeSong() ?: return
         viewModelScope.launch {
             artworkRepository.saveManualColor(current.id, current.album, color, isDarkTheme)
-            val song = currentSong.value ?: return@launch
+            val song = activeSong() ?: return@launch
             val colors = artworkRepository.getAlbumColors(song)
             // hasManualColor: el tema debe aplicar ESTE color aunque tenga poca saturación —
             // es una elección explícita, no una lectura dudosa de la carátula.
