@@ -27,16 +27,33 @@ class Id3v2TagReader @Inject constructor() : PartialTagReader {
         ) return null
 
         val majorVersion = fragment[3].toInt() and 0xFF
+        val flags = fragment[FLAGS_OFFSET].toInt() and 0xFF
         val tagSize = readSyncsafe(fragment, 6)
         if (tagSize <= 0) return null
 
         val isV22 = majorVersion == 2
+
+        // Unsynchronisation: el tag viene con un 0x00 metido detrás de cada 0xFF y habría que
+        // des-escaparlo ENTERO antes de leer un solo frame. En vez de devolver campos corruptos en
+        // silencio, se declara "no reconocido" y el llamador cae al camino universal, que sí lo
+        // entiende — es exactamente para lo que existe ese contrato en [PartialTagReader].
+        if (flags and FLAG_UNSYNCHRONISATION != 0) return null
+        // El mismo bit significa otra cosa en v2.2: compresión, sin esquema definido por la spec
+        // (que manda ignorar el tag). Tampoco es nuestro.
+        if (isV22 && flags and FLAG_EXTENDED_OR_COMPRESSED != 0) return null
+
         val frameHeaderBytes = if (isV22) V22_FRAME_HEADER_BYTES else FRAME_HEADER_BYTES
         val idLength = if (isV22) 3 else 4
         // El tag puede exceder el fragmento (carátula grande): se lee hasta donde haya bytes.
         val tagEnd = minOf(HEADER_BYTES + tagSize, fragment.size)
 
+        // El extended header se interpone entre la cabecera y el primer frame. Sin saltarlo, el
+        // primer "id de frame" son en realidad sus bytes: sale basura, el bucle corta al momento y
+        // el archivo se queda sin tags sin que nadie se entere.
         var pos = HEADER_BYTES
+        if (flags and FLAG_EXTENDED_OR_COMPRESSED != 0) {
+            pos += extendedHeaderBytes(fragment, majorVersion) ?: return null
+        }
         val text = HashMap<String, String>()
         var pictureData: ByteArray? = null
 
@@ -60,6 +77,13 @@ class Id3v2TagReader @Inject constructor() : PartialTagReader {
                 "TALB", "TAL" -> text["ALBUM"] = decodeText(fragment, bodyStart, size)
                 "TPE2", "TP2" -> text["ALBUMARTIST"] = decodeText(fragment, bodyStart, size)
                 "TCON", "TCO" -> text["GENRE"] = normalizeGenre(decodeText(fragment, bodyStart, size))
+                "TRCK", "TRK" -> text["TRACK"] = decodeText(fragment, bodyStart, size)
+                // El año cambió de frame entre versiones: `TYER` (v2.3, 4 dígitos) y `TDRC`
+                // (v2.4, timestamp ISO). La PRIMERA que aparezca gana — un archivo convertido de
+                // v2.3 a v2.4 puede arrastrar las dos y la segunda no aporta nada nuevo.
+                "TDRC", "TYER", "TYE" -> if ("YEAR" !in text) {
+                    text["YEAR"] = decodeText(fragment, bodyStart, size)
+                }
                 // Un archivo puede traer un USLT por idioma; nos quedamos con el primero.
                 "USLT", "ULT" -> if ("LYRICS" !in text) {
                     extractLyrics(fragment, bodyStart, size)?.let { text["LYRICS"] = it }
@@ -77,6 +101,8 @@ class Id3v2TagReader @Inject constructor() : PartialTagReader {
             album = text["ALBUM"],
             albumArtist = text["ALBUMARTIST"],
             genre = text["GENRE"],
+            trackNumber = parseTrackNumber(text["TRACK"]),
+            year = parseYear(text["YEAR"]),
             lyrics = pickBestLyrics(text["LYRICS"]),
             pictureData = pictureData,
             // El offset del APIC dentro del tag no es estable si el frame quedó cortado a medias:
@@ -146,6 +172,31 @@ class Id3v2TagReader @Inject constructor() : PartialTagReader {
         return buf.copyOfRange(p, end)
     }
 
+    /**
+     * Bytes que ocupa el extended header, para saltarlo entero. `null` = no se puede saber (el
+     * fragmento se corta antes de su campo de tamaño, o el tamaño es absurdo), y entonces el
+     * llamador declara el tag no reconocido en vez de leer frames desde una posición inventada.
+     *
+     * Las dos versiones NO cuentan lo mismo, y confundirlas desplaza la lectura por unos pocos
+     * bytes —lo peor que puede pasar, porque el resultado parece un tag válido con basura dentro:
+     * - **v2.3**: campo normal (no syncsafe) que mide el extended header SIN contarse a sí mismo.
+     * - **v2.4**: campo syncsafe que SÍ se cuenta, así que el total es el propio valor.
+     */
+    private fun extendedHeaderBytes(buf: ByteArray, majorVersion: Int): Int? {
+        val sizeAt = HEADER_BYTES
+        if (sizeAt + EXTENDED_SIZE_BYTES > buf.size) return null
+        val declared = if (majorVersion >= 4) {
+            readSyncsafe(buf, sizeAt)
+        } else {
+            readUInt32BE(buf, sizeAt)
+        }
+        if (declared <= 0) return null
+        val total = if (majorVersion >= 4) declared else declared + EXTENDED_SIZE_BYTES
+        // Un tamaño mayor que lo que hay leído no es recuperable: los frames caen fuera del trozo.
+        if (total > buf.size - HEADER_BYTES) return null
+        return total
+    }
+
     private fun skipPastNul(buf: ByteArray, from: Int, end: Int, wide: Boolean): Int {
         var p = from
         if (wide) {
@@ -185,5 +236,12 @@ class Id3v2TagReader @Inject constructor() : PartialTagReader {
         const val ENCODING_UTF8 = 3
         /** `USLT`/`SYLT` llevan el idioma ISO-639-2 en 3 bytes, entre codificación y descriptor. */
         const val LANGUAGE_BYTES = 3
+        /** Byte de flags de la cabecera del tag: `ID3` + versión (2) + flags (1) + tamaño (4). */
+        const val FLAGS_OFFSET = 5
+        const val FLAG_UNSYNCHRONISATION = 0x80
+        /** Extended header en v2.3/v2.4; en v2.2 el mismo bit significa compresión. */
+        const val FLAG_EXTENDED_OR_COMPRESSED = 0x40
+        /** Campo de tamaño que abre el extended header, en las dos versiones que lo tienen. */
+        const val EXTENDED_SIZE_BYTES = 4
     }
 }

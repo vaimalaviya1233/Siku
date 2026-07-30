@@ -350,6 +350,7 @@
     <!-- %1$s = name of the chosen lyrics folder -->
     <string name="lyrics_save_effect_lyrics_folder">It will be saved in “%1$s”, not next to the song: Android doesn\'t allow that when scanning the whole device. Other players won\'t find it there.</string>
     <string name="lyrics_save_blocked_no_remote">The matching cloud file is unknown.</string>
+    <string name="lyrics_save_blocked_folder_read_only">This folder was granted read-only access. Re-authorise it in Settings → Sources to save lyrics there.</string>
     <string name="lyrics_save_ok_lrc">Lyrics saved to an .lrc file</string>
     <string name="lyrics_save_ok_embedded">Lyrics saved inside the song</string>
     <string name="lyrics_save_err_empty">There are no lyrics to save</string>
@@ -385,10 +386,24 @@
     <string name="eq_boost_section">Boost</string>
     <string name="eq_boost_bass">Bass</string>
     <string name="eq_boost_treble">Treble</string>
+    <string name="eq_boost_center">Frequency</string>
     <string name="eq_headroom_label">Peak gain: %1$s dB</string>
     <string name="eq_headroom_ok">Plenty of headroom: no clipping.</string>
     <string name="eq_headroom_caution">May clip at high volume.</string>
     <string name="eq_headroom_risk">Will clip unless you turn the volume down.</string>
+    <string name="eq_headroom_limited">The limiter will keep it from clipping by pulling peaks down.</string>
+    <string name="eq_headroom_bluetooth">Over Bluetooth the headphones usually control the volume, so turning it down here gives no headroom. Turn on the limiter or lower the preamp.</string>
+
+    <string name="eq_protection_section">Level protection</string>
+    <string name="eq_preamp">Preamp</string>
+    <string name="eq_preamp_apply_suggested">Suggested: %1$s dB</string>
+    <string name="eq_limiter">Limiter</string>
+    <string name="eq_limiter_desc">Pulls down peaks above the threshold. At 0 dB it only prevents clipping; lower, it compresses.</string>
+    <string name="eq_limiter_threshold">Threshold</string>
+    <string name="eq_limiter_threshold_auto">Automatic (0 dBFS: only prevents clipping)</string>
+    <string name="eq_limiter_meter">Reduction</string>
+    <string name="eq_limiter_meter_would">Would reduce</string>
+    <string name="eq_limiter_idle">Idle</string>
     <string name="eq_preset_flat">Flat</string>
     <string name="eq_preset_rock">Rock</string>
     <string name="eq_preset_pop">Pop</string>
@@ -531,6 +546,8 @@
     </plurals>
     <string name="source_local_title">Music folders</string>
     <string name="source_local_desc">Pick specific folders, subfolders included.</string>
+    <string name="source_local_folder_read_only">Read-only access: lyrics can\'t be saved here.</string>
+    <string name="source_local_folder_reauthorize">Re-authorise</string>
     <string name="source_device_title">Whole device</string>
     <string name="source_device_desc">All the music stored on your phone, no folders to pick.</string>
     <string name="source_device_active">Scanning all music on your device</string>
@@ -570,6 +587,9 @@
     <string name="settings_regenerating">Regenerating…</string>
     <string name="settings_regenerate_colors">Regenerate theme colors</string>
     <string name="settings_regenerate_desc">Forces a re-analysis of the album art with the new color algorithm.</string>
+    <string name="settings_regenerate_confirm_title">Regenerate colors?</string>
+    <string name="settings_regenerate_confirm_message">All album art will be analyzed again. Any colors you picked manually will be lost and cannot be recovered.</string>
+    <string name="settings_regenerate_confirm_action">Regenerate</string>
     <string name="settings_solid_bg">Solid background in the player</string>
     <string name="settings_solid_bg_desc">Uses a solid theme color instead of the album art gradient.</string>
     <string name="settings_wavy_progress">Wavy progress bar</string>
@@ -580,9 +600,9 @@
     <!-- Palette style: how the theme is generated from the album art color -->
     <string name="settings_palette_style">Color style</string>
     <string name="settings_palette_tonalspot">Balanced</string>
-    <string name="settings_palette_tonalspot_desc">The Android one. Moderate, consistent color.</string>
+    <string name="settings_palette_tonalspot_desc">The system theme one (wallpaper colors). Moderate and consistent across all artwork.</string>
     <string name="settings_palette_vibrant">Vibrant</string>
-    <string name="settings_palette_vibrant_desc">Color at full blast. It can overdo muted album art.</string>
+    <string name="settings_palette_vibrant_desc">Color at full blast, like the media controls in the notification shade. It can overdo muted album art.</string>
     <string name="settings_palette_content">True to the artwork</string>
     <string name="settings_palette_content_desc">Intensity follows the cover; more neutral surfaces.</string>
     <string name="settings_palette_fidelity">Fidelity</string>
@@ -590,7 +610,7 @@
     <string name="settings_palette_neutral">Neutral</string>
     <string name="settings_palette_neutral_desc">Nearly gray, with a minimal hint of the album.</string>
     <string name="settings_palette_expressive">Expressive</string>
-    <string name="settings_palette_expressive_desc">Reinterprets the hue: colors that aren\'t in the cover.</string>
+    <string name="settings_palette_expressive_desc">The accent follows the cover, but backgrounds shift to the complementary hue.</string>
     <string name="settings_palette_rainbow">Rainbow</string>
     <string name="settings_palette_rainbow_desc">Playful, with very saturated accents.</string>
     <string name="settings_palette_fruitsalad">Fruit salad</string>
@@ -619,6 +639,11 @@
     <!-- ==================== Color picker ==================== -->
     <string name="color_picker_title">Select color</string>
     <string name="color_picker_prompt">Tap a color to apply it:</string>
+    <string name="color_picker_legend">The circle is the color in the artwork; the bar is the accent it would generate.</string>
+    <string name="color_picker_applied">Applied now: %1$s</string>
+    <string name="color_picker_seed">From saved accent %1$s</string>
+    <string name="color_picker_current">current</string>
+    <string name="color_picker_hue_source">source of the current one</string>
     <string name="color_picker_no_art">This song doesn\'t have album art to analyze yet</string>
 
     <!-- ==================== Library: tabs / sync / sorting / logout ==================== -->
@@ -732,9 +757,13 @@
     <string name="error_hardware_skipping">Hardware error. Skipping…</string>
     <string name="error_incompatible_skipping">Unsupported file. Skipping…</string>
     <string name="error_url_skipping">Error fetching the URL. Skipping…</string>
+    <string name="error_playback_skipping">Couldn\'t play it. Skipping…</string>
     <string name="error_no_deezer">No connection to Deezer</string>
     <string name="error_playback_load">Error playing the song</string>
     <string name="error_playback_generic">Playback error</string>
+    <string name="error_playback_network_persistent">Persistent network error</string>
+    <string name="error_playback_file_not_found">File not found</string>
+    <string name="error_playback_format_unsupported">This format can\'t be played</string>
 
     <!-- ==================== Permissions ==================== -->
 

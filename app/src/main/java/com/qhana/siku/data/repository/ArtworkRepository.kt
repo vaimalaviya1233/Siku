@@ -16,6 +16,7 @@ import com.materialkolor.score.Score
 import com.qhana.siku.data.model.AlbumColors
 import com.qhana.siku.data.model.Song
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
@@ -125,9 +126,11 @@ class ArtworkRepository @Inject constructor(
      *
      * Devuelve `null` cuando NO hay carátula (o la extracción falla): "sin carátula" es un
      * estado distinto de "una carátula que da un color oscuro/claro". El caller decide el
-     * neutro a usar (ver [albumAccent] fallback). NUNCA se devuelve un gris centinela: eso
-     * hacía indistinguible el caso sin-arte de una lectura real oscura y forzaba parches de
-     * contraste sobre colores legítimos.
+     * neutro a usar. NUNCA se devuelve un gris centinela: eso hacía indistinguible el caso
+     * sin-arte de una lectura real oscura y forzaba parches de contraste sobre colores legítimos.
+     *
+     * Los dos campos de [AlbumColors] son **seeds crudos** por tema, no colores de rol: para
+     * pintar un acento 1:1 hay que pasarlos por [accentForTheme].
      */
     suspend fun getAlbumColors(song: Song): AlbumColors? {
         // NIVEL 1: Memoria RAM (Fast path sin lock)
@@ -135,40 +138,49 @@ class ArtworkRepository @Inject constructor(
 
         val mutex = extractionMutexes.getOrPut(song.id) { Mutex() }
 
-        return mutex.withLock {
-            // Double-check después de adquirir lock
-            memoryCache.get(song.id)?.let { return it }
-
-            return withContext(Dispatchers.IO) {
-                // NIVEL 2: Base de Datos (Persistencia)
-                val dbColors = musicRepository.getColors(song.id)
-                if (dbColors != null) {
-                    memoryCache.put(song.id, dbColors)
-                    return@withContext dbColors
-                }
-
-                // NIVEL 3: Extracción bajo demanda (Si no existe)
-                val uri = song.albumArtUriString
-                if (uri != null) {
-                    val extracted = extractColorsOptimized(song.id, uri)
-                    if (extracted != null) {
-                        // Guardar en DB y RAM solo resultados REALES. Un fallo de extracción
-                        // (imagen aún no descargada, error de carga) NO se persiste: persistirlo
-                        // con colores fallback lo hacía indistinguible de una carátula
-                        // legítimamente oscura/monocroma y bloqueaba el reintento natural
-                        // (columnas NULL en BD = se re-extrae cuando el artwork esté).
-                        musicRepository.saveColors(song.id, extracted.primary, extracted.secondary)
-                        memoryCache.put(song.id, extracted)
-                        return@withContext extracted
+        // try/finally y NO `.also {}`: dentro del `withLock` había `return` NO LOCALES (salían de
+        // la función entera), así que el bloque de limpieza era inalcanzable y el mapa se quedaba
+        // con un Mutex por cada canción cuyo color se hubiera pedido, de por vida del proceso.
+        try {
+            return mutex.withLock {
+                // Double-check después de adquirir lock
+                memoryCache.get(song.id) ?: withContext(Dispatchers.IO) {
+                    // NIVEL 2: Base de Datos (Persistencia)
+                    val dbColors = musicRepository.getColors(song.id)
+                    if (dbColors != null) {
+                        memoryCache.put(song.id, dbColors)
+                        return@withContext dbColors
                     }
-                }
 
-                // Sin carátula (o extracción fallida): null, NO un gris centinela. Ver KDoc.
-                return@withContext null
+                    // NIVEL 3: Extracción bajo demanda (Si no existe)
+                    val uri = song.albumArtUriString
+                    if (uri != null) {
+                        val extracted = extractColorsOptimized(song.id, uri)
+                        if (extracted != null) {
+                            // Guardar en DB y RAM solo resultados REALES. Un fallo de extracción
+                            // (imagen aún no descargada, error de carga) NO se persiste: persistirlo
+                            // con colores fallback lo hacía indistinguible de una carátula
+                            // legítimamente oscura/monocroma y bloqueaba el reintento natural
+                            // (columnas NULL en BD = se re-extrae cuando el artwork esté).
+                            musicRepository.saveColors(song.id, extracted.primary, extracted.secondary)
+                            memoryCache.put(song.id, extracted)
+                            return@withContext extracted
+                        }
+                    }
+
+                    // Sin carátula (o extracción fallida): null, NO un gris centinela. Ver KDoc.
+                    return@withContext null
+                }
             }
-        }.also {
-            // Cleanup: remove mutex only if not locked (no contention).
-            // Use remove(key, value) to avoid removing a different mutex.
+        } finally {
+            // Se quita solo si nadie lo tiene tomado, y con `remove(key, value)` para no borrar un
+            // Mutex distinto que otra llamada haya puesto en el mismo hueco.
+            //
+            // Queda una ventana: entre este `isLocked` y el `remove`, otra llamada puede haber
+            // recogido ESTE mutex y estar a punto de bloquearlo, con lo que una tercera crearía uno
+            // nuevo y esas dos no se serializarían entre sí. Es inofensivo —el peor caso es extraer
+            // dos veces el mismo color, que es determinista e idempotente en RAM y BD— y cerrarlo
+            // exigiría un refcount que no compensa para un caché de colores.
             val m = extractionMutexes[song.id]
             if (m != null && !m.isLocked) {
                 extractionMutexes.remove(song.id, m)
@@ -189,7 +201,7 @@ class ArtworkRepository @Inject constructor(
             try {
                 val request = ImageRequest.Builder(context)
                     .data(uri)
-                    .size(256) // 256px basta para el histograma cuantizado y cuesta 4x menos que 512
+                    .size(ANALYSIS_BITMAP_PX)
                     .allowHardware(false)
                     .memoryCachePolicy(CachePolicy.ENABLED)
                     .diskCachePolicy(CachePolicy.ENABLED)
@@ -197,6 +209,12 @@ class ArtworkRepository @Inject constructor(
 
                 val result = context.imageLoader.execute(request)
                 (result as? SuccessResult)?.image?.toBitmap()
+            } catch (e: CancellationException) {
+                // Se relanza SIEMPRE: esta extracción vive en un job que se cancela en cuanto
+                // cambia la canción, y tragarse la cancelación la convertía en un `null`
+                // indistinguible de "esta carátula no da color" — el caller lo trataba como
+                // fallo real en vez de como "ya no interesa".
+                throw e
             } catch (e: Exception) {
                 Log.e("ArtworkRepo", "Error loading image for $id", e)
                 null
@@ -206,8 +224,13 @@ class ArtworkRepository @Inject constructor(
         // Paso 2: Procesamiento de Color (CPU Bound)
         return withContext(Dispatchers.Default) {
             try {
-                val (primary, secondary) = processBitmapColors(bitmap, logId = id)
-                AlbumColors(primary, secondary)
+                // El MISMO seed crudo en los dos slots: la extracción automática no distingue por
+                // tema (nunca lo hizo — guardaba un color con dos tonos). Los slots siguen siendo
+                // por tema para que el override manual pueda diferenciarlos (ver [applyManualColor]).
+                val seed = extractSeedColor(bitmap, logId = id)
+                AlbumColors(seed, seed)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e("ArtworkRepo", "Error processing colors for $id", e)
                 null
@@ -220,16 +243,33 @@ class ArtworkRepository @Inject constructor(
     data class DebugColorInfo(
         val bitmap: Bitmap,
         val candidates: List<ColorCandidate>,
+        /**
+         * Acento GUARDADO de la canción (el de `songs.primary`/`secondary` según el tema). No es
+         * lo que se ve en pantalla: de aquí sale el seed del que el estilo de paleta deriva el
+         * `primary` real, que puede triplicarle el croma.
+         */
         val winnerColor: Int
     )
-    
+
     data class ColorCandidate(
         val color: Int,
         val weight: Int,
         val r: Int,
-        val g: Int, 
+        val g: Int,
         val b: Int,
-        val isWinner: Boolean
+        /** Es el candidato resaltado: o ES el acento guardado, o es el de matiz más cercano. */
+        val isWinner: Boolean,
+        /**
+         * El seed guardado es EXACTAMENTE este color, no solo su pariente de matiz. Es el caso
+         * NORMAL desde que el seed se persiste crudo (29 jul 2026), tanto si lo eligió el usuario
+         * como si lo eligió el análisis. Solo falla en las filas guardadas antes de ese cambio,
+         * que llevan el seed proyectado a T40/T80 y por tanto no coinciden en RGB con ningún
+         * candidato. La UI usa esto para no llamar "actual" a un color que no es el guardado.
+         *
+         * OJO: "guardado" no es lo mismo que "aplicado". El color aplicado es el `primary` que
+         * MaterialKolor deriva de este seed, y ese no está en la lista ni tiene por qué estarlo.
+         */
+        val isExact: Boolean = false
     )
 
     suspend fun debugExtractColors(
@@ -241,7 +281,11 @@ class ArtworkRepository @Inject constructor(
             try {
                 val request = ImageRequest.Builder(context)
                     .data(uri)
-                    .size(256) // Usar MISMA resolución que la lógica real (extractColorsOptimized)
+                    // MISMA resolución que la extracción real, y por eso comparten CONSTANTE: el
+                    // visor de candidatos tiene que enseñar lo que el algoritmo vio de verdad, y
+                    // dos literales acoplados por un comentario dejan de coincidir en cuanto uno
+                    // se toca — el visor mentiría sin que nada fallara.
+                    .size(ANALYSIS_BITMAP_PX)
                     .allowHardware(false)
                     .memoryCachePolicy(CachePolicy.DISABLED) // Forzar carga fresca
                     .diskCachePolicy(CachePolicy.ENABLED)
@@ -256,6 +300,11 @@ class ArtworkRepository @Inject constructor(
                 } else {
                     null
                 }
+            } catch (e: CancellationException) {
+                // Igual que en `extractColorsOptimized`: cambiar de canción con el visor de
+                // candidatos abierto cancela este job, y tragarse la cancelación lo presentaba
+                // como "esta carátula no tiene candidatos" en vez de como "ya no interesa".
+                throw e
             } catch (e: Exception) {
                 appLogger.error("Error in debugExtractColors: ${e.message}")
                 null
@@ -288,6 +337,33 @@ class ArtworkRepository @Inject constructor(
     private fun rankCandidates(populationByColor: Map<Int, Int>): List<ColorCandidate> {
         if (populationByColor.isEmpty()) return emptyList()
 
+        // PASO PREVIO: fuera los colores de tono extremo. [Score] solo descarta por croma
+        // (CUTOFF_CHROMA = 5.0) y pondera la PROPORCIÓN con peso 0.7 contra 0.3 del croma, así que
+        // en una portada mayoritariamente negra gana el negro del fondo si su croma pasa el corte
+        // por poco. Caso REAL medido (Scenes from a Memory, Dream Theater): ganaba #07070B, croma
+        // 5.3 —0.3 por encima del corte— y tono 2.0; el tema entero se sembraba con el fondo negro
+        // y, al re-tonalizarlo a T80 para `secondary`, el croma caía bajo el mismo 5.0 y la app se
+        // iba a Monochrome (gris) con una carátula llena de naranjas. System UI, sobre la MISMA
+        // portada, sacaba el naranja porque descarta los extremos de luminancia antes de rankear.
+        //
+        // Un color de tono 2 no es un acento: es el fondo. El corte se calibró sobre los seeds
+        // reales del log de una biblioteca de 777 canciones — los dos casos rotos estaban en tono
+        // 2.0 y 4.6, y el seed legítimo más oscuro (Black Clouds & Silver Linings) en 18.0, con el
+        // rojo de Fall Out Boy en 22.6. El hueco entre 4.6 y 18 es donde vive [MIN_SEED_TONE].
+        //
+        // El filtro va ANTES de [Score], no sobre su resultado: Score mide la proporción de cada
+        // hue sobre la población que recibe, así que quitar la masa negra sube el peso relativo de
+        // lo que sí sirve como acento. Filtrando después, una portada donde solo el negro pasara
+        // el corte devolvería lista vacía = "acromática", que es justo el diagnóstico equivocado.
+        val usable = populationByColor.filterKeys { argb ->
+            val tone = Hct.fromInt(argb).tone
+            tone >= MIN_SEED_TONE && tone <= MAX_SEED_TONE
+        }
+        // Si NO queda nada, la portada es íntegramente muy oscura o muy clara: se rankea el mapa
+        // original y que decida el croma. Vaciar la entrada aquí convertiría en "acromática" a
+        // cualquier portada de rango tonal estrecho, que es el error opuesto.
+        val scoreInput = usable.ifEmpty { populationByColor }
+
         // filter = true descarta acromáticos (croma < 5) y hues con presencia < 1%: es el filtro
         // de "sirve como acento" que al algoritmo anterior le faltaba (solo tenía tope de
         // saturación, nunca mínimo, y por eso un gris sucio masivo podía ganar).
@@ -296,7 +372,7 @@ class ArtworkRepository @Inject constructor(
         // cuando nada pasa el filtro, y una carátula en blanco y negro saldría azul. Con null la
         // lista vuelve VACÍA, que es justo la señal de "carátula acromática".
         val ranked = Score.score(
-            populationByColor,
+            scoreInput,
             desired = CANDIDATE_COUNT,
             fallbackColorArgb = null,
             filter = true
@@ -356,27 +432,25 @@ class ArtworkRepository @Inject constructor(
         savedColors: AlbumColors? = null
     ): DebugColorInfo {
         // Debug: Ejecutar la lógica REAL de producción para ver qué sale
-        val (extractedPrimary, extractedSecondary) = processBitmapColors(bitmap)
+        val extractedSeed = extractSeedColor(bitmap)
 
-        // El "ganador" depende del tema actual y de si hay colores guardados
-        // (que reflejan elecciones manuales del usuario):
-        // - Tema light: usa primary
-        // - Tema dark:  usa secondary
-        val winnerColor = if (savedColors != null) {
-            if (isDarkTheme) savedColors.secondary else savedColors.primary
-        } else {
-            if (isDarkTheme) extractedSecondary else extractedPrimary
-        }
+        // El seed guardado para el tema en curso. Los dos slots solo difieren si el usuario eligió
+        // un color a mano en uno de los dos temas (el automático escribe el mismo en ambos), así
+        // que sin `savedColors` el tema no interviene: el seed extraído es uno y el mismo.
+        val winnerColor = savedColors
+            ?.let { if (isDarkTheme) it.secondary else it.primary }
+            ?: extractedSeed
 
         // La lista NO se toca: los candidatos salen siempre en su orden de ranking, ni se
         // reordena ni se añaden filas. Lo único que cambia es cuál va resaltado — que el color
         // elegido saltara de posición entre aperturas del diálogo era justo lo que confundía.
         val candidates = extractCandidates(bitmap).take(CANDIDATE_COUNT)
 
-        // Cuál resaltar. Si el usuario eligió un color a mano, el actual ES uno de la lista y
-        // coincide exacto. Si viene del análisis, el aplicado es el seed re-tonalizado a T40/T80,
-        // así que no coincide en RGB pero sí conserva el MATIZ: se resalta el candidato del que
-        // proviene, que es el de hue más cercano.
+        // Cuál resaltar. Ahora que el seed se persiste CRUDO, lo normal es que coincida EXACTO con
+        // el candidato del que salió (elegido a mano o por el análisis, da igual). El emparejado
+        // por matiz sigue haciendo falta para las filas guardadas ANTES del cambio, que llevan el
+        // seed ya proyectado a T40/T80: ahí no coincide en RGB pero conserva el hue, así que se
+        // resalta el candidato del que proviene. Esas filas se arreglan al regenerar colores.
         val current = Hct.fromInt(winnerColor)
         val exactIndex = candidates.indexOfFirst {
             (it.color or OPAQUE_ALPHA_MASK) == (winnerColor or OPAQUE_ALPHA_MASK)
@@ -394,38 +468,45 @@ class ArtworkRepository @Inject constructor(
         return DebugColorInfo(
             bitmap,
             candidates.mapIndexed { index, candidate ->
-                candidate.copy(isWinner = index == highlighted)
+                candidate.copy(isWinner = index == highlighted, isExact = index == exactIndex)
             },
             winnerColor
         )
     }
 
     /**
-     * Los dos acentos persistidos de la carátula: `primary` (tema claro) y `secondary` (oscuro).
+     * El **seed** de la carátula: el color ganador de [Score] TAL CUAL está en la imagen, sin
+     * re-tonalizar. Es lo que se persiste en las columnas de color y de lo que sale todo lo demás.
      *
-     * El ganador de [Score] es el **seed**, y de él solo viajan hue y croma: el `ColorScheme` lo
-     * genera MaterialKolor, que reencuadra el TONO por rol (primary = T40 en claro, T80 en
-     * oscuro). Por eso ya no se buscan dos colores distintos con dos objetivos de luminancia y
-     * dos rescates de contraste, como hacía la versión anterior: era trabajo que el consumidor
-     * descartaba y que además SESGABA la elección del matiz — descartaba por rango el color más
-     * representativo del álbum si resultaba muy oscuro o muy claro, aunque su tono fuese perfecto.
+     * De él solo viajan hue y croma: el `ColorScheme` lo genera MaterialKolor, que reencuadra el
+     * TONO por rol (primary = T40 en claro, T80 en oscuro). Por eso no se buscan dos colores
+     * distintos con dos objetivos de luminancia y dos rescates de contraste, como hacía la versión
+     * anterior: era trabajo que el consumidor descartaba y que además SESGABA la elección del
+     * matiz — descartaba por rango el color más representativo del álbum si resultaba muy oscuro o
+     * muy claro, aunque su tono fuese perfecto.
      *
-     * El par se conserva (no es un solo color) porque la app lo usa 1:1 en sitios puntuales
-     * —`albumAccent` en el MiniPlayer— y porque el override manual guarda uno u otro según el
-     * tema. Se derivan por tono HCT, que es como M3 construye el rol `primary`: eso da el
-     * contraste POR CONSTRUCCIÓN (40 puntos de diferencia en tono HCT ya garantizan ratio ≥ 3.0),
-     * sin validar ni rescatar nada a posteriori.
+     * **Devuelve UN color, no un par, y esa es la corrección de fondo** (29 jul 2026). Hasta esta
+     * fecha se persistía el seed ya proyectado a T40/T80, y esa proyección PIERDE CROMA contra el
+     * gamut sRGB de forma irreversible: medido sobre una portada real, un rojo de croma 80.1
+     * guardado a T80 baja a 29.4 y de ahí no vuelve. Como el tema se seedea justamente de esa
+     * columna, el acento de toda la app nacía de un color ya aplastado — un rojo intenso acababa
+     * en un terroso, y `withVividPrimary` no podía recuperarlo porque su techo es el croma del
+     * seed que recibe. El tono es una propiedad del TEMA, no del álbum, así que quien pinta el
+     * acento 1:1 lo calcula al pintar con [accentForTheme]; guardar la proyección en vez del
+     * original era guardar menos información de la que ya se tenía en la mano.
+     *
+     * Las dos columnas siguen existiendo y siguen siendo por tema, porque el override manual es
+     * granular (ver [applyManualColor]): ahí SÍ puede haber dos seeds distintos, uno elegido en
+     * claro y otro en oscuro. Lo que desaparece es el par derivado, que nunca fueron dos colores
+     * sino uno con dos tonos.
      */
-    private fun processBitmapColors(bitmap: Bitmap, logId: String? = null): Pair<Int, Int> {
+    private fun extractSeedColor(bitmap: Bitmap, logId: String? = null): Int {
         val populationByColor = quantizeOpaquePixels(bitmap)
-        // Acento neutro para carátulas sin color: GRIS PURO (croma 0) en los mismos tonos que el
-        // camino normal, no negro/blanco. Negro puro se veía como "#000000" en el selector —
-        // parecía un fallo, no una decisión— y como acento 1:1 (albumAccent del MiniPlayer) es
-        // ilegible. El croma 0 sigue disparando el esquema Monochrome del tema igual de bien.
-        val neutral = Pair(
-            Hct.from(0.0, 0.0, LIGHT_THEME_ACCENT_TONE).toInt(),
-            Hct.from(0.0, 0.0, DARK_THEME_ACCENT_TONE).toInt()
-        )
+        // Seed neutro para carátulas sin color: GRIS PURO (croma 0), no negro/blanco. Negro puro se
+        // veía como "#000000" en el selector —parecía un fallo, no una decisión— y como acento 1:1
+        // es ilegible. El croma 0 sigue disparando el esquema Monochrome del tema igual de bien, y
+        // el tono da igual porque este color se re-tonaliza al pintarlo (ver [NEUTRAL_SEED_TONE]).
+        val neutral = Hct.from(0.0, 0.0, NEUTRAL_SEED_TONE).toInt()
 
         val candidates = rankCandidates(populationByColor)
 
@@ -460,12 +541,17 @@ class ArtworkRepository @Inject constructor(
             COLOR_LOG_CATEGORY,
             // Con decimal: el corte de Score está en 5.0 y un seed de 5.4 (carátula sepia apenas
             // teñida) se lee igual que uno de 5.9 si se trunca, justo donde hay que discriminar.
-            "${logId ?: "debug"}: seed $seedHex croma ${"%.1f".format(seed.chroma)}"
+            //
+            // El TONO va en la línea porque su ausencia fue lo que escondió el caso de Scenes from
+            // a Memory: el log decía "croma 5.3" —que parece un sepia apagado normal— cuando el
+            // seed era un negro de tono 2.0. Con las dos cifras, un fondo colándose como acento se
+            // reconoce de un vistazo.
+            "${logId ?: "debug"}: seed $seedHex croma ${"%.1f".format(seed.chroma)} " +
+                "tono ${"%.1f".format(seed.tone)}"
         )
-        return Pair(
-            seed.withTone(LIGHT_THEME_ACCENT_TONE).toInt(),
-            seed.withTone(DARK_THEME_ACCENT_TONE).toInt()
-        )
+        // CRUDO, sin `withTone`: ver el KDoc. La proyección a T40/T80 la hace [accentForTheme] en
+        // el punto de uso, que es el único que sabe en qué tema se está pintando.
+        return candidates.first().color
     }
 
     companion object {
@@ -482,14 +568,54 @@ class ArtworkRepository @Inject constructor(
          * pipeline había extraído bien. Es el mismo error de fondo que ya se corrigió en la
          * extracción: umbrales de claridad que no son comparables entre sí.
          *
-         * El neutro de una carátula sin matiz ([processBitmapColors]) se construye con croma 0
+         * El neutro de una carátula sin matiz ([extractSeedColor]) se construye con croma 0
          * EXACTO, así que el caso B&N real sigue detectándose por construcción.
+         *
+         * Desde el 29 jul 2026 juzga el seed CRUDO, que es lo correcto: es el mismo color sobre el
+         * que [Score] aplicó su corte de croma. Antes juzgaba el seed ya proyectado a T40/T80, cuyo
+         * croma es otro (medido: 80.1 crudo → 29.4 a T80), así que un color en el filo podía caer a
+         * un lado del umbral en la extracción y al otro aquí.
          */
         fun isAchromatic(argb: Int): Boolean = Hct.fromInt(argb).chroma < MIN_ACCENT_CHROMA
+
+        /**
+         * El acento LISTO PARA PINTAR que le toca a [seedArgb] en el tema en curso.
+         *
+         * Las columnas de color guardan el **seed CRUDO** de la carátula, no un color de rol (ver
+         * [extractSeedColor]). El tono es una propiedad del tema y no del álbum, así que la
+         * proyección a T40/T80 se hace aquí, en el punto de uso. Este es el ÚNICO sitio que la
+         * hace: tenerla en dos lados es la forma más fácil de que dos superficies pinten acentos
+         * distintos para la misma canción.
+         *
+         * Lo llaman las superficies que usan el acento **1:1** — el widget (que no tiene un
+         * `MaterialTheme` seedeado y necesita un color ya listo) y el resaltado de la fila que
+         * suena. Quien seedea un tema M3 NO debe llamarlo: ahí el seed va crudo y MaterialKolor
+         * reencuadra cada rol por su cuenta, que es justamente el croma que se estaba perdiendo.
+         *
+         * Es **idempotente sobre los datos viejos**: una fila guardada con el esquema anterior ya
+         * contiene el T40/T80, y re-tonalizarla a su propio tono la deja igual. Por eso estas dos
+         * superficies no cambian ni un píxel al migrar de esquema, ni siquiera antes de regenerar
+         * los colores — lo único que sigue apagado hasta la regeneración es el seed del tema.
+         */
+        fun accentForTheme(seedArgb: Int, isDarkTheme: Boolean): Int =
+            Hct.fromInt(seedArgb)
+                .withTone(if (isDarkTheme) DARK_THEME_ACCENT_TONE else LIGHT_THEME_ACCENT_TONE)
+                .toInt()
 
         // Entradas del caché de colores en RAM (~16KB): cubre bibliotecas medianas-grandes
         // sin re-extraer al scrollear.
         private const val COLOR_CACHE_ENTRIES = 2000
+
+        /**
+         * Lado en px al que se reduce la carátula ANTES de cuantizarla. Lo comparten la
+         * extracción real y el visor de candidatos del diálogo de color: si difirieran, el visor
+         * enseñaría un ranking distinto del que la app aplicó.
+         *
+         * El coste del cuantizador es proporcional al nº de píxeles, así que doblar el lado lo
+         * cuadruplica; a este tamaño la población de cada color ya es representativa (son
+         * ~65.000 muestras para 128 grupos) y subir no cambia el ganador.
+         */
+        private const val ANALYSIS_BITMAP_PX = 256
 
         // Colores que el quantizer produce antes de rankear. 128 es el valor que usa Android
         // para los colores del fondo de pantalla con este mismo pipeline.
@@ -511,6 +637,23 @@ class ArtworkRepository @Inject constructor(
         // de ningún candidato y emparejarlo por hue daría un resultado arbitrario.
         private const val MIN_ACCENT_CHROMA = 5.0
 
+        // Rango de TONO (L* de CIELAB, 0..100) en el que un color puede aspirar a ser el seed del
+        // tema. Es un filtro distinto del croma y previo a [Score] (ver [rankCandidates]): el
+        // croma dice "tiene matiz", el tono dice "es un color, no el fondo ni el papel".
+        //
+        // Calibrado con los seeds REALES de una biblioteca de 777 canciones: los dos únicos casos
+        // rotos estaban en tono 2.0 (#07070B) y 4.6 (#110F14) —ambos con croma apenas sobre 5, que
+        // es lo que les dejaba pasar— mientras que el seed legítimo más oscuro estaba en 18.0 y el
+        // más claro en 93.2. El corte vive en el hueco entre 4.6 y 18, con margen para no rozar
+        // ninguno de los dos lados.
+        //
+        // NO confundir con el filtro de FRACCIÓN CROMÁTICA que se probó y descartó el 21 jul 2026:
+        // aquel medía qué porcentaje de la portada tenía color y mandaba a gris portadas que sí lo
+        // tenían (Parasomnia). Este mira el tono de CADA candidato y no altera el caso B&N, cuyos
+        // candidatos ya caen antes por croma.
+        private const val MIN_SEED_TONE = 10.0
+        private const val MAX_SEED_TONE = 95.0
+
         // Categoría propia en AppLogger: el diagnóstico de color no es un error ni pertenece a
         // reproducción.
         private const val COLOR_LOG_CATEGORY = "COLOR"
@@ -522,7 +665,16 @@ class ArtworkRepository @Inject constructor(
         // No son estéticos: 40 puntos de diferencia en tono HCT garantizan un contraste ≥ 3.0
         // contra el fondo del tema (ver KDoc de Hct), que es lo que antes se intentaba asegurar
         // a posteriori con umbrales de luminancia WCAG y colores de rescate hardcodeados.
+        //
+        // Los usa SOLO [accentForTheme], al pintar. La extracción ya no los aplica: persistir el
+        // seed proyectado a estos tonos era lo que le costaba el croma al acento de toda la app.
         private const val LIGHT_THEME_ACCENT_TONE = 40.0
         private const val DARK_THEME_ACCENT_TONE = 80.0
+
+        // Tono del gris que representa una carátula SIN matiz. Da igual cuál sea —lo que importa
+        // es el croma 0, que es lo que dispara el esquema Monochrome, y quien lo pinta lo
+        // re-tonaliza igual—, así que se elige el centro de la escala: no sugiere ningún tema, a
+        // diferencia de un T40 o un T80, que ahora significarían "ya proyectado".
+        private const val NEUTRAL_SEED_TONE = 50.0
     }
 }

@@ -37,12 +37,22 @@ private suspend fun ensureReady(controller: MusicController): Boolean {
     // Espera por SEÑAL (conexión y cola restaurada son estado observable), no por poll.
     // Sin sesión guardada la cola nunca se llena: el timeout corta y el fallback manda el
     // comando igual si al menos hay conexión (no-op inofensivo sobre cola vacía).
-    return withTimeoutOrNull(6_000) {
+    return withTimeoutOrNull(WIDGET_READY_TIMEOUT_MS) {
         controller.connectionState.first { it }
         controller.playlist.first { it.isNotEmpty() }
         true
     } ?: controller.isConnected
 }
+
+/**
+ * Margen para que el reproductor esté listo tras pulsar un botón del widget.
+ *
+ * Corto a propósito, al revés que los timeouts defensivos del resto de la app (convención 12):
+ * aquí el usuario está mirando su pantalla de inicio esperando que la música reaccione, así que
+ * pasado este punto es mejor mandar el comando a ciegas —el fallback de abajo— que seguir
+ * esperando. Solo se agota cuando no hay sesión guardada y la cola nunca llega a llenarse.
+ */
+private const val WIDGET_READY_TIMEOUT_MS = 6_000L
 
 class PlayPauseAction : ActionCallback {
     override suspend fun onAction(context: Context, glanceId: GlanceId, parameters: ActionParameters) {

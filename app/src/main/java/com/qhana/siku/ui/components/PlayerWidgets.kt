@@ -1,8 +1,6 @@
 package com.qhana.siku.ui.components
 
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -26,6 +24,8 @@ import androidx.compose.ui.unit.dp
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.HazeTint
 import dev.chrisbanes.haze.hazeEffect
+
+import com.qhana.siku.ui.theme.appSpatialSpec
 
 /**
  * Chip tonal Material 3 Expressive.
@@ -90,6 +90,24 @@ fun onAccentContentColor(container: Color): Color {
 }
 
 /**
+ * NO reintroducir: reencuadrar el par `on*Container` de M3 para devolverle croma al glifo.
+ *
+ * Se implementó y se REVIRTIÓ el 29 jul 2026, con la medición hecha. El punto de partida era real:
+ * `onSecondaryContainer` pasa de tono 73.7 con saturación 0.39 en el estilo "fiel a la carátula" a
+ * **97.5 con 0.05** en "vibrante", así que los iconos de prev/next perdían el color de la paleta y
+ * quedaban como lo más brillante del transporte, por encima del play. La función acercaba el glifo al
+ * contenedor hasta el tono mínimo que aún cumplía 4.5:1 (97.5 → 86.5), lo que recupera croma porque
+ * cerca del blanco el gamut sRGB no admite color.
+ *
+ * Por qué se cayó: **el glifo de un botón no se juzga contra su contenedor, se juzga contra el resto
+ * de la pantalla**. En "vibrante" el texto, los chips y los títulos son blancos —cada uno con su par
+ * `on*` de M3—, así que un icono crema entre ellos se lee como apagado, no como más colorido. Y
+ * llevar el mismo tratamiento al texto no era opción: en texto pequeño apurar el mínimo AA es peor
+ * que perder croma. O se aplicaba a todo o a nada, y la coherencia manda: se deja que M3 decida
+ * uniformemente en toda la pantalla.
+ */
+
+/**
  * Ratio de contraste WCAG entre dos colores: (L_claro + 0.05) / (L_oscuro + 0.05), en [1, 21].
  */
 fun contrastRatio(a: Color, b: Color): Float {
@@ -142,28 +160,6 @@ fun vividAccentColor(base: Color): Color {
     if (hsv[1] >= 0.15f) hsv[1] = hsv[1].coerceAtLeast(0.65f)
     hsv[2] = hsv[2].coerceIn(0.75f, 0.95f)
     return Color(android.graphics.Color.HSVToColor(hsv))
-}
-
-/**
- * Acento del álbum para el tema actual (secondary en oscuro, primary en claro).
- *
- * El color de la carátula es UNA lectura y se aplica TAL CUAL — sin mezclas hacia blanco/negro
- * ni coerción de luminancia. Una carátula blanco y negro da su par NEGRO/BLANCO real
- * (`processBitmapColors`) y así debe verse; distorsionarlo sería inventar un color que no está.
- *
- * El ÚNICO caso con fallback neutro es "no hay carátula" — que ahora llega como [albumColors]
- * `null` (ver `ArtworkRepository.getAlbumColors`), un estado distinto de "carátula oscura/clara".
- * No hay gris centinela que confundir, así que no hace falta ninguna guarda por luminancia.
- *
- * @param fallback color a usar cuando no hay [albumColors] (por defecto blanco/negro según tema).
- */
-fun albumAccent(
-    albumColors: com.qhana.siku.data.model.AlbumColors?,
-    isDarkTheme: Boolean,
-    fallback: Color = if (isDarkTheme) Color.White else Color.Black
-): Color {
-    albumColors ?: return fallback
-    return Color(if (isDarkTheme) albumColors.secondary else albumColors.primary)
 }
 
 /**
@@ -243,7 +239,8 @@ fun UnifiedProgressBar(
 
     val thumbSize by animateDpAsState(
         targetValue = if (showThumb && (isDragging || isPressed)) 18.dp else 0.dp,
-        animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
+        // Spatial: es un tamaño. El rebote del token es lo que le da el "pop" al agarrar el thumb.
+        animationSpec = appSpatialSpec(),
         label = "ThumbSize"
     )
 

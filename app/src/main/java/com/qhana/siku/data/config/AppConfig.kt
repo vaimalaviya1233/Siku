@@ -13,9 +13,39 @@ object AppConfig {
     // CDNs públicos; si una tarda más que esto, la UI ya mostró su placeholder.
     const val IMAGE_TIMEOUT_SECONDS = 20L
 
+    /**
+     * Cliente "lyrics" (LrcLib + Deezer): APIs públicas de terceros que devuelven JSON pequeño.
+     * Más corto que [API_TIMEOUT_SECONDS] a propósito — Graph sostiene el sync y la reproducción
+     * y merece paciencia, mientras que una letra o una foto de artista que tarda es una mejora
+     * opcional: rendirse pronto libera el hilo y la UI ya tiene su estado de "no encontrado".
+     */
+    const val THIRD_PARTY_API_TIMEOUT_SECONDS = 10L
+
     // Conversión bytes↔GB del tope de descargas. Vive acá porque la usan tanto el ViewModel
     // (persistir el tope) como la UI del slider (derivar su máximo del disco real).
     const val BYTES_PER_GB = 1024f * 1024f * 1024f
+
+    /**
+     * Margen al comparar el tamaño de un archivo descargado con el que declara el proveedor.
+     * Los tags que se reescriben en local (ReplayGain, carátula, letras) mueven el tamaño unos
+     * bytes, así que la igualdad exacta no sirve como criterio de integridad.
+     */
+    const val FILE_SIZE_TOLERANCE_BYTES = 1024L
+
+    /**
+     * true si [length] se queda notablemente CORTO frente a [expectedSize] (descarga truncada).
+     * Con tamaño esperado desconocido (<= 0) no se puede juzgar: false.
+     *
+     * Única definición de "¿están todos los bytes?" en la app. La usan el downloader (para
+     * descartar restos truncados) y el recovery de reproducción (para distinguir un archivo
+     * completo que el decoder no traga —fallo de formato/hardware— de uno a medio bajar). Cada
+     * uno tenía su propia copia del umbral, y con distinta forma: una comparaba la diferencia
+     * con signo y la otra su valor absoluto, de modo que un archivo MÁS grande que lo declarado
+     * —lo normal tras reescribir tags— contaba como íntegro en un sitio y como sospechoso en el
+     * otro. La comparación con signo es la correcta: sobrar bytes no es estar incompleto.
+     */
+    fun looksTruncated(length: Long, expectedSize: Long): Boolean =
+        expectedSize > 0 && expectedSize - length > FILE_SIZE_TOLERANCE_BYTES
 
     /**
      * Carpeta de OneDrive que se escanea mientras el usuario no elija otra. `Music` es la que

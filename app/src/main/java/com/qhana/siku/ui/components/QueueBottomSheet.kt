@@ -69,13 +69,9 @@ fun QueueBottomSheet(
     var localPlaylist by remember { mutableStateOf(playlist) }
     var localCurrentIndex by remember { mutableIntStateOf(currentIndex) }
 
-    // Sincronizar solo cuando cambia la referencia de playlist (no en cada frame)
-    LaunchedEffect(playlist) {
-        localPlaylist = playlist
-    }
-    LaunchedEffect(currentIndex) {
-        localCurrentIndex = currentIndex
-    }
+    // Una lista del controller que llegó a mitad de un arrastre y todavía no se aplicó. La
+    // sincronización se pospone (ver más abajo) y hay que recordar que quedó pendiente.
+    var syncDeferred by remember { mutableStateOf(false) }
 
     // Tamaño cacheado como estado derivado
     val playlistSize by remember { derivedStateOf { localPlaylist.size } }
@@ -104,14 +100,41 @@ fun QueueBottomSheet(
         }
     }
 
+    // Sincronizar solo cuando cambia la referencia de playlist (no en cada frame), y NUNCA con el
+    // dedo puesto: la lista del controller reemite sola (p. ej. al refrescar la URL de la canción
+    // siguiente), y pisar la copia local a mitad del arrastre dejaba `initialDragIndex`/
+    // `currentDragIndex` apuntando a una lista que ya no es la que se ve — el reorden final movía
+    // la canción equivocada. Lo que llegue durante el arrastre se aplica al soltar.
+    LaunchedEffect(playlist) {
+        if (reorderState.isAnyItemDragging) {
+            syncDeferred = true
+        } else {
+            localPlaylist = playlist
+            syncDeferred = false
+        }
+    }
+    LaunchedEffect(currentIndex) {
+        localCurrentIndex = currentIndex
+    }
+
     // Detectar fin del arrastre
     LaunchedEffect(reorderState.isAnyItemDragging) {
         if (!reorderState.isAnyItemDragging) {
             val start = initialDragIndex
             val end = currentDragIndex
 
-            if (start != null && end != null && start != end) {
-                onReorder(start, end)
+            val reordered = start != null && end != null && start != end
+            if (reordered) {
+                onReorder(start!!, end!!)
+            }
+
+            // Con reorden no se toca la copia local: el orden que se ve ES el que se acaba de
+            // pedir, y la emisión que provoque `onReorder` lo confirmará. Sin él, en cambio, hay
+            // que aplicar la lista que se dejó pasar durante el arrastre o la cola se queda
+            // enseñando un orden que ya no existe.
+            if (!reordered && syncDeferred) {
+                localPlaylist = playlist
+                syncDeferred = false
             }
 
             initialDragIndex = null

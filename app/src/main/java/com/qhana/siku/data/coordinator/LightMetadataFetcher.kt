@@ -133,6 +133,8 @@ class LightMetadataFetcher @Inject constructor(
                     artist = meta.artist?.takeIf { it.isNotBlank() } ?: song.artist,
                     album = album,
                     genre = meta.genre?.takeIf { it.isNotBlank() },
+                    trackNumber = meta.trackNumber,
+                    year = meta.year,
                     durationMs = meta.durationMs
                 )
                 updated.incrementAndGet()

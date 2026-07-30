@@ -56,8 +56,15 @@ class LyricsWriter @Inject constructor(
         val lyricsFolder = musicPreferences.loadLyricsFolderUri()
         val needsLyricsFolder = location is AudioLocation.MediaStoreItem
 
+        // Carpeta concedida SOLO con lectura (heredada de la 1.0.1): ni se puede crear el .lrc al
+        // lado ni reescribir el audio. Bloquea las DOS opciones, y se comprueba antes que nada
+        // porque el fallo sería una SecurityException a mitad de escribir.
+        val folderIsReadOnly = location is AudioLocation.SafDocument &&
+            !locationResolver.canWriteTreeOf(location.uri)
+
         val lrc = when {
             goesToCloud && song.remoteId == null -> SaveOption.Blocked(SaveBlocker.NO_REMOTE_HANDLE)
+            folderIsReadOnly -> SaveOption.Blocked(SaveBlocker.FOLDER_READ_ONLY)
             needsLyricsFolder && lyricsFolder == null -> SaveOption.Blocked(SaveBlocker.NO_LYRICS_FOLDER)
             needsLyricsFolder -> SaveOption.Available(cloudEffects + SaveEffect.SAVED_TO_LYRICS_FOLDER)
             else -> SaveOption.Available(cloudEffects)
@@ -65,6 +72,7 @@ class LyricsWriter @Inject constructor(
 
         val embedded = when {
             location is AudioLocation.Cloud -> SaveOption.Blocked(SaveBlocker.NOT_DOWNLOADED)
+            folderIsReadOnly -> SaveOption.Blocked(SaveBlocker.FOLDER_READ_ONLY)
             !embeddedWriter.supports(fileName) -> SaveOption.Blocked(SaveBlocker.FORMAT_UNSUPPORTED)
             else -> SaveOption.Available(cloudEffects + SaveEffect.REWRITES_FILE)
         }
@@ -309,7 +317,15 @@ enum class SaveBlocker {
     NO_LYRICS_FOLDER,
 
     /** Canción de nube sin handle remoto (fila antigua): no se sabe a qué archivo corresponde. */
-    NO_REMOTE_HANDLE
+    NO_REMOTE_HANDLE,
+
+    /**
+     * La carpeta que contiene la canción se concedió solo con LECTURA, así que no se puede crear
+     * el `.lrc` ni reescribir el audio. Le pasa a las carpetas elegidas con la 1.0.1, que es
+     * cuando aún no había nada que escribir. Se arregla volviendo a autorizar la carpeta desde
+     * Ajustes → Fuentes; el permiso no se puede ampliar sin pasar de nuevo por el selector.
+     */
+    FOLDER_READ_ONLY
 }
 
 sealed interface LyricsSaveResult {

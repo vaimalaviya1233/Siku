@@ -48,6 +48,7 @@ import com.qhana.siku.data.local.GenreSummary
 import com.qhana.siku.ui.components.AdaptiveCollage
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.TonalChip
+import com.qhana.siku.ui.theme.AppBoundsTransform
 
 /**
  * Pestaña "Géneros": cuadrícula de 2 columnas, misma familia visual que Álbumes (tarjeta con
@@ -144,6 +145,7 @@ fun GenresScreen(
         items(genres, key = { it.name }) { genre ->
             GenreTileCard(
                 genre = genre,
+                modifier = Modifier.animateItem(),
                 onClick = { onGenreClick(genre.name) },
                 onPlayClick = { onPlayGenre(genre.name) },
                 sharedTransitionScope = sharedTransitionScope,
@@ -178,7 +180,9 @@ private fun GenreTileCard(
             with(sharedTransitionScope) {
                 Modifier.sharedBounds(
                     sharedContentState = rememberSharedContentState(key = "genre_image_${genre.name}"),
-                    animatedVisibilityScope = animatedVisibilityScope
+                    animatedVisibilityScope = animatedVisibilityScope,
+                    // Spring del tema en vez del default de la API (ver AppBoundsTransform).
+                    boundsTransform = AppBoundsTransform
                 )
             }
         } else Modifier

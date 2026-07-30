@@ -391,6 +391,7 @@
     <!-- %1$s = nombre de la carpeta de letras elegida -->
     <string name="lyrics_save_effect_lyrics_folder">Se guardará en «%1$s», no junto a la canción: Android no lo permite al escanear todo el dispositivo. Otros reproductores no lo encontrarán ahí.</string>
     <string name="lyrics_save_blocked_no_remote">No se sabe a qué archivo de la nube corresponde.</string>
+    <string name="lyrics_save_blocked_folder_read_only">Esta carpeta se autorizó solo para lectura. Vuelve a autorizarla en Ajustes → Fuentes para poder guardar letras en ella.</string>
     <!-- Resultados -->
     <string name="lyrics_save_ok_lrc">Letra guardada en un archivo .lrc</string>
     <string name="lyrics_save_ok_embedded">Letra guardada dentro de la canción</string>
@@ -429,11 +430,25 @@
     <string name="eq_boost_section">Refuerzo</string>
     <string name="eq_boost_bass">Graves</string>
     <string name="eq_boost_treble">Agudos</string>
+    <string name="eq_boost_center">Frecuencia</string>
     <!-- %1$s = ganancia con signo, p. ej. "+11,4" -->
     <string name="eq_headroom_label">Ganancia máxima: %1$s dB</string>
     <string name="eq_headroom_ok">Margen de sobra: no va a saturar.</string>
     <string name="eq_headroom_caution">Puede saturar a volumen alto.</string>
     <string name="eq_headroom_risk">Va a saturar salvo que bajes el volumen.</string>
+    <string name="eq_headroom_limited">El limitador evitará que sature, reduciendo el nivel en los picos.</string>
+    <string name="eq_headroom_bluetooth">Por Bluetooth el volumen suele controlarlo el auricular, así que bajarlo aquí no da margen. Activa el limitador o baja el preamp.</string>
+
+    <string name="eq_protection_section">Protección de nivel</string>
+    <string name="eq_preamp">Preamp</string>
+    <string name="eq_preamp_apply_suggested">Sugerido: %1$s dB</string>
+    <string name="eq_limiter">Limitador</string>
+    <string name="eq_limiter_desc">Baja los picos que pasan del umbral. En 0 dB solo evita el recorte; más abajo, comprime.</string>
+    <string name="eq_limiter_threshold">Umbral</string>
+    <string name="eq_limiter_threshold_auto">Automático (0 dBFS: solo evita el recorte)</string>
+    <string name="eq_limiter_meter">Reducción</string>
+    <string name="eq_limiter_meter_would">Reduciría</string>
+    <string name="eq_limiter_idle">Sin actuar</string>
     <string name="eq_preset_flat">Plano</string>
     <string name="eq_preset_rock">Rock</string>
     <string name="eq_preset_pop">Pop</string>
@@ -581,6 +596,8 @@
     </plurals>
     <string name="source_local_title">Carpetas de música</string>
     <string name="source_local_desc">Elige carpetas concretas, subcarpetas incluidas.</string>
+    <string name="source_local_folder_read_only">Autorizada solo para lectura: no se pueden guardar letras aquí.</string>
+    <string name="source_local_folder_reauthorize">Volver a autorizar</string>
     <string name="source_device_title">Todo el dispositivo</string>
     <string name="source_device_desc">Toda la música guardada en el teléfono, sin elegir carpetas.</string>
     <string name="source_device_active">Escaneando toda la música del dispositivo</string>
@@ -623,6 +640,9 @@
     <string name="settings_regenerating">Regenerando…</string>
     <string name="settings_regenerate_colors">Regenerar colores de temas</string>
     <string name="settings_regenerate_desc">Obliga a re-analizar las carátulas con el nuevo algoritmo de color.</string>
+    <string name="settings_regenerate_confirm_title">¿Regenerar los colores?</string>
+    <string name="settings_regenerate_confirm_message">Se volverán a analizar todas las carátulas. Los colores que hayas elegido a mano se perderán y no se pueden recuperar.</string>
+    <string name="settings_regenerate_confirm_action">Regenerar</string>
     <string name="settings_solid_bg">Fondo sólido en el reproductor</string>
     <string name="settings_solid_bg_desc">Usa un color sólido del tema en lugar del degradado de la carátula.</string>
     <string name="settings_wavy_progress">Barra de progreso ondulada</string>
@@ -633,9 +653,9 @@
     <!-- Estilo de paleta: cómo se genera el tema a partir del color de la carátula -->
     <string name="settings_palette_style">Estilo de color</string>
     <string name="settings_palette_tonalspot">Equilibrado</string>
-    <string name="settings_palette_tonalspot_desc">El de Android. Color moderado y constante.</string>
+    <string name="settings_palette_tonalspot_desc">El del tema del sistema (fondo de pantalla). Moderado y constante en todas las carátulas.</string>
     <string name="settings_palette_vibrant">Vibrante</string>
-    <string name="settings_palette_vibrant_desc">Color al máximo. Puede intensificar carátulas apagadas.</string>
+    <string name="settings_palette_vibrant_desc">Color al máximo, como los controles de música de la barra de notificaciones. Puede intensificar carátulas apagadas.</string>
     <string name="settings_palette_content">Fiel a la carátula</string>
     <string name="settings_palette_content_desc">La intensidad sigue a la portada; superficies más neutras.</string>
     <string name="settings_palette_fidelity">Fidelidad</string>
@@ -643,7 +663,7 @@
     <string name="settings_palette_neutral">Neutro</string>
     <string name="settings_palette_neutral_desc">Casi gris, con un matiz mínimo del álbum.</string>
     <string name="settings_palette_expressive">Expresivo</string>
-    <string name="settings_palette_expressive_desc">Reinterpreta el tono: colores que no están en la portada.</string>
+    <string name="settings_palette_expressive_desc">El acento sigue a la portada, pero los fondos se van al color complementario.</string>
     <string name="settings_palette_rainbow">Arcoíris</string>
     <string name="settings_palette_rainbow_desc">Juguetón, con acentos muy saturados.</string>
     <string name="settings_palette_fruitsalad">Frutal</string>
@@ -674,6 +694,11 @@
     <!-- ==================== Selector de color ==================== -->
     <string name="color_picker_title">Seleccionar color</string>
     <string name="color_picker_prompt">Toca un color para aplicarlo:</string>
+    <string name="color_picker_legend">El círculo es el color de la carátula; la barra, el acento que generaría.</string>
+    <string name="color_picker_applied">Aplicado ahora: %1$s</string>
+    <string name="color_picker_seed">Del acento guardado %1$s</string>
+    <string name="color_picker_current">actual</string>
+    <string name="color_picker_hue_source">origen del actual</string>
     <string name="color_picker_no_art">Esta canción todavía no tiene carátula para analizar</string>
 
     <!-- ==================== Biblioteca: pestañas / sync / orden / logout ==================== -->
@@ -799,9 +824,13 @@
     <string name="error_hardware_skipping">Error de hardware. Saltando…</string>
     <string name="error_incompatible_skipping">Archivo incompatible. Saltando…</string>
     <string name="error_url_skipping">Error recuperando URL. Saltando…</string>
+    <string name="error_playback_skipping">No se pudo reproducir. Saltando…</string>
     <string name="error_no_deezer">Sin conexión con Deezer</string>
     <string name="error_playback_load">Error al reproducir canción</string>
     <string name="error_playback_generic">Error de reproducción</string>
+    <string name="error_playback_network_persistent">Error de red persistente</string>
+    <string name="error_playback_file_not_found">Archivo no encontrado</string>
+    <string name="error_playback_format_unsupported">No se puede reproducir este formato</string>
 
     <!-- ==================== Permisos ==================== -->
 

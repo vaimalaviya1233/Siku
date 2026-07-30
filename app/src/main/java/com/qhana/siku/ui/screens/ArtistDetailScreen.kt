@@ -16,9 +16,7 @@ import androidx.compose.material3.*
 import androidx.compose.material3.MaterialTheme.colorScheme
 import androidx.compose.runtime.*
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -59,6 +57,9 @@ import com.qhana.siku.ui.viewmodel.ArtistPickerState
 import com.qhana.siku.ui.viewmodel.BrowseViewModel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+
+import com.qhana.siku.ui.theme.appEffectsSpec
+import com.qhana.siku.ui.theme.AppBoundsTransform
 
 /**
  * Ancho de cada álbum del carrusel. Algo más que los 140dp que llevaba con la tarjeta vieja:
@@ -145,7 +146,11 @@ fun ArtistDetailScreen(
             rawTitleFraction >= 0.5f -> 1f
             else -> 0f
         },
-        animationSpec = spring(stiffness = Spring.StiffnessMedium),
+        // `defaultEffects` y no un token spatial, aunque esta fracción también MUEVA el título: es
+        // el único juego de tokens sin rebote, y aquí el rebote sería una oscilación del título cada
+        // vez que se suelta el scroll. Además alimenta un alpha, que no puede pasar de 1.
+        // (Físicamente equivale al `spring(StiffnessMedium)` que había a mano: 1500 → 1600.)
+        animationSpec = appEffectsSpec(),
         label = "topBarFraction"
     )
     // Anclas medidas de la transición del título (coordenadas en root).
@@ -222,7 +227,9 @@ fun ArtistDetailScreen(
                                 showArtist = false,
                                 onClick = { onAlbumClick(album.name) },
                                 onPlayClick = { playAlbum(album.name) },
-                                modifier = Modifier.width(ArtistAlbumCardWidth)
+                                modifier = Modifier
+                                    .animateItem()
+                                    .width(ArtistAlbumCardWidth)
                             )
                         }
                     }
@@ -261,6 +268,7 @@ fun ArtistDetailScreen(
                         color = colorScheme.surfaceContainer,
                         shape = rememberListItemShape(index, songs.size),
                         modifier = Modifier
+                            .animateItem()
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 1.dp)
                     ) {
@@ -446,7 +454,9 @@ private fun ArtistImmersiveHeader(
         with(sharedTransitionScope) {
             Modifier.sharedBounds(
                 sharedContentState = rememberSharedContentState(key = "artist_image_$artistName"),
-                animatedVisibilityScope = animatedVisibilityScope
+                animatedVisibilityScope = animatedVisibilityScope,
+                // Spring del tema en vez del default de la API (ver AppBoundsTransform).
+                boundsTransform = AppBoundsTransform
             )
         }
     } else Modifier

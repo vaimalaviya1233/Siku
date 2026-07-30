@@ -2,6 +2,7 @@ package com.qhana.siku.data.source
 
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.model.SourceType
+import kotlinx.coroutines.flow.Flow
 
 /**
  * Abstracción de un proveedor de música (OneDrive, carpeta local, …). Fase 2: seam para las
@@ -22,6 +23,26 @@ interface MusicSource {
      * "sólo local" no falla por auth, y una "sólo nube" no escanea carpetas inexistentes.
      */
     suspend fun isConfigured(): Boolean
+
+    /**
+     * Lo mismo que [isConfigured], pero OBSERVABLE: emite en cuanto la fuente se configura o se
+     * desconfigura.
+     *
+     * Las dos formas conviven a propósito y no son redundantes:
+     *  - [isConfigured] es la consulta AUTORITATIVA (pregunta a MSAL, lee las preferencias) y es
+     *    la que usa el sync, que necesita la verdad del instante y no puede arrancar sobre un
+     *    valor por defecto — si el flow aún no se ha sembrado, saltarse OneDrive dejaría la
+     *    biblioteca de nube sin escanear.
+     *  - Esto es para la UI, que no puede suspender ni debe acordarse de refrescar nada. Antes
+     *    solo existía la primera, así que `SourcesViewModel` guardaba un snapshot y lo refrescaba
+     *    a mano desde la pantalla: el primer frame de Ajustes → Descargas pintaba el tope de
+     *    almacenamiento deshabilitado y con el texto de "solo para nube" hasta que llegaba el
+     *    refresco, y cualquier cambio de sesión posterior lo dejaba obsoleto.
+     *
+     * Cada implementación lo deriva de la MISMA fuente que consulta [isConfigured], así que no
+     * pueden divergir.
+     */
+    val isConfiguredFlow: Flow<Boolean>
 
     /**
      * Descubre el contenido de la fuente y aplica los cambios en la BD (upsert/delete):
@@ -70,6 +91,10 @@ data class LightMetadata(
     val album: String? = null,
     val albumArtist: String? = null,
     val genre: String? = null,
+    /** 0 si la cabecera no lo declara; entonces la fila conserva el que ya tuviera. */
+    val trackNumber: Int = 0,
+    /** 0 si la cabecera no lo declara; entonces la fila conserva el que ya tuviera. */
+    val year: Int = 0,
     /** 0 si la cabecera no la declara; entonces la fila conserva la duración que ya tuviera. */
     val durationMs: Long = 0L,
     val artwork: ByteArray? = null,
@@ -83,6 +108,7 @@ data class LightMetadata(
         if (other !is LightMetadata) return false
         return title == other.title && artist == other.artist && album == other.album &&
             albumArtist == other.albumArtist && genre == other.genre &&
+            trackNumber == other.trackNumber && year == other.year &&
             (artwork?.contentEquals(other.artwork) ?: (other.artwork == null))
     }
 
@@ -92,6 +118,8 @@ data class LightMetadata(
         result = 31 * result + (album?.hashCode() ?: 0)
         result = 31 * result + (albumArtist?.hashCode() ?: 0)
         result = 31 * result + (genre?.hashCode() ?: 0)
+        result = 31 * result + trackNumber
+        result = 31 * result + year
         result = 31 * result + (artwork?.contentHashCode() ?: 0)
         return result
     }

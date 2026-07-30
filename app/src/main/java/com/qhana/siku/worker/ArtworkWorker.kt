@@ -25,8 +25,16 @@ class ArtworkWorker @AssistedInject constructor(
         private const val TAG = "ArtworkWorker"
         private const val PREFS_NAME = "artwork_worker_prefs"
         private const val KEY_LAST_PROCESSED_ID = "last_processed_song_id"
-        private const val KEY_PROCESSED_COUNT = "processed_count"
         private const val BATCH_SIZE = 10
+
+        /**
+         * Tope de reintentos. Sin él, una excepción DETERMINISTA (BD corrupta, disco lleno) se
+         * reintentaba para siempre con backoff: el trabajo nunca se completa y nunca se rinde.
+         * Es un backfill cosmético —los colores se re-extraen solos en la próxima corrida—, así
+         * que rendirse es preferible a insistir eternamente.
+         */
+        private const val MAX_RUN_ATTEMPTS = 5
+
         const val PROGRESS_CURRENT = "progress_current"
         const val PROGRESS_TOTAL = "progress_total"
     }
@@ -39,11 +47,18 @@ class ArtworkWorker @AssistedInject constructor(
             if (allSongs.isEmpty()) { prefs.edit().clear().apply(); return@withContext Result.success() }
             val total = allSongs.size
             val lastId = prefs.getString(KEY_LAST_PROCESSED_ID, null)
-            var count = prefs.getInt(KEY_PROCESSED_COUNT, 0)
-            val songs = if (!lastId.isNullOrBlank()) {
-                val idx = allSongs.indexOfFirst { it.id == lastId }
-                if (idx >= 0 && idx < allSongs.size - 1) allSongs.subList(idx + 1, allSongs.size) else allSongs
+            val cursorIdx = if (!lastId.isNullOrBlank()) allSongs.indexOfFirst { it.id == lastId } else -1
+            val songs = if (cursorIdx >= 0 && cursorIdx < allSongs.size - 1) {
+                allSongs.subList(cursorIdx + 1, allSongs.size)
+            } else if (cursorIdx >= 0) {
+                emptyList()
             } else allSongs
+            // El progreso se DERIVA del cursor en vez de persistir un contador aparte: como
+            // `allSongs` encoge en cada corrida (las que ya tienen color salen de la consulta),
+            // un contador acumulado entre corridas podía superar al total —tras un retry, el
+            // cursor ya no está en la lista, se reprocesa desde el principio y el acumulado
+            // seguía sumando—. Con esto, `count <= total` se cumple por construcción.
+            var count = if (cursorIdx >= 0) cursorIdx + 1 else 0
             if (songs.isEmpty()) { prefs.edit().clear().apply(); return@withContext Result.success() }
 
             songs.chunked(BATCH_SIZE).forEach { chunk ->
@@ -69,12 +84,19 @@ class ArtworkWorker @AssistedInject constructor(
                 }
                 if (batch.isNotEmpty()) musicRepository.saveColorsBatch(batch)
                 lastIdInBatch?.let { lb ->
-                    prefs.edit().putString(KEY_LAST_PROCESSED_ID, lb).putInt(KEY_PROCESSED_COUNT, count).apply()
+                    prefs.edit().putString(KEY_LAST_PROCESSED_ID, lb).apply()
                 }
-                setProgress(workDataOf(PROGRESS_CURRENT to count, PROGRESS_TOTAL to total))
+                setProgress(workDataOf(PROGRESS_CURRENT to count.coerceAtMost(total), PROGRESS_TOTAL to total))
             }
             prefs.edit().clear().apply()
             Result.success()
-        } catch (e: Exception) { Result.retry() }
+        } catch (e: Exception) {
+            if (runAttemptCount >= MAX_RUN_ATTEMPTS) {
+                Log.w(TAG, "Backfill de colores abandonado tras $runAttemptCount intentos", e)
+                Result.failure()
+            } else {
+                Result.retry()
+            }
+        }
     }
 }

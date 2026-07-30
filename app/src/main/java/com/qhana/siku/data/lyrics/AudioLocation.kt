@@ -91,6 +91,30 @@ class AudioLocationResolver @Inject constructor(
     }
 
     /**
+     * ¿Se puede ESCRIBIR en el árbol SAF al que pertenece [documentUri]? Es lo que decide si se
+     * puede crear el `.lrc` al lado de la canción y reescribir el audio para incrustarle la letra.
+     *
+     * No basta con que la carpeta esté concedida: hasta la 1.0.1 se persistía únicamente la
+     * LECTURA (no existía el guardado de letras, así que sobraba), y un permiso persistido no se
+     * puede ampliar sin volver a pasar por el selector. Las carpetas heredadas de aquella versión
+     * llegan aquí en modo solo lectura y el guardado tiene que decirlo en vez de reventar con una
+     * `SecurityException` a medio camino.
+     *
+     * Se compara por autoridad + id del árbol y no por igualdad de URIs: el que persiste el
+     * sistema y el que se reconstruye desde el documento no tienen por qué ser idénticos carácter
+     * a carácter.
+     */
+    fun canWriteTreeOf(documentUri: Uri): Boolean {
+        val treeId = runCatching { DocumentsContract.getTreeDocumentId(documentUri) }.getOrNull()
+            ?: return false
+        return context.contentResolver.persistedUriPermissions.any { permission ->
+            permission.isWritePermission &&
+                permission.uri.authority == documentUri.authority &&
+                runCatching { DocumentsContract.getTreeDocumentId(permission.uri) }.getOrNull() == treeId
+        }
+    }
+
+    /**
      * Carpeta propia para los `.lrc` de canciones que no tienen dónde dejarlos al lado (las de
      * nube). Deliberadamente NO es `filesDir/music`: ahí `LocalFileCheckStep` busca el audio por
      * `"${id}."` y se llevaría el `.lrc` como si fuera la canción, rompiendo la reproducción.

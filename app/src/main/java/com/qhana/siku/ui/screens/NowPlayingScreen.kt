@@ -1,8 +1,6 @@
 package com.qhana.siku.ui.screens
 
 import androidx.compose.animation.*
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
@@ -35,6 +33,8 @@ import com.qhana.siku.ui.components.*
 import com.qhana.siku.ui.model.toUiModel
 import com.qhana.siku.ui.util.shareSong
 import com.qhana.siku.ui.state.NowPlayingUiState
+import com.qhana.siku.ui.theme.appSheetEnter
+import com.qhana.siku.ui.theme.appSheetExit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
@@ -188,9 +188,6 @@ fun NowPlayingScreen(
         return
     }
 
-    // Colores Adaptativos (del histograma, sin postprocesamiento)
-    val albumColors = uiState.albumColors
-
     // Fondo del gradiente = `secondaryContainer` → `surface` (rol del esquema, SEED-ONLY): antes era
     // el color CRUDO del álbum mezclado 50%. Sigue teñido del álbum (tema seedeado) y el tema anima
     // `secondaryContainer` al cambiar de canción (animatedScheme).
@@ -198,7 +195,8 @@ fun NowPlayingScreen(
 
     // Play button + TODOS los acentos que derivan de esto = rol PRIMARY del esquema. El color
     // elegido/extraído es SOLO el SEED (el tema está seedeado de él vía MusicPlayerTheme), NO se usa
-    // 1:1 — eso causaba las inconsistencias/parches (ensureContrast, onAccentContentColor, albumAccent).
+    // 1:1 — eso causaba las inconsistencias/parches (ensureContrast, onAccentContentColor y el viejo
+    // `albumAccent`, ya eliminados).
     // `onPrimary` da el contraste del icono por diseño M3. El tema anima primary al cambiar de canción
     // (animatedScheme), así que no hace falta el animateColorAsState local.
     val playButtonColor = MaterialTheme.colorScheme.primary
@@ -452,14 +450,10 @@ fun NowPlayingScreen(
 
     AnimatedVisibility(
         visible = showQueueSheet,
-        enter = slideInVertically(
-            initialOffsetY = { it },
-            animationSpec = tween(300, easing = FastOutSlowInEasing)
-        ) + fadeIn(animationSpec = tween(300)),
-        exit = slideOutVertically(
-            targetOffsetY = { it },
-            animationSpec = tween(300, easing = FastOutSlowInEasing)
-        ) + fadeOut(animationSpec = tween(200))
+        // Mismos helpers que las otras hojas a pantalla completa (ecualizador, MiniPlayer): tres
+        // sitios con la misma coreografía y, hasta ahora, con tres pares de duraciones distintos.
+        enter = appSheetEnter(),
+        exit = appSheetExit()
             ) {
             QueueBottomSheet(
                 playlist = uiPlaylist,
@@ -478,14 +472,8 @@ fun NowPlayingScreen(
         // --- Full Screen Lyrics Overlay ---
         AnimatedVisibility(
             visible = showLyrics,
-            enter = slideInVertically(
-                initialOffsetY = { it },
-                animationSpec = tween(400, easing = FastOutSlowInEasing)
-            ),
-            exit = slideOutVertically(
-                targetOffsetY = { it },
-                animationSpec = tween(400, easing = FastOutSlowInEasing)
-            )
+            enter = appSheetEnter(),
+            exit = appSheetExit()
         ) {
             // `song` ya es no-null acá (early-return arriba si uiState.song == null).
             LyricsScreen(

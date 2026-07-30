@@ -137,6 +137,10 @@ internal fun NowPlayingPortrait(
             songId = song.id,
             accent = revealAccent,
             accentContent = playButtonContentColor,
+            // Sin reveal mientras el player sube desde la píldora (mismo criterio que el blur).
+            revealEnabled = animatedVisibilityScope?.transition?.let {
+                it.currentState == it.targetState
+            } ?: true,
             modifier = Modifier.fillMaxWidth()
         ) { accent, accentContent ->
             Column(
@@ -393,6 +397,10 @@ internal fun NowPlayingLandscape(
                 songId = song.id,
                 accent = revealAccent,
                 accentContent = playButtonContentColor,
+                // Sin reveal mientras el player sube desde la píldora (mismo criterio que el blur).
+                revealEnabled = animatedVisibilityScope?.transition?.let {
+                    it.currentState == it.targetState
+                } ?: true,
                 modifier = Modifier.fillMaxWidth()
             ) { accent, accentContent ->
                 PlaybackControls(

@@ -1,7 +1,9 @@
 package com.qhana.siku.ui.components
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.provider.DocumentsContract
 import android.provider.Settings
 import android.text.format.Formatter
 import androidx.activity.compose.ManagedActivityResultLauncher
@@ -32,6 +34,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -280,9 +283,30 @@ fun LocalFoldersSourceCard(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         if (uri != null) {
-            context.contentResolver.takePersistableUriPermission(
-                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
-            )
+            takeMusicFolderPermission(context, uri)
+            onFolderPicked(uri.toString())
+        }
+    }
+
+    // Carpetas concedidas solo con lectura: las elegidas con la 1.0.1, donde no se pueden guardar
+    // letras. Se avisa aquí, que es donde el usuario puede arreglarlo, en vez de dejar que lo
+    // descubra al fallar un guardado. `permissionRefresh` entra en la clave porque re-autorizar la
+    // MISMA carpeta no cambia el Set: sin él, el aviso seguiría en pantalla ya resuelto.
+    var permissionRefresh by remember { mutableIntStateOf(0) }
+    val readOnlyFolders = remember(folderUris, permissionRefresh) {
+        readOnlyFoldersOf(context, folderUris)
+    }
+
+    // Re-autorizar: el selector se abre POSICIONADO en la carpeta afectada, y al volver se retiene
+    // con escritura. Un permiso persistido no se puede ampliar de otro modo.
+    val reauthorizePicker: ManagedActivityResultLauncher<Uri?, Uri?> = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            takeMusicFolderPermission(context, uri)
+            permissionRefresh++
+            // Si eligió otra carpeta distinta, se trata como añadir: `onFolderPicked` deduplica
+            // contra las que ya están (es un Set), así que re-elegir la misma no la duplica.
             onFolderPicked(uri.toString())
         }
     }
@@ -330,6 +354,12 @@ fun LocalFoldersSourceCard(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                    }
+
+                    if (uri in readOnlyFolders) {
+                        ReadOnlyFolderNotice(
+                            onReauthorize = { reauthorizePicker.launch(Uri.parse(uri)) }
+                        )
                     }
                 }
             }
@@ -440,9 +470,7 @@ fun PhoneMusicSourceCard(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         if (uri != null) {
-            context.contentResolver.takePersistableUriPermission(
-                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
-            )
+            takeMusicFolderPermission(context, uri)
             onFolderPicked(uri.toString())
         }
     }
@@ -709,4 +737,85 @@ fun DisconnectOneDriveDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         }
     )
+}
+
+/**
+ * Retiene una carpeta de música concedida por el selector, con lectura Y ESCRITURA.
+ *
+ * La escritura no es un extra: el `.lrc` de una canción de esa carpeta se crea JUNTO a ella
+ * (`LyricsWriter`, rama `SafDocument`) y el tag incrustado reescribe el propio archivo. Hasta la
+ * 1.0.1 solo se persistía la lectura — bastaba, porque no existía el guardado de letras—, así que
+ * las carpetas heredadas de esa versión se quedan sin escritura: el selector concede ambos
+ * permisos durante su sesión, pero solo sobrevive al reinicio lo que se persiste aquí. Ampliarlo
+ * después es imposible sin volver a pasar por el selector, y de eso se encarga la re-autorización
+ * que ofrece la tarjeta de carpetas.
+ */
+internal fun takeMusicFolderPermission(context: Context, uri: Uri) {
+    runCatching {
+        context.contentResolver.takePersistableUriPermission(
+            uri,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        )
+    }.onFailure {
+        // Un proveedor que no ofrezca escritura no debe impedir usar la carpeta para ESCUCHAR:
+        // se reintenta con lo mínimo imprescindible y el guardado de letras avisará si falta.
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+    }
+}
+
+/**
+ * Aviso bajo una carpeta que solo se concedió para lectura, con la acción que lo arregla.
+ *
+ * Es informativo, no un error: la carpeta se escucha perfectamente; lo único que no se puede es
+ * escribir letras en ella. Por eso va en tono secundario y no en `error`.
+ */
+@Composable
+private fun ReadOnlyFolderNotice(onReauthorize: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 32.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = stringResource(R.string.source_local_folder_read_only),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        TextButton(onClick = onReauthorize) {
+            Text(stringResource(R.string.source_local_folder_reauthorize))
+        }
+    }
+}
+
+/**
+ * De [folderUris], las que NO tienen permiso de escritura persistido.
+ *
+ * Se compara por autoridad + id del árbol, no por igualdad de cadenas: el URI que devuelve el
+ * sistema en `persistedUriPermissions` no tiene por qué coincidir carácter a carácter con el que
+ * se guardó en preferencias. Una carpeta que ya no figure entre los permisos persistidos (el
+ * usuario los revocó desde los ajustes del sistema) también sale como solo-lectura, que es
+ * exactamente lo que le conviene saber: hay que volver a autorizarla.
+ */
+private fun readOnlyFoldersOf(context: Context, folderUris: Set<String>): Set<String> {
+    if (folderUris.isEmpty()) return emptySet()
+    val writable = context.contentResolver.persistedUriPermissions
+        .filter { it.isWritePermission }
+        .mapNotNull { permission ->
+            runCatching {
+                permission.uri.authority to DocumentsContract.getTreeDocumentId(permission.uri)
+            }.getOrNull()
+        }
+        .toSet()
+    return folderUris.filterNot { uriString ->
+        val uri = Uri.parse(uriString)
+        val key = runCatching { uri.authority to DocumentsContract.getTreeDocumentId(uri) }.getOrNull()
+        key != null && key in writable
+    }.toSet()
 }

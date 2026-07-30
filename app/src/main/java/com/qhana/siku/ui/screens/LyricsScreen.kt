@@ -1,12 +1,8 @@
 package com.qhana.siku.ui.screens
 
 import androidx.compose.animation.*
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -29,7 +25,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -39,12 +34,14 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.qhana.siku.data.model.PlaybackState
 import com.qhana.siku.data.repository.LyricsCandidate
+import com.qhana.siku.ui.components.ConnectedChoiceGroup
 import com.qhana.siku.ui.components.LyricsSearchSheet
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.onContainerColor
@@ -53,6 +50,14 @@ import com.qhana.siku.ui.viewmodel.LyricLine
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+
+import com.qhana.siku.ui.theme.appSpatialSpec
+import com.qhana.siku.ui.theme.appFastSpatialSpec
+import com.qhana.siku.ui.theme.appSlowSpatialSpec
+import com.qhana.siku.ui.theme.appSlowEffectsSpec
+import com.qhana.siku.ui.theme.EXPRESSIVE_DEFAULT_EFFECTS_MS
+import com.qhana.siku.ui.theme.ExpressiveDefaultEffectsEasing
+import androidx.compose.animation.core.tween
 
 private enum class LyricsViewMode {
     SYNCED, PLAIN
@@ -82,20 +87,11 @@ private val SyncedTopPadding = 32.dp
 private val SyncedBottomPadding = ControlsFadeHeight + ControlsBottomInset + 24.dp
 
 /**
- * Cuánto acento lleva el "glow" del fundido inferior, y a partir de qué luminancia se considera
- * que el fondo es CLARO y por tanto no lo lleva.
- *
- * El tinte solo funciona sobre fondo oscuro. Con fondo claro el acento es `primary` (tono 40),
- * así que mezclar hacia él OSCURECE: el degradado pasa de claro → tintado → claro otra vez y esa
- * luminancia no monótona se lee como una FRANJA gris cruzando el texto justo encima de los
- * controles (el pico cae en el stop 0.50, a ~10dp del borde de los botones). En claro el fundido
- * va sin tinte: alpha monótona de 0 a 1, invisible por construcción.
- *
- * Se decide por la luminancia REAL del fondo, no por `isSystemInDarkTheme()`: el color lo provee
- * el caller y el criterio tiene que valer para el color que de verdad se está pintando.
+ * Puntos con los que se dibuja la rampa del fundido inferior. Van repartidos por IGUAL: la curva
+ * la hace el alpha de cada punto (smoothstep), no su posición, que es lo que permite subir la
+ * resolución sin recolocar nada a mano.
  */
-private const val GlowAccentRatio = 0.25f
-private const val LightBackgroundLuminance = 0.5f
+private const val FadeStopCount = 13
 
 /** Marca que LrcLib devuelve para las pistas sin letra por ser instrumentales. */
 private const val INSTRUMENTAL_SENTINEL = "[INSTRUMENTAL]"
@@ -267,7 +263,18 @@ fun LyricsScreen(
                         onGoogleSearch = onGoogleSearch
                     )
                 } else {
-                    Crossfade(targetState = viewMode, label = "LyricsMode") { mode ->
+                    // Spec explícito: el default de `Crossfade` no mira el tema. Y va con los
+                    // tokens de TRANSICIÓN (fade through) y no con un spring: lo que se cruza es el
+                    // cuerpo entero de la pantalla, no un componente.
+                    Crossfade(
+                        targetState = viewMode,
+                        // Fade through = puro EFFECTS: no se mueve nada, solo cruzan opacidades.
+                        animationSpec = tween(
+                            EXPRESSIVE_DEFAULT_EFFECTS_MS,
+                            easing = ExpressiveDefaultEffectsEasing
+                        ),
+                        label = "LyricsMode"
+                    ) { mode ->
                         when (mode) {
                             LyricsViewMode.SYNCED -> SyncedLyricsView(
                                 lines = lyricLines,
@@ -287,51 +294,43 @@ fun LyricsScreen(
             }
         }
 
-        // Floating Controls at Bottom (Lifted Up + Colored Fade Effect)
-        val bottomGlow = remember(backgroundColor, accentColor) {
-            // Fondo oscuro: se mezcla con [GlowAccentRatio] del acento para que el fundido "brille"
-            // con color. Fondo claro: sin tinte (ver [LightBackgroundLuminance]) — mezclar ahí
-            // oscurece y el pico de luminancia se ve como una franja sobre los controles.
-            if (backgroundColor.luminance() < LightBackgroundLuminance) {
-                Color(
-                    androidx.core.graphics.ColorUtils.blendARGB(
-                        backgroundColor.toArgb(),
-                        accentColor.toArgb(),
-                        GlowAccentRatio
-                    )
-                )
-            } else {
-                backgroundColor
-            }
+        // Controles flotantes al fondo, sobre un fundido que tapa el texto que pasa por detrás.
+        //
+        // La rampa es de UN SOLO color —el fondo— con alpha creciente y perfil smoothstep. Antes
+        // mezclaba a mitad de camino un "glow" con un 25% del acento: eso hace que la luminancia
+        // suba y vuelva a bajar, y una rampa no monótona se lee como una FRANJA horizontal justo
+        // encima de los controles (se veía en los dos temas; en claro además el acento es tono 40,
+        // así que el "glow" ni siquiera aclaraba: ensuciaba). Smoothstep entra y sale con pendiente
+        // cero, así que tampoco quedan bandas de Mach en los empalmes.
+        val fadeBrush = remember(backgroundColor) {
+            Brush.verticalGradient(
+                List(FadeStopCount) { i ->
+                    val t = i / (FadeStopCount - 1f)
+                    backgroundColor.copy(alpha = t * t * (3f - 2f * t))
+                }
+            )
         }
 
-        Box(
+        // El fundido es su PROPIO bloque y los controles van sobre color SÓLIDO, en vez de un
+        // único degradado estirado sobre el conjunto: así el punto en que la rampa llega a opaco
+        // coincide EXACTAMENTE con el borde superior de los botones, sin depender del alto que
+        // acabe midiendo la fila (que cambia al pausar: los laterales pasan de 48 a 64dp).
+        Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                // Gradiente Fade: glow de color en la transición, pero aterriza en el
-                // backgroundColor SÓLIDO (sin tinte de acento) para que los botones —que
-                // son de acento— contrasten más contra su fondo inmediato.
-                //
-                // Los stops van EXPLÍCITOS y estirados, no repartidos por igual: con reparto
-                // uniforme el tramo transparente→opaco se consumía en la primera mitad y el
-                // glow quedaba comprimido en una franja estrecha que se leía como una LÍNEA
-                // de color entre el texto y los controles. Ahora el color entra pronto y muy
-                // suave, y lo opaco no llega hasta pegado a los botones.
-                .background(
-                    Brush.verticalGradient(
-                        0.00f to backgroundColor.copy(alpha = 0f),   // Transparente
-                        0.28f to bottomGlow.copy(alpha = 0.30f),     // El color asoma
-                        0.50f to bottomGlow.copy(alpha = 0.62f),     // Glow pleno
-                        0.70f to backgroundColor.copy(alpha = 0.88f),// Casi opaco (ya sin tinte)
-                        0.86f to backgroundColor,                    // Opaco sólido
-                        1.00f to backgroundColor                     // Opaco sólido (tapa el texto)
-                    )
-                )
-                .padding(bottom = ControlsBottomInset, top = ControlsFadeHeight)
         ) {
-             Row(
-                modifier = Modifier.fillMaxWidth(),
+            Spacer(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(ControlsFadeHeight)
+                    .background(fadeBrush)
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(backgroundColor)
+                    .padding(bottom = ControlsBottomInset),
                 horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -357,30 +356,27 @@ fun LyricsScreen(
                 }
                 val sideContainer = MaterialTheme.colorScheme.secondaryContainer
                 val sideContent = MaterialTheme.colorScheme.onSecondaryContainer
+                // Mismo token que el transporte del NowPlaying: este bloque es el MISMO control en
+                // otra pantalla, y hasta ahora coincidía por tener los números copiados.
+                val transportSpec = appSpatialSpec<Dp>()
                 val playWidth by animateDpAsState(
                     targetValue = if (isPlaying) 64.dp else 108.dp,
-                    animationSpec = spring(
-                        dampingRatio = Spring.DampingRatioLowBouncy,
-                        stiffness = Spring.StiffnessMediumLow
-                    ),
+                    animationSpec = transportSpec,
                     label = "lyricsPlayWidth"
                 )
                 val sideWidth by animateDpAsState(
                     targetValue = if (isPlaying) 48.dp else 44.dp,
-                    animationSpec = spring(
-                        dampingRatio = Spring.DampingRatioLowBouncy,
-                        stiffness = Spring.StiffnessMediumLow
-                    ),
+                    animationSpec = transportSpec,
                     label = "lyricsSideWidth"
                 )
                 val sideHeight by animateDpAsState(
                     targetValue = if (isPlaying) 48.dp else 64.dp,
-                    animationSpec = spring(
-                        dampingRatio = Spring.DampingRatioLowBouncy,
-                        stiffness = Spring.StiffnessMediumLow
-                    ),
+                    animationSpec = transportSpec,
                     label = "lyricsSideHeight"
                 )
+                // Izados: `transitionSpec` no es composable (mismo patrón que en PlaybackControls).
+                val glyphEnterScale = appSpatialSpec<Float>()
+                val glyphExitScale = appFastSpatialSpec<Float>()
 
                 FilledIconButton(
                     onClick = {
@@ -426,8 +422,7 @@ fun LyricsScreen(
                         AnimatedContent(
                             targetState = playbackState,
                             transitionSpec = {
-                                scaleIn(animationSpec = tween(200, easing = FastOutSlowInEasing)) togetherWith
-                                scaleOut(animationSpec = tween(150, easing = androidx.compose.animation.core.FastOutLinearInEasing))
+                                scaleIn(glyphEnterScale) togetherWith scaleOut(glyphExitScale)
                             },
                             label = "PlayPauseAnimation"
                         ) { state ->
@@ -492,10 +487,10 @@ private fun safeAccentColor(accent: Color, background: Color, fallback: Color): 
 }
 
 /**
- * Toggle Karaoke/Texto con el SegmentedButton oficial M3 (selección con checkmark
- * animado y springs del MotionScheme). El segmento activo se tiñe con [pillColor].
+ * Toggle Karaoke/Texto con el connected button group de M3 Expressive (el segmentado que usaba
+ * antes dejó de estar recomendado). El botón activo se tiñe con [pillColor] y morfea de forma;
+ * los springs los pone el `MotionScheme` del tema.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LyricsModeToggle(
     viewMode: LyricsViewMode,
@@ -507,32 +502,33 @@ private fun LyricsModeToggle(
     val activeContentColor = remember(pillColor) {
         if (androidx.core.graphics.ColorUtils.calculateLuminance(pillColor.toArgb()) > 0.5) Color.Black else Color.White
     }
-    val colors = SegmentedButtonDefaults.colors(
-        activeContainerColor = pillColor,
-        activeContentColor = activeContentColor,
-        inactiveContainerColor = Color.Transparent,
-        inactiveContentColor = contentColor.copy(alpha = 0.7f)
+    // Connected button group (el segmentado dejó de recomendarse en M3 Expressive) con colores
+    // PROPIOS: esta pantalla se pinta sobre el color del álbum, no sobre el scheme, y el contenido
+    // activo se decide por luminancia unas líneas más arriba.
+    val colors = ToggleButtonDefaults.toggleButtonColors(
+        containerColor = Color.Transparent,
+        contentColor = contentColor.copy(alpha = 0.7f),
+        checkedContainerColor = pillColor,
+        checkedContentColor = activeContentColor
     )
 
-    SingleChoiceSegmentedButtonRow {
-        SegmentedButton(
-            selected = viewMode == LyricsViewMode.SYNCED,
-            onClick = { onModeChange(LyricsViewMode.SYNCED) },
-            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-            colors = colors
-        ) {
-            Text(stringResource(R.string.lyrics_view_karaoke), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-        }
-        SegmentedButton(
-            selected = viewMode == LyricsViewMode.PLAIN,
-            onClick = { onModeChange(LyricsViewMode.PLAIN) },
-            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-            colors = colors
-        ) {
-            Text(stringResource(R.string.lyrics_plain), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-        }
-    }
+    ConnectedChoiceGroup(
+        options = LYRICS_VIEW_MODES,
+        selected = viewMode,
+        onSelect = onModeChange,
+        labelFor = {
+            when (it) {
+                LyricsViewMode.SYNCED -> stringResource(R.string.lyrics_view_karaoke)
+                LyricsViewMode.PLAIN -> stringResource(R.string.lyrics_plain)
+            }
+        },
+        fillWidth = false,
+        colors = colors
+    )
 }
+
+/** Modos de visualización de la letra, en el orden del conmutador. */
+private val LYRICS_VIEW_MODES = listOf(LyricsViewMode.SYNCED, LyricsViewMode.PLAIN)
 
 @Composable
 private fun SyncedLyricsView(
@@ -620,14 +616,19 @@ private fun SyncedLyricsView(
             // para que no haya reflow vertical y el centrado del scroll quede estable.
             val targetScale = if (isActive) 1.12f else 1f
 
+            // Tokens *slow* (los más blandos del scheme): el foco del karaoke tiene que sentirse
+            // como un desplazamiento de atención, no como un cambio de estado. Alpha y color van
+            // por `slowEffects` —y por eso cierran juntos, que es lo que evita el destello descrito
+            // abajo— y la escala por `slowSpatial`, que es el que corresponde a una transformación.
+            val focusFade = appSlowEffectsSpec<Float>()
             val animatedAlpha by animateFloatAsState(
                 targetValue = targetAlpha,
-                animationSpec = tween(350, easing = FastOutSlowInEasing),
+                animationSpec = focusFade,
                 label = "lyricAlpha"
             )
             val animatedScale by animateFloatAsState(
                 targetValue = targetScale,
-                animationSpec = tween(350, easing = FastOutSlowInEasing),
+                animationSpec = appSlowSpatialSpec(),
                 label = "lyricScale"
             )
             // Animamos también el COLOR: sin esto, al perder el foco la línea saltaba de
@@ -636,7 +637,7 @@ private fun SyncedLyricsView(
             // cambio es gradual y el flash desaparece.
             val animatedColor by animateColorAsState(
                 targetValue = if (isActive) activeLineColor else contentColor,
-                animationSpec = tween(350, easing = FastOutSlowInEasing),
+                animationSpec = appSlowEffectsSpec(),
                 label = "lyricColor"
             )
 

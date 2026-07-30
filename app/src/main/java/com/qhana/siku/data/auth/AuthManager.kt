@@ -8,6 +8,9 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
@@ -55,6 +58,23 @@ class AuthManager @Inject constructor(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val msalInitialized = CompletableDeferred<Boolean>()
+
+    /**
+     * ¿Hay sesión de Microsoft? OBSERVABLE, y el dueño del hecho es esta clase.
+     *
+     * MSAL solo ofrece una consulta puntual y suspend ([hasAccount]), así que hasta ahora cada
+     * consumidor se guardaba su propia copia y la refrescaba a mano: `AuthViewModel._isLoggedIn`,
+     * `SourcesViewModel._hasCloudSource` (con un `refreshCloudPresence()` que había que acordarse
+     * de llamar desde la pantalla) y, como esa segunda copia no era reactiva, `OnboardingScreen`
+     * terminó puenteándola con `val hasCloudSource = isLoggedIn`. Tres verdades para un solo
+     * hecho, que es justo lo que la app tiene prohibido desde el bug del banner de sync.
+     *
+     * Arranca en `false` —antes de resolver la sesión no hay ninguna— y solo lo escriben los tres
+     * puntos donde la sesión CAMBIA de verdad (restaurar, entrar, salir) más la propia consulta
+     * autoritativa, que lo refresca de paso para que no pueda divergir de la realidad.
+     */
+    private val _hasSession = MutableStateFlow(false)
+    val hasSession: StateFlow<Boolean> = _hasSession.asStateFlow()
 
     init {
         // MSAL realiza I/O en disco durante la inicialización, por lo que no debe bloquear el Main Thread.
@@ -112,6 +132,7 @@ class AuthManager @Inject constructor(
             .withCallback(object : AuthenticationCallback {
                 override fun onSuccess(authenticationResult: IAuthenticationResult) {
                     Log.d(TAG, "Login exitoso")
+                    _hasSession.value = true
                     trySend(AuthResult.Success(authenticationResult.accessToken))
                     close()
                 }
@@ -232,8 +253,20 @@ class AuthManager @Inject constructor(
     }
 
     fun signOut(): Flow<Boolean> = callbackFlow {
-        publicClientApplication?.signOut(object : ISingleAccountPublicClientApplication.SignOutCallback {
+        val app = publicClientApplication
+        if (app == null) {
+            // Hay que RESPONDER aunque no haya nada que cerrar: con el `?.` de antes no se
+            // ejecutaba ningún callback y el flow se quedaba en `awaitClose()` sin emitir jamás,
+            // así que el colector del logout esperaba indefinidamente. Mismo trato que
+            // `signIn`/`acquireTokenSilent`, que sí señalan el fallo.
+            Log.w(TAG, "signOut con MSAL sin inicializar")
+            trySend(false)
+            close()
+            return@callbackFlow
+        }
+        app.signOut(object : ISingleAccountPublicClientApplication.SignOutCallback {
             override fun onSignOut() {
+                _hasSession.value = false
                 trySend(true)
                 close()
             }
@@ -262,7 +295,7 @@ class AuthManager @Inject constructor(
 
         val app = publicClientApplication ?: return false
 
-        return withContext(Dispatchers.IO) {
+        val restored = withContext(Dispatchers.IO) {
             try {
                 val hasAccount = app.currentAccount?.currentAccount != null
                 Log.d(TAG, "Sesión restaurada: $hasAccount")
@@ -272,17 +305,37 @@ class AuthManager @Inject constructor(
                 false
             }
         }
+        // Siembra [hasSession] con el primer valor REAL del proceso: hasta aquí valía `false` por
+        // defecto, que es lo correcto (aún no se sabía), pero quien observe necesita el de verdad.
+        _hasSession.value = restored
+        return restored
     }
 
     /**
      * ¿Hay una cuenta de Microsoft conectada? Lo usa el registro de fuentes para decidir si
      * OneDrive está "configurado" (si no, el sync lo salta en vez de fallar por auth).
+     *
+     * Es la consulta AUTORITATIVA: pregunta a MSAL en el momento, y refresca [hasSession] **solo
+     * si obtiene una respuesta CONCLUYENTE**.
+     *
+     * Esa distinción es load-bearing y no una sutileza: "no hay cuenta" y "no he podido
+     * preguntar" (MSAL todavía inicializando, o lanzando) son cosas distintas, y esta función se
+     * llama a menudo desde `activeSources()` — incluso desde un `ScanWorker` que arrancó el
+     * proceso en frío, antes de que MSAL esté listo. Degradar [hasSession] a `false` en ese caso
+     * propagaba la mentira hasta `isLoggedIn` → `hasAnySource` → y `MusicPlayerScreen` **expulsaba
+     * al onboarding a un usuario de solo-nube con su sesión perfectamente válida**.
+     *
+     * Devolver `false` cuando no se puede preguntar sí es correcto para el sync (se salta la
+     * fuente en esa pasada y la reintenta en la siguiente), que es el comportamiento de siempre.
+     * Lo que no puede hacer es reescribir el estado global de sesión.
      */
     suspend fun hasAccount(): Boolean {
         val app = publicClientApplication ?: return false
-        return withContext(Dispatchers.IO) {
-            try { app.currentAccount?.currentAccount != null } catch (e: Exception) { false }
+        val present: Boolean? = withContext(Dispatchers.IO) {
+            try { app.currentAccount?.currentAccount != null } catch (e: Exception) { null }
         }
+        if (present != null) _hasSession.value = present
+        return present == true
     }
 }
 

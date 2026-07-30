@@ -2,12 +2,14 @@ package com.qhana.siku.ui.components
 
 import android.content.res.AssetManager
 import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontVariation
@@ -69,6 +71,43 @@ fun MaterialSymbol(
         style = textStyle
     )
 }
+
+/**
+ * Icono para el slot `leadingIcon`/`selectedLeadingIcon` de un `DropdownMenuItem`.
+ *
+ * Existe para que el tamaño salga del TOKEN del menú (`MenuDefaults.LeadingIconSize`, 20dp) y no
+ * del default de [MaterialSymbol], que son 24sp. La diferencia no es cosmética: el componente
+ * reserva el hueco del icono midiendo lo que le pasan, así que un glifo más grande que el token
+ * empuja el texto del item y los items dejan de alinear entre sí.
+ *
+ * El token viene en dp y [MaterialSymbol] dimensiona en sp —es una fuente variable, no un
+ * vectorial—, así que se convierte con la densidad en vez de escribir "20.sp" a ojo: con
+ * `fontScale` distinto de 1 esas dos cosas dejan de medir lo mismo. `opticalSize` acompaña al
+ * tamaño visual, que es justo para lo que está (ver el kdoc de [MaterialSymbol]).
+ */
+@Composable
+fun MenuItemIcon(
+    icon: String,
+    modifier: Modifier = Modifier,
+    color: Color = LocalContentColor.current,
+    fill: Boolean = false
+) {
+    val tokenSize = MenuDefaults.LeadingIconSize
+    MaterialSymbol(
+        icon = icon,
+        modifier = modifier,
+        size = with(LocalDensity.current) { tokenSize.toSp() },
+        color = color,
+        fill = fill,
+        opticalSize = MenuIconOpticalSize
+    )
+}
+
+/**
+ * Tamaño óptico de los iconos de menú. Acompaña a los 20dp del token: la fuente de Material
+ * Symbols trae ejes por tamaño y usar el de 24 en un glifo dibujado a 20 lo engorda.
+ */
+private const val MenuIconOpticalSize = 20
 
 private fun createMaterialSymbolFontFamily(
     assetManager: AssetManager,

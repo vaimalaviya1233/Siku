@@ -37,6 +37,12 @@ class SessionStateManager @Inject constructor(
         // Snapshot defensivo: si el caller pasa una lista mutable que cambia mientras
         // serializamos, podríamos grabar IDs inconsistentes con el índice guardado.
         val snapshot = internalPlaylist.toList()
+        // Una cola vacía NO se persiste, pero tampoco BORRA la sesión guardada: esto es un
+        // "guardar lo que hay", y en el arranque se llama con la lista todavía sin restaurar
+        // (`restoreSessionFromDb` es asíncrono), así que borrar aquí tiraría la sesión que se
+        // estaba a punto de recuperar. Quien VACÍA la cola de verdad lo dice con [clearSession]
+        // (ver `MusicController.stop`, al que llega tanto la purga total como quitar el último
+        // item de la cola).
         if (snapshot.isEmpty()) return
 
         val queueIds = snapshot.map { it.id }

@@ -181,6 +181,7 @@ fun OneDriveFolderPickerSheet(
                         items(state.folders, key = { it.id }) { folder ->
                             Row(
                                 modifier = Modifier
+                                    .animateItem()
                                     .fillMaxWidth()
                                     .clickable { viewModel.open(folder) }
                                     .padding(vertical = 12.dp),

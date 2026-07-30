@@ -88,8 +88,8 @@ class LibraryViewModel @Inject constructor(
     private val snackbarManager: com.qhana.siku.data.util.SnackbarManager,
     private val repository: IMusicRepository,
     private val artworkRepository: ArtworkRepository,
-    // Solo para las fotos de artista de "Seguir escuchando"; el resto del browse vive en
-    // BrowseViewModel.
+    // Solo para lo que "Seguir escuchando" resuelve EN VIVO (fotos de artista y carátulas de
+    // género); el resto del browse vive en BrowseViewModel.
     private val browseRepository: com.qhana.siku.data.repository.BrowseRepository,
     private val musicPreferences: MusicPreferences,
     private val musicController: MusicController,
@@ -251,6 +251,24 @@ class LibraryViewModel @Inject constructor(
         }
         .flowOn(Dispatchers.IO)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /**
+     * Carátulas del collage de los contextos de GÉNERO de "Seguir escuchando", por nombre en
+     * minúsculas. Mismo criterio que la foto del artista: un género no tiene UNA carátula, así
+     * que la tarjeta no puede depender del snapshot que se guardó al reproducirlo (el arte de
+     * su primera canción, `null` si esa canción no tenía) — se resuelve en vivo contra la
+     * biblioteca, igual que hace su tarjeta en la pestaña Géneros.
+     */
+    val recentGenreArts: StateFlow<Map<String, List<String>>> = musicPreferences.recentContextsFlow
+        .map { contexts ->
+            contexts.filterIsInstance<PlaybackContext.Genre>().map { it.name }.toSet()
+        }
+        .distinctUntilChanged()
+        .flatMapLatest { names ->
+            if (names.isEmpty()) flowOf(emptyMap()) else browseRepository.getGenreArts(names)
+        }
+        .flowOn(Dispatchers.IO)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     /** Antepone un contexto al historial de "Seguir escuchando" (dedup + tope). */
     fun recordContext(ctx: PlaybackContext) = musicPreferences.recordContext(ctx)

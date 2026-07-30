@@ -80,6 +80,18 @@ interface PlaylistDao {
     @Query("DELETE FROM playlist_song_cross_ref WHERE songId = :loserId")
     suspend fun deleteRefsForSong(loserId: String)
 
+    /**
+     * Los dos pasos anteriores en UNA transacción: re-apuntar y barrer lo que el `OR IGNORE` dejó.
+     *
+     * Separados no eran atómicos, y morir entre ambos dejaba refs apuntando a la perdedora, que el
+     * dedupe borra a continuación — o sea, canciones desaparecidas de sus playlists.
+     */
+    @Transaction
+    suspend fun repointAndCleanupSongRefs(loserId: String, winnerId: String) {
+        repointSongRefs(loserId, winnerId)
+        deleteRefsForSong(loserId)
+    }
+
     @Transaction
     @Query("""
         SELECT s.* FROM songs s
@@ -120,9 +132,9 @@ interface PlaylistDao {
         INNER JOIN playlist_song_cross_ref ref ON s.id = ref.songId
         INNER JOIN playlists p ON p.playlistId = ref.playlistId
         WHERE p.uuid = :uuid
-            AND (s.title LIKE '%' || :query || '%'
-                OR s.artist LIKE '%' || :query || '%'
-                OR s.album LIKE '%' || :query || '%')
+            AND (s.title LIKE '%' || :query || '%' ESCAPE '\'
+                OR s.artist LIKE '%' || :query || '%' ESCAPE '\'
+                OR s.album LIKE '%' || :query || '%' ESCAPE '\')
         ORDER BY s.title COLLATE NOCASE ASC
     """)
     fun searchSongsByPlaylistUuidPaging(uuid: String, query: String): PagingSource<Int, SongEntity>
@@ -143,9 +155,9 @@ interface PlaylistDao {
         INNER JOIN playlist_song_cross_ref ref ON s.id = ref.songId
         INNER JOIN playlists p ON p.playlistId = ref.playlistId
         WHERE p.uuid = :uuid
-            AND (s.title LIKE '%' || :query || '%'
-                OR s.artist LIKE '%' || :query || '%'
-                OR s.album LIKE '%' || :query || '%')
+            AND (s.title LIKE '%' || :query || '%' ESCAPE '\'
+                OR s.artist LIKE '%' || :query || '%' ESCAPE '\'
+                OR s.album LIKE '%' || :query || '%' ESCAPE '\')
         ORDER BY s.title COLLATE NOCASE ASC
     """)
     suspend fun searchSongsByPlaylistUuidList(uuid: String, query: String): List<SongEntity>

@@ -54,6 +54,7 @@ import com.qhana.siku.ui.components.RoundedPolygonMaskTransformation
 import com.qhana.siku.ui.components.TonalChip
 import com.qhana.siku.ui.components.onContainerColor
 import com.qhana.siku.ui.components.rememberListItemShape
+import com.qhana.siku.ui.theme.AppBoundsTransform
 
 /**
  * Máscara cookie de 6 lados COMPARTIDA por todas las filas: una sola instancia (el path
@@ -168,6 +169,7 @@ fun ArtistsScreen(
         ) { index, artist ->
             ArtistRow(
                 artist = artist,
+                modifier = Modifier.animateItem(),
                 // Mismo agrupado que la lista de "Todas": primera/última fila con
                 // esquinas pronunciadas, intermedias casi rectas.
                 shape = rememberListItemShape(index = index, count = artists.size),
@@ -187,6 +189,7 @@ private fun ArtistRow(
     shape: androidx.compose.ui.graphics.Shape,
     onClick: () -> Unit,
     onPlayClick: () -> Unit,
+    modifier: Modifier = Modifier,
     sharedTransitionScope: SharedTransitionScope? = null,
     animatedVisibilityScope: AnimatedVisibilityScope? = null
 ) {
@@ -197,7 +200,9 @@ private fun ArtistRow(
         with(sharedTransitionScope) {
             Modifier.sharedBounds(
                 sharedContentState = rememberSharedContentState(key = "artist_image_${artist.name}"),
-                animatedVisibilityScope = animatedVisibilityScope
+                animatedVisibilityScope = animatedVisibilityScope,
+                // Spring del tema en vez del default de la API (ver AppBoundsTransform).
+                boundsTransform = AppBoundsTransform
             )
         }
     } else Modifier
@@ -206,7 +211,7 @@ private fun ArtistRow(
     // forma M3 Expressive en vez de círculo.
     val isDarkTheme = isSystemInDarkTheme()
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             // Envoltorio idéntico al de SongItemOptimized: margen lateral + 2dp de gap entre
             // filas, recorte agrupado y fondo de tarjeta.

@@ -48,8 +48,10 @@ class SyncManager @Inject constructor(
     private val sourceRegistry: com.qhana.siku.data.source.MusicSourceRegistry,
     private val artistImageRepository: com.qhana.siku.data.repository.ArtistImageRepository,
     private val lightMetadataFetcher: LightMetadataFetcher,
+    private val trackInfoBackfiller: TrackInfoBackfiller,
     private val artworkHealingManager: ArtworkHealingManager,
-    private val snackbarManager: com.qhana.siku.data.util.SnackbarManager
+    private val snackbarManager: com.qhana.siku.data.util.SnackbarManager,
+    private val downloadScheduler: com.qhana.siku.worker.DownloadScheduler
 ) {
     companion object {
         private const val TAG = "SyncManager"
@@ -156,12 +158,49 @@ class SyncManager @Inject constructor(
     // al inicio de cada iteración, permitiendo re-procesar fallidas sin reiniciar el sync.
     private val retryRequests = ConcurrentHashMap.newKeySet<String>()
 
+    /**
+     * Canciones con bytes EN VUELO ahora mismo, por id, sea cual sea la vía (pipeline masivo,
+     * descarga individual del worker, prioritaria por reproducción).
+     *
+     * Hace falta porque el archivo temporal se deriva del id (`<id>.<ext>.tmp`): dos descargas
+     * simultáneas de la misma canción escriben el MISMO archivo y el renombrado final puede
+     * consagrar una mezcla de las dos que pase el control de tamaño. Ninguno de los dedupes que
+     * ya existían lo cubría — `attempted` es local a una corrida del productor y `priorityInFlight`
+     * solo mira las prioritarias—, así que bastaba con pulsar "descargar" sobre una canción que el
+     * sync masivo estaba bajando.
+     *
+     * Lo lee además la poda de carátulas: ver el porqué en [executeSync].
+     */
+    private val downloadsInFlight = ConcurrentHashMap.newKeySet<String>()
+
     private val prioritySongId = MutableStateFlow<String?>(null)
     // Dedupe de descargas prioritarias disparadas por reproducción cuando NO hay un productor
     // de sync activo (ver prioritizeSong): evita lanzar dos descargas individuales del mismo id.
     private val priorityInFlight = ConcurrentHashMap.newKeySet<String>()
     private val syncMutex = Mutex()
     private val isScanning = AtomicBoolean(false)
+
+    /**
+     * Corrutina del refresco local oportunista en curso ([refreshLocalSources]), o `null`.
+     *
+     * Existe para que un sync completo pueda ABORTARLO en vez de esperarlo: los dos listan las
+     * mismas fuentes locales y el sync las va a recorrer igual, así que esperar solo sirve para
+     * hacer el trabajo dos veces seguidas.
+     */
+    private val localRefreshJob = AtomicReference<Job?>(null)
+
+    /**
+     * Aborta el refresco local en curso, si lo hay. Idempotente y no suspende: se puede llamar
+     * desde cualquier punto antes de tomar [syncMutex].
+     */
+    private fun cancelLocalRefresh() {
+        localRefreshJob.getAndSet(null)?.let {
+            if (it.isActive) {
+                Log.d(TAG, "Refresco local abortado: llega un sync completo que ya lo cubre")
+                it.cancel()
+            }
+        }
+    }
     // StateFlow y no AtomicBoolean: además de leerse en los chequeos cooperativos, es una de
     // las señales que despiertan a `awaitNetwork`. Con una bandera opaca, un logout durante la
     // espera de red dejaba al worker (y a su foreground service) vivo hasta agotar el timeout.
@@ -198,6 +237,18 @@ class SyncManager @Inject constructor(
             return SyncOutcome.Skipped
         }
 
+        // El refresco local oportunista, si lo hay, se ABORTA: este sync hace un SUPERCONJUNTO
+        // de su trabajo, así que dejarlo terminar es listar la biblioteca dos veces seguidas.
+        // Esperarlo era exactamente lo que retrasaba el arranque: medido en un Poco F5, el
+        // ScanWorker pasaba 2,9 s bloqueado en el mutex mientras el refresco recorría los mismos
+        // 777 archivos que él iba a recorrer a continuación, y el banner de sincronización no
+        // aparecía hasta 3,7 s después de que la UI estuviera en pantalla.
+        //
+        // Cancelar es seguro y es lo correcto por jerarquía: el refresco es descartable por
+        // definición (oportunista, silencioso, sin red) y su `finally` suelta el mutex. Lo que no
+        // se puede es al revés — el refresco ya cede ante un sync en marcha con su `tryLock`.
+        cancelLocalRefresh()
+
         // Mutex prevents two concurrent startSync calls from both proceeding
         syncMutex.withLock {
             if (isScanning.get()) return SyncOutcome.Skipped
@@ -232,8 +283,14 @@ class SyncManager @Inject constructor(
      * directorios (o una consulta a MediaStore) y solo se ANALIZAN los archivos cuyo id no estaba
      * ya en la BD, que es el trabajo caro. Sin novedades, esto no toca la BD.
      *
-     * `tryLock` y no `withLock`: si hay un sync completo en marcha, ese ya cubre lo local y este
-     * refresco sobra — encolarse solo serviría para repetirlo justo después.
+     * **Nunca corre a la vez que un sync completo, en ninguna de las dos direcciones**, porque
+     * ese hace un superconjunto de este trabajo y solaparlos significa listar la biblioteca dos
+     * veces seguidas:
+     *  - sync YA en marcha → este refresco se salta (`tryLock`, abajo);
+     *  - sync que llega DESPUÉS → aborta este refresco ([cancelLocalRefresh] en `startSync`).
+     *
+     * La segunda dirección faltaba, y era la que se notaba: el sync se quedaba esperando el mutex
+     * y luego repetía el listado entero.
      *
      * @return canciones añadidas (0 también si no había fuentes locales o si se saltó).
      */
@@ -244,6 +301,10 @@ class SyncManager @Inject constructor(
             Log.d(TAG, "Refresco local omitido: ya hay un sync en marcha")
             return 0
         }
+        // Publica la corrutina en curso para que un `startSync` posterior pueda abortarla en vez
+        // de esperarla. Se registra DESPUÉS de tomar el mutex: antes de eso no hay nada que valga
+        // la pena cancelar.
+        localRefreshJob.set(currentCoroutineContext()[Job])
 
         return try {
             // Silencioso a propósito: no toca `_state`, así que no levanta el banner de sync.
@@ -271,11 +332,10 @@ class SyncManager @Inject constructor(
             }
             if (added > 0) Log.d(TAG, "Refresco local: $added canciones nuevas")
 
-            // Carátulas locales pendientes. Sin esto, una biblioteca SOLO local no repara nunca
-            // sus portadas por su cuenta: `resolvePendingArtwork` vive en el sync completo, y el
-            // sync completo solo lo dispara el usuario (pull-to-refresh) o un cambio de fuentes
-            // — no hay ningún scan automático al arrancar. Es justo el caso que arrastra el
-            // fallo de escritura de la 1.0.1, así que dejarlo fuera equivalía a no repararlo.
+            // Carátulas locales pendientes. Sin esto, una biblioteca SOLO local solo las repararía
+            // en el escaneo de arranque (una vez por proceso) o si el usuario hace pull-to-refresh
+            // — y este proceso vive días. Es justo el caso que arrastra el fallo de escritura de
+            // la 1.0.1, así que dejarlo fuera equivalía a no repararlo.
             //
             // Acotado a lo local (`localOnly`) porque este refresco es offline: las pendientes de
             // nube no se pueden resolver aquí y solo se cargarían para nada en cada vuelta a la
@@ -283,6 +343,7 @@ class SyncManager @Inject constructor(
             artworkHealingManager.resolvePendingArtwork(localOnly = true)
             added
         } finally {
+            localRefreshJob.set(null)
             syncMutex.unlock()
         }
     }
@@ -300,6 +361,10 @@ class SyncManager @Inject constructor(
         var wasCancelled = false
         var authError = false
         var fatal: Exception? = null
+        // Sesión caducada de UNA fuente teniendo otras que sí funcionan. Se guarda aquí y se
+        // aplica al final de la corrida (ver `finally`): el resto del sync debe correr igual,
+        // pero el desenlace NO puede ser "Biblioteca al día".
+        var authFailure: Exception? = null
         queueStopReason.set(null)
         try {
             _state.value = SyncStatus.Scanning(0, context.getString(R.string.sync_looking_for_changes))
@@ -322,8 +387,6 @@ class SyncManager @Inject constructor(
                     succeeded++
                 } catch (e: CancellationException) {
                     throw e
-                } catch (e: CancellationException) {
-                    throw e
                 } catch (e: Exception) {
                     Log.e(TAG, "Fuente ${source.type} falló en discover: ${e.message}")
                     if (sourceFailure == null) sourceFailure = e
@@ -334,6 +397,18 @@ class SyncManager @Inject constructor(
                     if (e is com.qhana.siku.data.source.SourceFolderMissingException) {
                         snackbarManager.show(
                             context.getString(R.string.sync_err_folder_missing, e.folder),
+                            length = com.qhana.siku.data.util.SnackbarLength.LONG
+                        )
+                    }
+                    // Una sesión caducada es de la MISMA categoría: no se arregla sola y exige
+                    // volver a entrar. Se recuerda para aplicarla al final (ver el `finally`) en
+                    // vez de relanzarla aquí, porque el resto del sync —lo local, el healing— sí
+                    // debe correr; lo que no puede pasar es que la corrida termine en "Biblioteca
+                    // al día" con la nube entera sin sincronizar y sin un solo aviso.
+                    if (e is com.qhana.siku.data.source.SourceAuthException) {
+                        authFailure = e
+                        snackbarManager.show(
+                            context.getString(R.string.sync_error_auth),
                             length = com.qhana.siku.data.util.SnackbarLength.LONG
                         )
                     }
@@ -380,6 +455,24 @@ class SyncManager @Inject constructor(
                 downloaded = dl
                 failed = fl
 
+                // Migración de datos de una sola pasada: número de pista y año de la biblioteca
+                // que se escaneó antes de que esos tags se leyeran (ver TrackInfoBackfiller).
+                // DESPUÉS de las descargas: las que se acaban de bajar ya escribieron su pista al
+                // analizarse, así que no vuelven a mirarse; y las que el tope dejó en la nube no
+                // tienen archivo que abrir, que es justo lo que esta fase exige. Reusa el banner
+                // de "leyendo etiquetas": es literalmente lo que hace y evita otro string.
+                if (!stopSignal.value) {
+                    try {
+                        _state.value = SyncStatus.Preparing(0, 0, context.getString(R.string.sync_reading_tags))
+                        trackInfoBackfiller.run(isStopped = { stopSignal.value })
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        // Cosmético: sin pista se sigue ordenando por título, como hasta ahora.
+                        Log.w(TAG, "Backfill de pista/año falló: ${e.message}")
+                    }
+                }
+
                 // Carátulas pendientes: las que la indexación dejó sin portada. Normalmente no
                 // hay ninguna y esto es una consulta vacía.
                 //
@@ -401,7 +494,16 @@ class SyncManager @Inject constructor(
                     // ya no queda nada escribiendo portadas (el escaneo flusheó sus lotes, la
                     // metadata ligera terminó y la cola de descargas también), así que "sin
                     // referencias" significa de verdad "sobra". Ver ArtworkHealingManager.pruneCovers.
-                    if (!stopSignal.value) artworkHealingManager.pruneCovers()
+                    //
+                    // La excepción es una descarga PRIORITARIA por reproducción: corre fuera del
+                    // `syncMutex` y en esta fase el productor ya no está activo, así que puede
+                    // arrancar justo ahora. Su ventana `saveArtwork` → `updateSongMetadata` es
+                    // precisamente la que el orden de lectura de la poda no puede cubrir (el
+                    // archivo ya está en la foto del directorio y todavía no lo referencia nadie),
+                    // así que con descargas en vuelo se pospone al próximo sync — no cuesta nada.
+                    if (!stopSignal.value && downloadsInFlight.isEmpty()) {
+                        artworkHealingManager.pruneCovers()
+                    }
                 }
 
                 // Fotos de artista (Deezer) pendientes: mismo rol que los healings de arriba
@@ -436,8 +538,18 @@ class SyncManager @Inject constructor(
                 )
             )
         } finally {
+            // Una fuente con la sesión caducada convierte la corrida en fallida AUNQUE las demás
+            // hayan ido bien: su biblioteca no se sincronizó y no volverá a hacerlo sin que el
+            // usuario entre otra vez. Se resuelve aquí, al final, porque las fases posteriores
+            // (metadata, descargas, healing) sobrescriben `_state` y borrarían el aviso.
+            if (authFailure != null && !wasCancelled && !stopSignal.value) {
+                authError = true
+                if (fatal == null) fatal = authFailure
+            }
             if (wasCancelled || stopSignal.value) {
                 _state.value = SyncStatus.Idle
+            } else if (authError) {
+                _state.value = SyncStatus.Error(context.getString(R.string.sync_error_auth))
             } else if (_state.value !is SyncStatus.Error) {
                 // Una cola detenida NO es un sync terminado. Antes este bloque publicaba
                 // `Complete` mirando solo si hubo excepción, así que un sync que se quedó a
@@ -527,11 +639,6 @@ class SyncManager @Inject constructor(
     }
 
     /**
-     * Respuesta del usuario al diálogo de duplicados: persiste la política, la aplica ya y
-     * relanza un sync incremental para completar lo que quedó en espera de la decisión
-     * (p. ej. descargas de nube retenidas por [undecidedDuplicateIds]).
-     */
-    /**
      * "Ahora no" del diálogo: oculta la pregunta SIN persistir política — el próximo scan
      * vuelve a detectar. Las copias en disputa siguen retenidas (no se descargan) esta corrida.
      */
@@ -539,19 +646,31 @@ class SyncManager @Inject constructor(
         _duplicateDecisionNeeded.value = null
     }
 
+    /**
+     * Respuesta del usuario al diálogo de duplicados: persiste la política, la aplica ya y
+     * encola un scan para completar lo que quedó en espera de la decisión (p. ej. descargas de
+     * nube retenidas por [undecidedDuplicateIds]).
+     */
     fun resolveDuplicateDecision(policy: DuplicatePolicy) {
         musicPreferences.saveDuplicatePolicy(policy)
         undecidedDuplicateIds = emptySet()
         _duplicateDecisionNeeded.value = null
         scope.launch {
             try {
+                // La fusión sí corre aquí: son unas pocas queries locales, es idempotente y así
+                // los duplicados desaparecen de la biblioteca en el acto. Lo que NO puede correr
+                // en este scope es el sync completo — sin foreground service, backgroundear la app
+                // lo mata a mitad (mismo motivo que documenta el kdoc de `retryFailedDownloads`).
                 applyDuplicatePolicy(policy)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.w(TAG, "applyDuplicatePolicy tras la decisión falló: ${e.message}")
             }
-            startSync(false)
+            // Lo que quedó retenido en espera de la decisión (descargas de nube en disputa) lo
+            // completa un ScanWorker, que además vuelve a aplicar la política por su cuenta
+            // (`handleCrossSourceDuplicates`) si la fusión de arriba no llegó a terminar.
+            downloadScheduler.scheduleScan()
         }
     }
 
@@ -715,6 +834,7 @@ class SyncManager @Inject constructor(
         scope.coroutineContext.cancelChildren()
         // El publicador se canceló junto con el scope; garantizamos el estado final vacío.
         activeDownloadsMap.clear()
+        downloadsInFlight.clear()
         _activeDownloads.value = emptyList()
     }
 
@@ -776,6 +896,14 @@ class SyncManager @Inject constructor(
             if (song.path.startsWith("file://")) musicRepository.updateSongUrl(song.id, "")
         }
 
+        // Ya la está bajando otra vía (el pipeline masivo, o una petición individual anterior):
+        // duplicarla haría que las dos escribieran el mismo `.tmp`. Cancelled y no Error porque
+        // no ha fallado nada — hay una descarga en curso que va a dejar el archivo en su sitio.
+        if (!downloadsInFlight.add(song.id)) {
+            Log.d(TAG, "Descarga de '${song.title}' ya en vuelo; no se duplica")
+            return MusicDownloader.Result.Cancelled
+        }
+
         activeDownloadsMap[song.id] = ActiveDownload(song, 0f, individual = true)
         markDownloadsDirty()
         return try {
@@ -805,6 +933,7 @@ class SyncManager @Inject constructor(
         } catch (e: Exception) {
             MusicDownloader.Result.Error("downloadSong exception: ${e.message}", e)
         } finally {
+            downloadsInFlight.remove(song.id)
             activeDownloadsMap.remove(song.id)
             markDownloadsDirty()
         }
@@ -908,6 +1037,12 @@ class SyncManager @Inject constructor(
                     // esas nunca pasan por el canal (ver handlePrioritySong).
                     if (!networkManager.isWifi()) continue
 
+                    // Otra vía ya la está bajando (el usuario pulsó "descargar" sobre una canción
+                    // que el masivo tenía encolada): se salta. Sigue "needing work" en BD si esa
+                    // descarga fallara, así que no se pierde — lo que no puede pasar es que las
+                    // dos escriban el mismo archivo temporal.
+                    if (!downloadsInFlight.add(song.id)) continue
+
                     val onProgress: (Float) -> Unit = {
                         activeDownloadsMap[song.id] = ActiveDownload(song, it)
                         markDownloadsDirty()
@@ -921,6 +1056,7 @@ class SyncManager @Inject constructor(
                     val stage = try {
                         downloadWithTransientRetry(song, onProgress)
                     } finally {
+                        downloadsInFlight.remove(song.id)
                         activeDownloadsMap.remove(song.id)
                         markDownloadsDirty()
                     }
@@ -931,9 +1067,18 @@ class SyncManager @Inject constructor(
                             finalizeChannel.send(song to stage.targetFile)
                         }
                         is MusicDownloader.DownloadStage.Error -> {
-                            recordDownloadFailure(song, stage.message, stage.kind == MusicDownloader.ErrorKind.TRANSIENT)
-                            failedCount.incrementAndGet()
-                            updateProgress(current.incrementAndGet(), total, failedCount.get())
+                            // Un fallo causado por que la RED SE CAYÓ a mitad del sync no es de la
+                            // canción: registrarlo le pone `nextRetryAt` y el sync que WorkManager
+                            // reanuda en cuanto vuelve la red se salta justo a las que el corte
+                            // interrumpió. Se drenan sin penalizar, como ya hace el corte por red
+                            // medida (que sale por `Cancelled`); siguen "needing work" en BD.
+                            if (queueStopReason.get() == IncompleteReason.NETWORK_LOST) {
+                                Log.d(TAG, "Descarga de ${song.title} abortada por corte de red: sin backoff")
+                            } else {
+                                recordDownloadFailure(song, stage.message, stage.kind == MusicDownloader.ErrorKind.TRANSIENT)
+                                failedCount.incrementAndGet()
+                                updateProgress(current.incrementAndGet(), total, failedCount.get())
+                            }
                         }
                         MusicDownloader.DownloadStage.Cancelled -> { /* drenada, no cuenta */ }
                         // Batería baja: detener la cola con motivo explícito (NO stopSignal:
@@ -1002,8 +1147,16 @@ class SyncManager @Inject constructor(
                 // vuelve; si no vuelve, terminamos con NO_WIFI y ScanWorker encadena una
                 // continuación con constraint UNMETERED.
                 if (!networkManager.isWifi()) {
+                    // Una PRIORITARIA que llegue durante esta espera también la termina: aquí sí
+                    // hay red (solo que medida) y las prioritarias están permitidas en datos, así
+                    // que seguir esperando al WiFi dejaría la canción que el usuario acaba de
+                    // pulsar sin atender hasta un minuto. Al salir por esta vía, el `continue`
+                    // vuelve arriba y la atiende (`handlePrioritySong`), que además la limpia —
+                    // por eso no se convierte en un bucle ocupado.
                     if (!awaitPaused(IncompleteReason.NO_WIFI, WIFI_WAIT_TIMEOUT_MS,
-                            current, total, failedCount) { networkManager.isWifi() }
+                            current, total, failedCount) {
+                            networkManager.isWifi() || prioritySongId.value != null
+                        }
                     ) {
                         queueStopReason.compareAndSet(null, IncompleteReason.NO_WIFI)
                     }
@@ -1131,7 +1284,12 @@ class SyncManager @Inject constructor(
         withTimeoutOrNull(timeoutMs) {
             merge(
                 networkManager.status.map { },
-                stopSignal.map { }
+                stopSignal.map { },
+                // Una petición prioritaria también es una señal: hay esperas (el gate de WiFi)
+                // cuya condición la incluye. Para las que no —la de red caída, donde no se puede
+                // descargar nada— es inocua: `first` solo termina si el predicado se cumple, así
+                // que una emisión que no lo cumple se limita a re-evaluarlo.
+                prioritySongId.map { }
             ).first { condition() || stopSignal.value }
         }
         return condition() && !stopSignal.value
@@ -1213,7 +1371,12 @@ class SyncManager @Inject constructor(
                 priorityJob?.join()
             }
         }
-        clearPriority()
+        // Solo se limpia si sigue siendo LA MISMA canción. El `join` de arriba dura lo que dura
+        // una descarga (minutos con un FLAC) y en ese rato el usuario puede haber saltado a otra:
+        // un `clearPriority()` incondicional borraba esa petición nueva sin que nadie la hubiera
+        // atendido, y la canción que estaba sonando se quedaba en streaming hasta que el masivo
+        // llegara a ella por orden alfabético — o hasta nunca, si la corrida terminaba antes.
+        prioritySongId.compareAndSet(id, null)
         attempted.add(id)
     }
 
@@ -1229,6 +1392,8 @@ class SyncManager @Inject constructor(
         // Tope de almacenamiento: desalojo LRU para que quepa la prioritaria. Si ni vaciando
         // cabe (canción > tope entero), se deja en streaming (Cancelled no registra fallo).
         if (!ensureRoomForDownload(song.size, excludeId = song.id)) return MusicDownloader.Result.Cancelled
+        // Ver `downloadsInFlight`: nadie más puede estar escribiendo el `.tmp` de esta canción.
+        if (!downloadsInFlight.add(song.id)) return MusicDownloader.Result.Cancelled
         return try {
             activeDownloadsMap[song.id] = ActiveDownload(song, 0f, individual = isPriority)
             markDownloadsDirty()
@@ -1238,7 +1403,7 @@ class SyncManager @Inject constructor(
                 markDownloadsDirty()
             }
             val stage = runDownloadWithRetry(song, isPriority, onProgress)
-            when (stage) {
+            val result = when (stage) {
                 is MusicDownloader.DownloadStage.Success -> musicDownloader.finalizeDownload(song, stage.targetFile)
                 is MusicDownloader.DownloadStage.Error -> MusicDownloader.Result.Error(
                     stage.message, stage.exception,
@@ -1247,8 +1412,19 @@ class SyncManager @Inject constructor(
                 MusicDownloader.DownloadStage.Cancelled -> MusicDownloader.Result.Cancelled
                 MusicDownloader.DownloadStage.SkippedLowBattery -> MusicDownloader.Result.SkippedLowBattery
             }
+            // Cola persistente (v18), igual que `downloadSong` y que el pipeline masivo: esta vía
+            // no dejaba rastro en BD, así que una canción cuyo item de OneDrive ya no existe
+            // fallaba en silencio en CADA reproducción — sin backoff que la frenara y sin
+            // aparecer en la lista de descargas fallidas.
+            when (result) {
+                is MusicDownloader.Result.Success -> musicRepository.clearDownloadError(song.id)
+                is MusicDownloader.Result.Error -> recordDownloadFailure(song, result.message, result.transient)
+                else -> { /* Cancelled / low battery: no son fallos de la canción */ }
+            }
+            result
         } catch (e: Exception) { MusicDownloader.Result.Error(e.message ?: "Error") }
         finally {
+            downloadsInFlight.remove(song.id)
             activeDownloadsMap.remove(song.id)
             markDownloadsDirty()
         }

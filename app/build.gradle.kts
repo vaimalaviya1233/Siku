@@ -17,14 +17,17 @@ val keystoreProps = Properties().apply {
 
 android {
     namespace = "com.qhana.siku"
-    compileSdk = 36
+    // 37 lo EXIGE MaterialKolor 5.0.0: arrastra `compose.material3:1.11.0-alpha07`, que ya no
+    // compila contra 36. `targetSdk` sigue en 35 a propósito — compileSdk solo dice contra qué
+    // API se compila, no cambia el comportamiento en runtime de la app publicada.
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.qhana.siku"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.0.1"
+        versionCode = 4
+        versionName = "1.1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -73,6 +76,9 @@ android {
     }
     buildFeatures {
         compose = true
+        // Para leer VERSION_NAME desde el código: el User-Agent que exige LrcLib debe llevar la
+        // versión REAL, y escrita a mano se quedó desfasada (decía 1.0 con la app en 1.1.1).
+        buildConfig = true
     }
     packaging {
         resources {
@@ -100,13 +106,25 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     // 1.5.0-alpha: APIs Expressive públicas (MotionScheme, ButtonGroup, ToggleButton,
     // SplitButton, MaterialShapes). Override explícito sobre el BOM (que mapea 1.4.0).
-    implementation("androidx.compose.material3:material3:1.5.0-alpha18")
+    //
+    // El pin estaba en alpha18 porque de alpha20 en adelante exigían compileSdk 37; con el salto a
+    // 37 esa restricción desaparece y se pasa a la última publicada (alpha24, comprobada en el
+    // índice de maven.google.com el 28 jul 2026). OJO: en androidx, M3 Expressive TODAVÍA no es
+    // estable — el "officially stable" del changelog de MaterialKolor 5 habla de Compose
+    // Multiplatform (`org.jetbrains.compose.material3`), que no es lo que usa esta app. Si alguna
+    // API cambió de nombre entre alpha18 y alpha24, volver a alpha18 es cambiar esta línea.
+    implementation("androidx.compose.material3:material3:1.5.0-alpha24")
     // Genera un ColorScheme M3 completo desde un color "seed" (acento del álbum). Arrastra
     // `com.materialkolor:material-color-utilities` como transitiva, y de ahí salen también el
     // quantizer, el Score y el HCT que ArtworkRepository usa para SACAR ese seed de la carátula
     // (`com.materialkolor.quantize` / `.score` / `.hct`). NO se declara explícita a propósito:
     // ya se intentó y dio problemas de resolución (ver más abajo); si algún día se separa,
     // fijarla con la MISMA versión que material-kolor.
+    // 4.1.1, NO 5.0.0: la 5 exige Kotlin 2.4.0 y no hay KSP para 2.4 todavía (ver el comentario
+    // del plugin de Kotlin en el build raíz). Y no se pierde nada de color: verificado sobre las
+    // fuentes de la 5 — `SpecVersion.Default` sigue siendo SPEC_2021 y las paletas de cada
+    // variante son idénticas a las de 4.1.1. Lo único nuevo es `DynamicMaterialExpressiveTheme`,
+    // azúcar sobre lo que `MusicPlayerTheme` ya hace a mano.
     implementation("com.materialkolor:material-kolor:4.1.1")
 
     // Haze - backdrop blur (vidrio esmerilado) para contenedores sobre la carátula en NowPlaying

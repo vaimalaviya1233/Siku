@@ -71,7 +71,11 @@ fun MusicPlayerScreen(
     libraryViewModel: LibraryViewModel = hiltViewModel(),
     pendingNowPlayingNavigation: Boolean = false,
     onNavigationHandled: () -> Unit = {},
-    onKeepScreenOnChanged: (Boolean) -> Unit = {}
+    onKeepScreenOnChanged: (Boolean) -> Unit = {},
+    // Izado desde MainActivity: el tema (que envuelve a esta pantalla) necesita saber si el
+    // reproductor está abierto para congelar la animación del esquema (ver MusicPlayerTheme).
+    playerExpandedState: androidx.compose.runtime.MutableState<Boolean> =
+        rememberSaveable { mutableStateOf(false) }
 ) {
     val context = LocalContext.current
 
@@ -134,11 +138,16 @@ fun MusicPlayerScreen(
         val notified = mutableSetOf<UUID>()
         var isInitialSnapshot = true
         workManager.getWorkInfosByTagFlow("download_tracking")
-            .collectLatest { workInfos ->
+            // `collect`, NO `collectLatest`: este bloque tiene EFECTOS (marca ids como avisados y
+            // muestra el snackbar). Con `collectLatest`, una emisión nueva —y WorkManager emite
+            // en ráfaga durante un sync— lo cancelaba a mitad del recorrido, dejando ids ya
+            // marcados en `notified` cuyo aviso nunca llegó a mostrarse: descargas que terminan
+            // en silencio. El trabajo es corto y no se puede abandonar a medias.
+            .collect { workInfos ->
                 if (isInitialSnapshot) {
                     isInitialSnapshot = false
                     notified += workInfos.filter { it.state.isFinished }.map { it.id }
-                    return@collectLatest
+                    return@collect
                 }
                 workInfos
                     .filter {
@@ -188,7 +197,7 @@ fun MusicPlayerScreen(
         else Screen.Onboarding.route
     }
 
-    val appState = rememberMusicAppState()
+    val appState = rememberMusicAppState(playerExpandedState = playerExpandedState)
 
     // Sincronización al conectar sesión (primer arranque de la composición o login posterior).
     //
@@ -239,11 +248,27 @@ fun MusicPlayerScreen(
     // cada alt-tab sería tráfico por nada). Por eso el observer se monta condicionado a
     // `hasLocalSource` y no a `hasAnySource`: sin música del dispositivo ni siquiera se registra.
     //
-    // Registrarse dispara un ON_START de arranque además de los de vuelta, y se deja correr a
-    // propósito: es idempotente, y cubre que el ScanWorker se retrase por sus constraints
-    // (batería baja) — la música local aparece igual, que es lo único que no necesita red.
+    // Registrarse dispara un ON_START de arranque además de los de vuelta, y ESE se descarta:
+    // ver [skipStartupLocalRefresh]. Se dejaba correr por ser idempotente, pero idempotente no
+    // es gratis y además bloqueaba al ScanWorker.
     // Compartido con el polling de posición de más abajo.
     val lifecycleOwner = LocalLifecycleOwner.current
+
+    /**
+     * El PRIMER ON_START del proceso se ignora: el escaneo de arranque de arriba ya cubre lo
+     * local y hace EXACTAMENTE el mismo `discover`.
+     *
+     * Correr los dos no solo duplicaba el trabajo —medido en un Poco F5: los mismos 777 archivos
+     * listados dos veces, ~5,6 s de I/O—, sino que el `ScanWorker` se quedaba **bloqueado en el
+     * `syncMutex` que tenía este refresco**, así que el banner de sincronización no aparecía
+     * hasta 3,7 s después de que la UI estuviera en pantalla. El refresco usa `tryLock` para
+     * apartarse cuando ya hay un sync en marcha, pero la protección solo cubría esa dirección:
+     * al revés, el sync espera al refresco y luego repite su trabajo.
+     *
+     * Sobrevive a la rotación (`rememberSaveable`) para que solo se salte el ON_START que de
+     * verdad coincide con el escaneo de arranque, no los de una Activity recreada.
+     */
+    var skipStartupLocalRefresh by rememberSaveable { mutableStateOf(true) }
 
     if (hasLocalSource) {
         DisposableEffect(lifecycleOwner) {
@@ -256,8 +281,16 @@ fun MusicPlayerScreen(
                 // al terminarlo el usuario sigue en el mismo proceso y sí debe refrescarse.
                 val inOnboarding =
                     appState.navController.currentDestination?.route == Screen.Onboarding.route
-                if (event == Lifecycle.Event.ON_START && !inOnboarding) {
-                    syncViewModel.refreshLocalLibrary()
+                if (event == Lifecycle.Event.ON_START) {
+                    // La bandera marca el ON_START DEL ARRANQUE, así que se consume aquí aunque
+                    // la ruta descarte el refresco: si solo se consumiera al refrescar, un primer
+                    // arranque que empieza en el onboarding se la dejaría intacta y se la comería
+                    // el primer regreso REAL a la app, perdiendo ese refresco legítimo.
+                    val isStartupEvent = skipStartupLocalRefresh
+                    skipStartupLocalRefresh = false
+                    if (!isStartupEvent && !inOnboarding) {
+                        syncViewModel.refreshLocalLibrary()
+                    }
                 }
             }
             lifecycleOwner.lifecycle.addObserver(observer)
@@ -270,7 +303,7 @@ fun MusicPlayerScreen(
     // usuario se queda donde está — desconectar la nube no lo expulsa de su biblioteca offline.
     LaunchedEffect(hasAnySource) {
         if (!hasAnySource && appState.navController.currentDestination?.route != Screen.Onboarding.route) {
-            appState.playerExpanded = false
+            appState.collapsePlayer()
             appState.navController.navigate(Screen.Onboarding.route) { popUpTo(0) { inclusive = true } }
         }
     }
@@ -278,7 +311,7 @@ fun MusicPlayerScreen(
     // Deep link del NowPlaying (notificación → abrir player).
     LaunchedEffect(pendingNowPlayingNavigation, currentSong) {
         if (pendingNowPlayingNavigation && currentSong != null) {
-            appState.playerExpanded = true
+            appState.openPlayer()
             onNavigationHandled()
         }
     }

@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.qhana.siku.R
 import com.qhana.siku.data.local.AlbumSummary
+import com.qhana.siku.ui.theme.AppBoundsTransform
 
 /**
  * Tarjeta de álbum: `Card` tonal con la carátula arriba (esquinas superiores redondeadas por el
@@ -72,7 +73,9 @@ fun AlbumTileCard(
             with(sharedTransitionScope) {
                 Modifier.sharedBounds(
                     sharedContentState = rememberSharedContentState(key = "album_image_${album.name}"),
-                    animatedVisibilityScope = animatedVisibilityScope
+                    animatedVisibilityScope = animatedVisibilityScope,
+                    // Spring del tema en vez del default de la API (ver AppBoundsTransform).
+                    boundsTransform = AppBoundsTransform
                 )
             }
         } else Modifier

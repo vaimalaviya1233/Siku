@@ -44,13 +44,18 @@ fun AddToPlaylistBottomSheet(
             HorizontalDivider()
 
             LazyColumn {
-                items(playlists) { playlist ->
+                // `key` explícita: sin ella Lazy identifica los items por posición, así que crear
+                // una lista desde esta misma hoja recomponía las filas en su sitio en vez de
+                // insertar una nueva — y `animateItem` no tendría a quién seguir.
+                items(playlists, key = { it.id }) { playlist ->
                     ListItem(
                         headlineContent = { Text(playlist.name) },
                         leadingContent = {
                             MaterialSymbol("queue_music")
                         },
-                        modifier = Modifier.clickable { onPlaylistSelected(playlist.id) }
+                        modifier = Modifier
+                            .animateItem()
+                            .clickable { onPlaylistSelected(playlist.id) }
                     )
                 }
             }

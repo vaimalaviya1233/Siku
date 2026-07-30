@@ -8,6 +8,7 @@ import com.qhana.siku.data.config.AppConfig
 import com.qhana.siku.data.local.PlaylistDao
 import com.qhana.siku.data.local.PlaylistEntity
 import com.qhana.siku.data.local.PlaylistSongCrossRef
+import com.qhana.siku.data.local.SongDao
 import com.qhana.siku.data.model.Playlist
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.model.SortOrder
@@ -22,10 +23,11 @@ class PlaylistRepository @Inject constructor(
     private val playlistDao: PlaylistDao
 ) : IPlaylistRepository {
 
-    override suspend fun repointSongRefs(loserId: String, winnerId: String) {
-        playlistDao.repointSongRefs(loserId, winnerId)
-        playlistDao.deleteRefsForSong(loserId)
-    }
+    override suspend fun repointSongRefs(loserId: String, winnerId: String) =
+        // Atómico en el DAO: son dos statements (re-apuntar + borrar los que el UPDATE ignoró por
+        // duplicado) y morir entre medias dejaba refs de la perdedora apuntando a una fila que el
+        // dedupe va a borrar.
+        playlistDao.repointAndCleanupSongRefs(loserId, winnerId)
 
     override fun getUserPlaylists(): Flow<List<Playlist>> =
         playlistDao.getUserPlaylistsFlow(AppConfig.FAVORITES_PLAYLIST_UUID).map { entities ->
@@ -137,7 +139,12 @@ class PlaylistRepository @Inject constructor(
             config = PagingConfig(pageSize = 20, enablePlaceholders = true),
             pagingSourceFactory = {
                 if (query.isNotBlank())
-                    playlistDao.searchSongsByPlaylistUuidPaging(AppConfig.FAVORITES_PLAYLIST_UUID, query)
+                    // El DAO pone los `%` y el `ESCAPE '\'`; aquí solo hay que neutralizar los
+                    // comodines que traiga el texto del usuario (buscar "100%" es literal).
+                    playlistDao.searchSongsByPlaylistUuidPaging(
+                        AppConfig.FAVORITES_PLAYLIST_UUID,
+                        SongDao.escapeLike(query)
+                    )
                 else
                     playlistDao.getSongsByPlaylistUuidPaging(AppConfig.FAVORITES_PLAYLIST_UUID)
             }
@@ -146,7 +153,10 @@ class PlaylistRepository @Inject constructor(
 
     override suspend fun getFavoritesSnapshot(query: String): List<Song> = withContext(Dispatchers.IO) {
         val entities = if (query.isNotBlank())
-            playlistDao.searchSongsByPlaylistUuidList(AppConfig.FAVORITES_PLAYLIST_UUID, query)
+            playlistDao.searchSongsByPlaylistUuidList(
+                AppConfig.FAVORITES_PLAYLIST_UUID,
+                SongDao.escapeLike(query)
+            )
         else
             playlistDao.getSongsByPlaylistUuidList(AppConfig.FAVORITES_PLAYLIST_UUID)
         entities.map { it.toSong() }

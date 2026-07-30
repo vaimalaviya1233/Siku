@@ -213,7 +213,9 @@ fun SongsScreen(
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             items(searchArtists, key = { it.name }) { artist ->
-                                SearchArtistCard(artist) { onSearchArtistClick(artist.name) }
+                                SearchArtistCard(artist, Modifier.animateItem()) {
+                                    onSearchArtistClick(artist.name)
+                                }
                             }
                         }
                     }
@@ -228,7 +230,9 @@ fun SongsScreen(
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             items(searchAlbums, key = { it.name }) { album ->
-                                SearchAlbumCard(album) { onSearchAlbumClick(album.name) }
+                                SearchAlbumCard(album, Modifier.animateItem()) {
+                                    onSearchAlbumClick(album.name)
+                                }
                             }
                         }
                     }
@@ -438,36 +442,44 @@ private fun SongItemMenu(
         ) {
             MaterialSymbol("more_vert", size = 18.sp, color = content)
         }
-        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.menu_add_to_playlist)) },
-                onClick = { onAddToPlaylistRequest(songId); showMenu = false },
-                leadingIcon = { MaterialSymbol("playlist_add") }
-            )
-            // Sin sentido para música LOCAL (no hay copia en la nube que volver a bajar).
-            if (showRedownload) {
+        // Menú SEGMENTADO (popup + grupo), no el `DropdownMenu` clásico: ver la nota en SortChip.
+        DropdownMenuPopup(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+            DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
                 DropdownMenuItem(
-                    // "Redescargar" solo si YA está en disco; para una canción en streaming
-                    // la acción es una primera descarga y la etiqueta debe decirlo. En curso
-                    // siempre "Descargando…": la re-descarga borra el archivo primero, así
-                    // que en ese momento se está descargando, a secas.
-                    text = { Text(when {
-                        isRedownloading -> stringResource(R.string.status_downloading_generic)
-                        isDownloaded -> stringResource(R.string.common_redownload)
-                        else -> stringResource(R.string.np_download)
-                    }) },
-                    onClick = { onRedownload(); showMenu = false },
-                    enabled = !isRedownloading,
-                    leadingIcon = { MaterialSymbol("sync") }
+                    onClick = { onAddToPlaylistRequest(songId); showMenu = false },
+                    text = { Text(stringResource(R.string.menu_add_to_playlist)) },
+                    shape = MenuDefaults.leadingItemShape,
+                    leadingIcon = { MenuItemIcon("playlist_add") }
+                )
+                // Sin sentido para música LOCAL (no hay copia en la nube que volver a bajar).
+                if (showRedownload) {
+                    DropdownMenuItem(
+                        onClick = { onRedownload(); showMenu = false },
+                        // "Redescargar" solo si YA está en disco; para una canción en streaming
+                        // la acción es una primera descarga y la etiqueta debe decirlo. En curso
+                        // siempre "Descargando…": la re-descarga borra el archivo primero, así
+                        // que en ese momento se está descargando, a secas.
+                        text = { Text(when {
+                            isRedownloading -> stringResource(R.string.status_downloading_generic)
+                            isDownloaded -> stringResource(R.string.common_redownload)
+                            else -> stringResource(R.string.np_download)
+                        }) },
+                        shape = MenuDefaults.middleItemShape,
+                        enabled = !isRedownloading,
+                        leadingIcon = { MenuItemIcon("sync") }
+                    )
+                }
+                // Favorito es un TOGGLE: la sobrecarga `checked` le da contenedor marcado, morph
+                // de forma y `Role.Checkbox`. Antes el único indicio de estado era el relleno del
+                // corazón, invisible para un lector de pantalla.
+                DropdownMenuItem(
+                    checked = isFavorite,
+                    onCheckedChange = { onToggleFavorite(songId); showMenu = false },
+                    text = { Text(if (isFavorite) stringResource(R.string.menu_remove_favorite) else stringResource(R.string.menu_favorite)) },
+                    shapes = MenuDefaults.itemShapes(shape = MenuDefaults.trailingItemShape),
+                    leadingIcon = { MenuItemIcon("favorite", fill = isFavorite) }
                 )
             }
-            DropdownMenuItem(
-                text = { Text(if (isFavorite) stringResource(R.string.menu_remove_favorite) else stringResource(R.string.menu_favorite)) },
-                onClick = { onToggleFavorite(songId); showMenu = false },
-                leadingIcon = {
-                    MaterialSymbol("favorite", fill = isFavorite)
-                }
-            )
         }
     }
 }
@@ -542,10 +554,14 @@ private fun SearchSectionHeader(title: String) {
 }
 
 @Composable
-private fun SearchArtistCard(artist: ArtistSummary, onClick: () -> Unit) {
+private fun SearchArtistCard(
+    artist: ArtistSummary,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
+        modifier = modifier
             .width(84.dp)
             .clip(RoundedCornerShape(16.dp))
             .clickable(onClick = onClick)
@@ -583,10 +599,14 @@ private fun SearchArtistCard(artist: ArtistSummary, onClick: () -> Unit) {
 }
 
 @Composable
-private fun SearchAlbumCard(album: AlbumSummary, onClick: () -> Unit) {
+private fun SearchAlbumCard(
+    album: AlbumSummary,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
+        modifier = modifier
             .width(84.dp)
             .clip(RoundedCornerShape(16.dp))
             .clickable(onClick = onClick)

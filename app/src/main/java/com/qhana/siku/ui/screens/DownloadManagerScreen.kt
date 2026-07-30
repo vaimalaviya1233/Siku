@@ -2,7 +2,6 @@ package com.qhana.siku.ui.screens
 
 import android.text.format.Formatter
 import androidx.compose.animation.*
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -19,6 +18,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.qhana.siku.R
 import androidx.compose.ui.unit.sp
@@ -30,6 +30,7 @@ import androidx.compose.ui.semantics.semantics
 import com.qhana.siku.data.coordinator.SyncStatus
 import com.qhana.siku.data.repository.FailedDownload
 import com.qhana.siku.ui.components.ComponentConfig
+import com.qhana.siku.ui.components.ConnectedChoiceGroup
 import com.qhana.siku.ui.components.DownloadStateBanner
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.SongItem
@@ -40,6 +41,13 @@ import com.qhana.siku.ui.viewmodel.SyncViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import com.qhana.siku.ui.theme.EXPRESSIVE_DEFAULT_EFFECTS_MS
+import com.qhana.siku.ui.theme.EXPRESSIVE_FAST_EFFECTS_MS
+import com.qhana.siku.ui.theme.ExpressiveDefaultEffectsEasing
+import com.qhana.siku.ui.theme.ExpressiveFastEffectsEasing
+import com.qhana.siku.ui.theme.SCREEN_ENTER_MS
+import com.qhana.siku.ui.theme.ScreenEnterEasing
+import androidx.compose.animation.core.tween
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -115,43 +123,33 @@ fun DownloadManagerScreen(
                 )
             }
 
-            // Native M3 Segmented Button
-            SingleChoiceSegmentedButtonRow(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
-            ) {
-                tabs.forEachIndexed { index, label ->
-                    SegmentedButton(
-                        shape = SegmentedButtonDefaults.itemShape(index = index, count = tabs.size),
-                        onClick = { selectedTabIndex = index },
-                        selected = index == selectedTabIndex,
-                        colors = SegmentedButtonDefaults.colors(
-                            activeContainerColor = MaterialTheme.colorScheme.secondaryContainer,
-                            activeContentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                            inactiveContainerColor = Color.Transparent,
-                            inactiveContentColor = MaterialTheme.colorScheme.onSurface
-                        )
-                    ) {
-                        Text(
-                            text = label,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-            }
+            // Connected button group: el segmentado dejó de recomendarse en M3 Expressive. Los
+            // colores custom que llevaba aquí desaparecen a propósito — eran el tonal por defecto
+            // escrito a mano, que es justo lo que da `tonalToggleButtonColors()`.
+            ConnectedChoiceGroup(
+                options = tabs.indices.toList(),
+                selected = selectedTabIndex,
+                onSelect = { selectedTabIndex = it },
+                labelFor = { tabs[it] },
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+            )
 
             Box(modifier = Modifier.weight(1f)) {
+                // Cambiar de pestaña reemplaza toda la región: transición (shared axis vertical),
+                // así que easing + duración del spec y no springs. Antes iba con los defaults de
+                // compose-animation, que no leen nada del tema.
+                val tabSlide = tween<IntOffset>(SCREEN_ENTER_MS, easing = ScreenEnterEasing)
+                val tabFadeIn = tween<Float>(EXPRESSIVE_DEFAULT_EFFECTS_MS, easing = ExpressiveDefaultEffectsEasing)
+                val tabFadeOut = tween<Float>(EXPRESSIVE_FAST_EFFECTS_MS, easing = ExpressiveFastEffectsEasing)
                 AnimatedContent(
                     targetState = selectedTabIndex,
                     transitionSpec = {
                         if (targetState > initialState) {
-                            (slideInVertically { height -> height } + fadeIn()) togetherWith
-                                    (slideOutVertically { height -> -height } + fadeOut())
+                            (slideInVertically(tabSlide) { height -> height } + fadeIn(tabFadeIn)) togetherWith
+                                    (slideOutVertically(tabSlide) { height -> -height } + fadeOut(tabFadeOut))
                         } else {
-                            (slideInVertically { height -> -height } + fadeIn()) togetherWith
-                                    (slideOutVertically { height -> height } + fadeOut())
+                            (slideInVertically(tabSlide) { height -> -height } + fadeIn(tabFadeIn)) togetherWith
+                                    (slideOutVertically(tabSlide) { height -> height } + fadeOut(tabFadeOut))
                         }
                     },
                     label = "TabTransition"
@@ -299,6 +297,8 @@ private fun OverallProgressCard(syncStatus: SyncStatus, usage: StorageUsage?) {
     }
 }
 
+// `LoadingIndicator` pasó a exigir opt-in explícito en material3 1.5.0-alpha24.
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun ActiveDownloadsTab(
     syncStatus: SyncStatus,
@@ -347,11 +347,15 @@ fun ActiveDownloadsTab(
                 
                 // Forma dinámica basada en posición
                 val shape = rememberListItemShape(index = index, count = activeDownloads.size)
-                
+
                 Surface(
                     shape = shape,
                     color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 1.dp)
+                    // Esta lista se vacía sola conforme terminan las descargas: es donde el
+                    // jump-cut más se notaba.
+                    modifier = Modifier
+                        .animateItem()
+                        .padding(horizontal = 16.dp, vertical = 1.dp)
                 ) {
                                                     SongItem(
                                                         song = uiModel,
@@ -412,7 +416,9 @@ fun FailedDownloadsTab(
                     Surface(
                         shape = shape,
                         color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 1.dp)
+                        modifier = Modifier
+                            .animateItem()
+                            .padding(horizontal = 16.dp, vertical = 1.dp)
                     ) {
                         Column {
                             SongItem(

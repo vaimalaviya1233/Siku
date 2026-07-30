@@ -46,6 +46,7 @@ import com.qhana.siku.data.model.LibraryTabsConfig
 import com.qhana.siku.data.model.PlaybackContext
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.model.SongFilter
+import com.qhana.siku.data.repository.ArtworkRepository
 import com.qhana.siku.ui.components.*
 import com.qhana.siku.ui.viewmodel.BrowseViewModel
 import com.qhana.siku.ui.viewmodel.LibraryBannerState
@@ -54,6 +55,13 @@ import com.qhana.siku.ui.viewmodel.PlaybackViewModel
 import com.qhana.siku.ui.viewmodel.SyncViewModel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+
+import com.qhana.siku.ui.theme.appSpatialSpec
+import com.qhana.siku.ui.theme.appFastSpatialSpec
+import com.qhana.siku.ui.theme.appEffectsSpec
+import com.qhana.siku.ui.theme.appFastEffectsSpec
+import com.qhana.siku.ui.theme.appShrinkFadeOut
+import com.qhana.siku.ui.theme.appExpandFadeIn
 
 @Immutable
 private data class TabInfo(
@@ -153,6 +161,7 @@ fun LibraryScreen(
     val homeRecentlyAdded by libraryViewModel.homeRecentlyAdded.collectAsStateWithLifecycle()
     val topAlbums by browseViewModel.topAlbums.collectAsStateWithLifecycle()
     val recentContexts by libraryViewModel.recentContexts.collectAsStateWithLifecycle()
+    val recentGenreArts by libraryViewModel.recentGenreArts.collectAsStateWithLifecycle()
     val homeStats by libraryViewModel.homeStats.collectAsStateWithLifecycle()
     val homeArtistPick by libraryViewModel.homeArtistPick.collectAsStateWithLifecycle()
     val homeRediscover by libraryViewModel.homeRediscover.collectAsStateWithLifecycle()
@@ -178,9 +187,16 @@ fun LibraryScreen(
 
     // Acento del álbum en reproducción, calculado una sola vez aquí (LibraryScreen está
     // siempre vivo) para que no parpadee al cambiar de tab. null = fallback al sistema.
+    //
+    // Se pinta 1:1 (mezclado con la superficie para teñir la fila que suena), NO se usa como seed,
+    // así que el seed crudo de la carátula hay que proyectarlo al tono que contrasta con este tema:
+    // un seed puede ser un rojo de tono 45 que sobre fondo oscuro no se distingue del fondo.
     val isDarkThemeLib = isSystemInDarkTheme()
     val playingAccent = remember(nowPlayingUiState.albumColors, isDarkThemeLib) {
-        nowPlayingUiState.albumColors?.let { c -> Color(if (isDarkThemeLib) c.secondary else c.primary) }
+        nowPlayingUiState.albumColors?.let { c ->
+            val seed = if (isDarkThemeLib) c.secondary else c.primary
+            Color(ArtworkRepository.accentForTheme(seed, isDarkThemeLib))
+        }
     }
 
     // Dialog State
@@ -241,7 +257,7 @@ fun LibraryScreen(
     // se probó surfaceContainerLow como paliativo y con el gap corregido sobraba.
     val headerColor by animateColorAsState(
         targetValue = if (headerScrolled) colorScheme.surfaceContainer else colorScheme.surface,
-        animationSpec = MaterialTheme.motionScheme.defaultEffectsSpec(),
+        animationSpec = appEffectsSpec(),
         label = "headerColor"
     )
     // Color del contenedor de la píldora de búsqueda, que va SOBRE el bloque. Sube un peldaño con
@@ -252,7 +268,7 @@ fun LibraryScreen(
     val headerItemColor by animateColorAsState(
         targetValue = if (headerScrolled) colorScheme.surfaceContainerHighest
                       else colorScheme.surfaceContainerHigh,
-        animationSpec = MaterialTheme.motionScheme.defaultEffectsSpec(),
+        animationSpec = appEffectsSpec(),
         label = "headerItemColor"
     )
     // contentOffset es un acumulador global del nested scroll: al cambiar de página no se
@@ -342,10 +358,10 @@ fun LibraryScreen(
                 ) {
                     // Izados: `transitionSpec` NO es un lambda composable, así que los tokens
                     // del MotionScheme (que sí son lectura composable) se resuelven aquí.
-                    val iconEnterFade = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
-                    val iconEnterScale = MaterialTheme.motionScheme.defaultSpatialSpec<Float>()
-                    val iconExitFade = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
-                    val iconExitScale = MaterialTheme.motionScheme.fastSpatialSpec<Float>()
+                    val iconEnterFade = appEffectsSpec<Float>()
+                    val iconEnterScale = appSpatialSpec<Float>()
+                    val iconExitFade = appFastEffectsSpec<Float>()
+                    val iconExitScale = appFastSpatialSpec<Float>()
                     AnimatedContent(
                         targetState = showBackIcon,
                         // Mismos tokens de motion que el resto de la cabecera: el que entra con
@@ -507,11 +523,16 @@ fun LibraryScreen(
                 state = pullState,
                 modifier = Modifier.fillMaxSize(),
                 indicator = {
-                    // El contenido arranca en y=0 (detrás del header): bajar el spinner
+                    // El contenido arranca en y=0 (detrás del header): bajar el indicador
                     // para que asome bajo las tabs y no quede oculto tras la TopBar. Se suma
                     // el alto del banner para que, cuando hay banner (p.ej. "Descargando"),
-                    // el spinner aparezca DEBAJO de él y no tapado por la tarjeta.
-                    PullToRefreshDefaults.Indicator(
+                    // aparezca DEBAJO de él y no tapado por la tarjeta.
+                    //
+                    // `LoadingIndicator` y no `Indicator`: es la variante Expressive, que morfea
+                    // entre MaterialShapes en vez de girar un arco. Mismo criterio que el resto de
+                    // los circulares de la app (AlbumArt, SongListItem, MiniPlayer, LyricsScreen)
+                    // — este era el último que quedaba con el componente clásico.
+                    PullToRefreshDefaults.LoadingIndicator(
                         modifier = Modifier
                             .align(Alignment.TopCenter)
                             .padding(top = topBarInset + TabsRowHeight + bannerHeight),
@@ -529,12 +550,25 @@ fun LibraryScreen(
                                 recentlyAdded = homeRecentlyAdded,
                                 topAlbums = topAlbums,
                                 recentContexts = recentContexts,
+                                genreArts = recentGenreArts,
                                 stats = homeStats,
                                 artistPick = homeArtistPick,
                                 rediscover = homeRediscover,
                                 currentSongId = nowPlayingUiState.song?.id,
                                 contentPadding = listInsets,
                                 onPlaySongs = { songs, index ->
+                                    playbackViewModel.playSongs(songs, index)
+                                    onNavigateToNowPlaying()
+                                },
+                                onPlayArtistPick = { artist, songs, index ->
+                                    // Igual que tocar una canción en el detalle del artista: la
+                                    // cola ES su catálogo, así que el contexto reanudable es él.
+                                    libraryViewModel.recordContext(
+                                        PlaybackContext.Artist(
+                                            artist,
+                                            songs.firstOrNull()?.albumArtUri?.toString()
+                                        )
+                                    )
                                     playbackViewModel.playSongs(songs, index)
                                     onNavigateToNowPlaying()
                                 },
@@ -554,6 +588,9 @@ fun LibraryScreen(
                                 },
                                 hasFavorites = uiState.favoriteSongs.isNotEmpty(),
                                 onShuffleFavorites = {
+                                    // Mismo contexto que reproducir Favoritos desde su lista: el
+                                    // chip es otro atajo a lo mismo, no otra cosa.
+                                    libraryViewModel.recordContext(PlaybackContext.Favorites)
                                     playbackViewModel.shufflePlay(uiState.favoriteSongs)
                                     onNavigateToNowPlaying()
                                 },
@@ -562,6 +599,17 @@ fun LibraryScreen(
                                     scope.launch {
                                         val songs = libraryViewModel.getSongsByGenre(genre)
                                         if (songs.isNotEmpty()) {
+                                            // Igual que reproducirlo desde la pestaña Géneros: es
+                                            // el mismo contexto reanudable. Sin esto, un género
+                                            // lanzado desde el chip no llegaba nunca a "Seguir
+                                            // escuchando" y la sección contradecía a la fila de
+                                            // chips que está justo encima.
+                                            libraryViewModel.recordContext(
+                                                PlaybackContext.Genre(
+                                                    genre,
+                                                    songs.firstOrNull()?.albumArtUri?.toString()
+                                                )
+                                            )
                                             playbackViewModel.shufflePlay(songs)
                                             onNavigateToNowPlaying()
                                         }
@@ -719,6 +767,10 @@ fun LibraryScreen(
                 // alto medido se suma al contentPadding para que el primer ítem nazca debajo.
                 AnimatedVisibility(
                     visible = showBanner,
+                    // Specs del tema: el default de `AnimatedVisibility` es `fadeIn + expandIn`
+                    // con springs de compose-animation, que no leen el MotionScheme.
+                    enter = appExpandFadeIn(),
+                    exit = appShrinkFadeOut(),
                     modifier = Modifier.onSizeChanged { bannerHeightPx = it.height }
                 ) {
                     when (val state = uiState.bannerState) {
@@ -1043,7 +1095,7 @@ private fun LibraryTabs(
         // se desvanece.
         val pillColor by animateColorAsState(
             targetValue = colorScheme.secondaryContainer.copy(alpha = if (selected) 1f else 0f),
-            animationSpec = MaterialTheme.motionScheme.defaultEffectsSpec(),
+            animationSpec = appEffectsSpec(),
             label = "tabPill"
         )
         Tab(
@@ -1076,14 +1128,14 @@ private fun LibraryTabs(
                     AnimatedVisibility(
                         visible = selected,
                         enter = expandHorizontally(
-                            animationSpec = MaterialTheme.motionScheme.fastSpatialSpec()
+                            animationSpec = appFastSpatialSpec()
                         ) + fadeIn(
-                            animationSpec = MaterialTheme.motionScheme.defaultEffectsSpec()
+                            animationSpec = appEffectsSpec()
                         ),
                         exit = shrinkHorizontally(
-                            animationSpec = MaterialTheme.motionScheme.fastSpatialSpec()
+                            animationSpec = appFastSpatialSpec()
                         ) + fadeOut(
-                            animationSpec = MaterialTheme.motionScheme.fastEffectsSpec()
+                            animationSpec = appFastEffectsSpec()
                         )
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1430,21 +1482,28 @@ private fun LibraryOverflowButton(
     // "playlist_add" en la pestaña Listas — no duplicarlo aquí.
     Box {
         IconButton(onClick = { showOverflowMenu = true }) { MaterialSymbol("more_vert") }
-        DropdownMenu(
+        // Menú SEGMENTADO (popup + grupo), no el `DropdownMenu` clásico: ver la nota en SortChip.
+        DropdownMenuPopup(
             expanded = showOverflowMenu,
             onDismissRequest = { showOverflowMenu = false }
         ) {
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.settings_title)) },
-                onClick = { showOverflowMenu = false; onSettingsClick() },
-                leadingIcon = { MaterialSymbol("settings") }
-            )
-            if (isLoggedIn) {
+            DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
                 DropdownMenuItem(
-                    text = { Text(stringResource(R.string.common_logout)) },
-                    onClick = { showOverflowMenu = false; onLogoutClick() },
-                    leadingIcon = { MaterialSymbol("logout") }
+                    onClick = { showOverflowMenu = false; onSettingsClick() },
+                    text = { Text(stringResource(R.string.settings_title)) },
+                    // Sin sesión, "Ajustes" es el ÚNICO item y por tanto una pastilla suelta; con
+                    // sesión abre el bloque y "Cerrar sesión" lo cierra.
+                    shape = if (isLoggedIn) MenuDefaults.leadingItemShape else MenuDefaults.standaloneItemShape,
+                    leadingIcon = { MenuItemIcon("settings") }
                 )
+                if (isLoggedIn) {
+                    DropdownMenuItem(
+                        onClick = { showOverflowMenu = false; onLogoutClick() },
+                        text = { Text(stringResource(R.string.common_logout)) },
+                        shape = MenuDefaults.trailingItemShape,
+                        leadingIcon = { MenuItemIcon("logout") }
+                    )
+                }
             }
         }
     }

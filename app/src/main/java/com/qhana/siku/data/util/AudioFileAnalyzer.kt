@@ -7,7 +7,11 @@ import android.util.Log
 import com.qhana.siku.data.config.AppConfig
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.repository.IMusicRepository
+import com.qhana.siku.data.util.tags.parseTrackNumber
+import com.qhana.siku.data.util.tags.parseYear
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeout
@@ -26,6 +30,10 @@ data class FileAnalysisResult(
     val artist: String?,
     val album: String?,
     val genre: String?,
+    /** Número de pista; 0 = el archivo no lo declara (ver [parseTrackNumber]). */
+    val trackNumber: Int = 0,
+    /** Año de publicación; 0 = el archivo no lo declara (ver [parseYear]). */
+    val year: Int = 0,
     val duration: Long,
     val embeddedArt: ByteArray?,
     val error: String? = null
@@ -42,6 +50,8 @@ data class FileAnalysisResult(
         if (artist != other.artist) return false
         if (album != other.album) return false
         if (genre != other.genre) return false
+        if (trackNumber != other.trackNumber) return false
+        if (year != other.year) return false
         if (duration != other.duration) return false
         if (embeddedArt != null) {
             if (other.embeddedArt == null) return false
@@ -58,6 +68,8 @@ data class FileAnalysisResult(
         result = 31 * result + (artist?.hashCode() ?: 0)
         result = 31 * result + (album?.hashCode() ?: 0)
         result = 31 * result + (genre?.hashCode() ?: 0)
+        result = 31 * result + trackNumber
+        result = 31 * result + year
         result = 31 * result + duration.hashCode()
         result = 31 * result + (embeddedArt?.contentHashCode() ?: 0)
         return result
@@ -99,12 +111,15 @@ class AudioFileAnalyzer @Inject constructor(
     suspend fun analyzeContentUri(uri: Uri, fileName: String): FileAnalysisResult = retrieverSemaphore.withPermit {
         return try {
             withTimeout(CONTENT_URI_ANALYSIS_TIMEOUT_MS) {
-                val retriever = MediaMetadataRetriever()
-                try {
-                    retriever.setDataSource(context, uri)
-                    extractMetadataFromRetriever(retriever, fileName)
-                } finally {
-                    safeRelease(retriever)
+                // Ver [analyzePath]: sin `runInterruptible` el timeout no puede cortar nada.
+                runInterruptible(Dispatchers.IO) {
+                    val retriever = MediaMetadataRetriever()
+                    try {
+                        retriever.setDataSource(context, uri)
+                        extractMetadataFromRetriever(retriever, fileName)
+                    } finally {
+                        safeRelease(retriever)
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -159,23 +174,32 @@ class AudioFileAnalyzer @Inject constructor(
 
         return try {
             withTimeout(timeoutMs) {
-                val retriever = MediaMetadataRetriever()
-                try {
-                    if (isRemote) {
-                        retriever.setDataSource(path, HashMap())
-                    } else {
-                        // NUNCA setDataSource(String) con rutas locales: esa sobrecarga hace
-                        // Uri.parse(path) SIN validar el esquema. Con ids namespaced (Fase 0)
-                        // el nombre lleva ':' (`onedrive:<id>.flac`), así que la ruta entera
-                        // "adquiere" un esquema basura y el framework la trata como URL de
-                        // red → BAD_VALUE (-22) SIEMPRE, con el archivo perfecto en disco.
-                        // Vía FileDescriptor el nombre es irrelevante (el retriever dup()ea
-                        // el fd, cerrar el stream tras setDataSource es seguro).
-                        java.io.FileInputStream(path).use { retriever.setDataSource(it.fd) }
+                // `runInterruptible` es lo que hace que el timeout SIRVA. Todo lo de dentro es
+                // bloqueante y sin puntos de suspensión, así que `withTimeout` a secas se limitaba
+                // a marcar la corrutina como cancelada mientras el hilo seguía atascado en la
+                // llamada nativa: el retriever colgado —justo el caso contra el que este timeout
+                // defiende— retenía su permiso del semáforo PARA SIEMPRE, y con
+                // MAX_CONCURRENT_RETRIEVERS cuelgues se paraba TODO el análisis de la biblioteca.
+                // Ahora la cancelación interrumpe el hilo y `withPermit` puede devolver el permiso.
+                runInterruptible(Dispatchers.IO) {
+                    val retriever = MediaMetadataRetriever()
+                    try {
+                        if (isRemote) {
+                            retriever.setDataSource(path, HashMap())
+                        } else {
+                            // NUNCA setDataSource(String) con rutas locales: esa sobrecarga hace
+                            // Uri.parse(path) SIN validar el esquema. Con ids namespaced (Fase 0)
+                            // el nombre lleva ':' (`onedrive:<id>.flac`), así que la ruta entera
+                            // "adquiere" un esquema basura y el framework la trata como URL de
+                            // red → BAD_VALUE (-22) SIEMPRE, con el archivo perfecto en disco.
+                            // Vía FileDescriptor el nombre es irrelevante (el retriever dup()ea
+                            // el fd, cerrar el stream tras setDataSource es seguro).
+                            java.io.FileInputStream(path).use { retriever.setDataSource(it.fd) }
+                        }
+                        extractMetadataFromRetriever(retriever, fileName)
+                    } finally {
+                        safeRelease(retriever)
                     }
-                    extractMetadataFromRetriever(retriever, fileName)
-                } finally {
-                    safeRelease(retriever)
                 }
             }
         } catch (e: Exception) {
@@ -223,9 +247,32 @@ class AudioFileAnalyzer @Inject constructor(
         // Género normalizado: trim + null si viene vacío (no ensuciar el GROUP BY con "").
         val genre = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_GENRE)
             ?.trim()?.takeIf { it.isNotBlank() }
+        val trackNumber = parseTrackNumber(
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER)
+        )
+        // DATE como respaldo de YEAR: con Vorbis comments (FLAC) el retriever suele exponer el
+        // tag `DATE` en METADATA_KEY_DATE y dejar METADATA_KEY_YEAR vacío. [parseYear] acepta las
+        // dos formas, así que basta con preguntar por las dos claves.
+        val year = parseYear(
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_YEAR)
+                ?: retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DATE)
+        )
         val embeddedArt = retriever.embeddedPicture
 
-        return FileAnalysisResult(extension, isValid, title, artist, album, genre, duration, embeddedArt)
+        // Nombrados a propósito: [FileAnalysisResult] tiene campos opcionales intercalados y una
+        // llamada posicional se desalinea en silencio al añadir el siguiente.
+        return FileAnalysisResult(
+            extension = extension,
+            isValid = isValid,
+            title = title,
+            artist = artist,
+            album = album,
+            genre = genre,
+            trackNumber = trackNumber,
+            year = year,
+            duration = duration,
+            embeddedArt = embeddedArt
+        )
     }
 
     /**
@@ -271,6 +318,10 @@ class AudioFileAnalyzer @Inject constructor(
                 title = analysis.title ?: originalSong.title,
                 artist = analysis.artist ?: originalSong.artist,
                 album = analysis.album ?: originalSong.album,
+                // Un 0 del análisis significa "el archivo no lo declara": no debe borrar lo que
+                // la fila ya supiera (p. ej. lo que trajo el índice de MediaStore).
+                trackNumber = analysis.trackNumber.takeIf { it > 0 } ?: originalSong.trackNumber,
+                year = analysis.year.takeIf { it > 0 } ?: originalSong.year,
                 duration = if (originalSong.duration == 0L) analysis.duration else originalSong.duration,
                 albumArtUri = if (artUriString != null) Uri.parse(artUriString) else originalSong.albumArtUri
             )

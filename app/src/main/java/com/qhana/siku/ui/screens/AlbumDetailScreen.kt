@@ -14,9 +14,7 @@ import androidx.compose.material3.*
 import androidx.compose.material3.MaterialTheme.colorScheme
 import androidx.compose.runtime.*
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,6 +50,9 @@ import com.qhana.siku.ui.components.SongOverflowButton
 import com.qhana.siku.ui.components.overSharedElementsModifier
 import com.qhana.siku.ui.components.rememberListItemShape
 import com.qhana.siku.ui.viewmodel.BrowseViewModel
+
+import com.qhana.siku.ui.theme.appEffectsSpec
+import com.qhana.siku.ui.theme.AppBoundsTransform
 
 /**
  * Detalle de álbum, estilo INMERSIVO (misma familia visual que el detalle de artista):
@@ -116,7 +117,9 @@ fun AlbumDetailScreen(
             rawTitleFraction >= 0.5f -> 1f
             else -> 0f
         },
-        animationSpec = spring(stiffness = Spring.StiffnessMedium),
+        // Ver el kdoc de este mismo bloque en ArtistDetailScreen: effects (sin rebote) porque la
+        // fracción conduce a la vez la posición del título y un alpha.
+        animationSpec = appEffectsSpec(),
         label = "topBarFraction"
     )
     // Anclas medidas de la transición del título (coordenadas en root).
@@ -169,6 +172,9 @@ fun AlbumDetailScreen(
                         albumArtUri = songs.firstOrNull { it.albumArtUriString != null }?.albumArtUriString,
                         singleArtist = singleArtist,
                         songCount = songs.size,
+                        // La primera pista que lo declare: dentro de un álbum el año es el mismo
+                        // para todas, y basta con que UNA esté etiquetada.
+                        year = songs.firstOrNull { it.year > 0 }?.year ?: 0,
                         onArtistClick = onArtistClick,
                         sharedTransitionScope = sharedTransitionScope,
                         animatedVisibilityScope = animatedVisibilityScope,
@@ -197,6 +203,7 @@ fun AlbumDetailScreen(
                         color = colorScheme.surfaceContainer,
                         shape = rememberListItemShape(index, songs.size),
                         modifier = Modifier
+                            .animateItem()
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 1.dp)
                     ) {
@@ -328,6 +335,8 @@ private fun AlbumImmersiveHeader(
     albumArtUri: String?,
     singleArtist: String?,
     songCount: Int,
+    /** Año de publicación; 0 = ninguna pista del álbum lo declara y el chip no se dibuja. */
+    year: Int,
     onArtistClick: (String) -> Unit,
     sharedTransitionScope: SharedTransitionScope? = null,
     animatedVisibilityScope: AnimatedVisibilityScope? = null,
@@ -339,7 +348,9 @@ private fun AlbumImmersiveHeader(
         with(sharedTransitionScope) {
             Modifier.sharedBounds(
                 sharedContentState = rememberSharedContentState(key = "album_image_$albumName"),
-                animatedVisibilityScope = animatedVisibilityScope
+                animatedVisibilityScope = animatedVisibilityScope,
+                // Spring del tema en vez del default de la API (ver AppBoundsTransform).
+                boundsTransform = AppBoundsTransform
             )
         }
     } else Modifier
@@ -418,14 +429,28 @@ private fun AlbumImmersiveHeader(
                 )
             }
             Spacer(modifier = Modifier.height(8.dp))
-            TonalChip {
-                MaterialSymbol("music_note", size = 14.sp, color = colorScheme.onSecondaryContainer)
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = if (songCount == 1) "1 canción" else "$songCount canciones",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = colorScheme.onSecondaryContainer
-                )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TonalChip {
+                    MaterialSymbol("music_note", size = 14.sp, color = colorScheme.onSecondaryContainer)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = if (songCount == 1) "1 canción" else "$songCount canciones",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colorScheme.onSecondaryContainer
+                    )
+                }
+                // El año solo aparece si alguna pista lo declara: un chip "0" o vacío sería peor
+                // que no tenerlo, y hay bibliotecas enteras sin ese tag.
+                if (year > 0) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    TonalChip {
+                        Text(
+                            text = year.toString(),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = colorScheme.onSecondaryContainer
+                        )
+                    }
+                }
             }
         }
     }

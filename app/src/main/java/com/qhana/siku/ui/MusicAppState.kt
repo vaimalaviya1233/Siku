@@ -29,8 +29,50 @@ class MusicAppState(
     val navController: NavHostController,
     playerExpandedState: MutableState<Boolean>
 ) {
-    /** Reproductor expandido = NowPlaying a pantalla completa sobre el NavHost. */
+    /**
+     * Reproductor expandido = NowPlaying a pantalla completa sobre el NavHost.
+     *
+     * Para ABRIRLO se usa [openPlayer], no una asignación directa: hay que decir de dónde viene el
+     * gesto (ver [playerOpenedFromPill]). Cerrarlo sí es una asignación normal — el cierre no tiene
+     * variantes.
+     */
     var playerExpanded by playerExpandedState
+        private set
+
+    /**
+     * Si la última apertura del reproductor salió de la PÍLDORA (el MiniPlayer) o de otro sitio
+     * (una canción de una lista, un chip del inicio, la notificación).
+     *
+     * Decide de dónde nace la carátula, y son dos coreografías legítimas y distintas:
+     *  - **Desde la píldora** → *container transform*: la portada YA está en pantalla, dentro de la
+     *    barra, así que viaja de ahí al centro del reproductor como shared element. Es el gesto de
+     *    "esta barra se convierte en el reproductor".
+     *  - **Desde cualquier otro sitio** → la carátula sube CON el resto del contenido, como una
+     *    pieza más del reproductor que entra deslizando. No hay nada de dónde morfar: la fila que
+     *    se tocó SIGUE en pantalla detrás del player, así que nada sale de ella (y por eso tampoco
+     *    puede ser el origen de un shared element: Compose exige que de las dos puntas de una key
+     *    solo UNA sea destino, y una fila que se queda visible nunca deja de serlo).
+     *
+     * Sin esta distinción, abrir desde una lista pintaba la carátula en el overlay del
+     * `SharedTransitionScope` —que cuelga de la raíz y NO recibe el `graphicsLayer` del slide—, o
+     * sea quieta en su posición final mientras el resto del reproductor subía por debajo.
+     */
+    var playerOpenedFromPill by mutableStateOf(false)
+        private set
+
+    /**
+     * Abre el reproductor. [fromPill] SOLO lo pone el MiniPlayer (tap o arrastre hacia arriba);
+     * todo lo demás —listas, chips del inicio, deep link de la notificación— abre sin origen.
+     */
+    fun openPlayer(fromPill: Boolean = false) {
+        playerOpenedFromPill = fromPill
+        playerExpanded = true
+    }
+
+    /** Cierra el reproductor (back, gesto de arrastre, navegación a artista/álbum). */
+    fun collapsePlayer() {
+        playerExpanded = false
+    }
 
     /** Hoja "añadir canciones" disparada desde el FAB en detalle de playlist/Favoritos. */
     var showAddSongsSheet by mutableStateOf(false)
@@ -66,9 +108,12 @@ class MusicAppState(
 
 @Composable
 fun rememberMusicAppState(
-    navController: NavHostController = rememberNavController()
-): MusicAppState {
+    navController: NavHostController = rememberNavController(),
     // rememberSaveable: el player abierto sobrevive a rotación/recreación del proceso.
-    val playerExpanded = rememberSaveable { mutableStateOf(false) }
-    return remember(navController) { MusicAppState(navController, playerExpanded) }
+    // Izable por parámetro porque MainActivity necesita leerlo POR ENCIMA del tema:
+    // `MusicPlayerTheme(animateColors = ...)` congela la animación del esquema mientras el
+    // reproductor está abierto (ahí la coreografía del cambio de canción son los reveals).
+    playerExpandedState: MutableState<Boolean> = rememberSaveable { mutableStateOf(false) }
+): MusicAppState {
+    return remember(navController) { MusicAppState(navController, playerExpandedState) }
 }

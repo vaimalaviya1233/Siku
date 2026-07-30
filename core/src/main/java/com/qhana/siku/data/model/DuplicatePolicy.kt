@@ -21,9 +21,19 @@ enum class DuplicatePolicy {
 
 /**
  * Normalización canónica de una ruta relativa para COMPARAR entre fuentes: separadores a
- * `/`, sin bordes, case-insensitive (OneDrive y FAT/exFAT lo son). La columna
- * `songs.relativePath` se persiste YA normalizada — el JOIN de duplicados compara igualdad
+ * `/`, sin separadores repetidos, sin bordes, case-insensitive (OneDrive y FAT/exFAT lo son). La
+ * columna `songs.relativePath` se persiste YA normalizada — el JOIN de duplicados compara igualdad
  * directa.
+ *
+ * Las barras repetidas se COLAPSAN, y eso es load-bearing: `MediaStore.RELATIVE_PATH` ya termina en
+ * `/`, así que el modo dispositivo componía `…/final destination//12 8am.flac` mientras SAF y
+ * OneDrive producen la misma ruta con una sola barra. Sin colapsar, el MISMO archivo tenía un id
+ * distinto según el modo de escaneo —justo lo que el esquema de ids por volumen existe para
+ * evitar— y su `relativePath` no casaba con el de la nube, de modo que el dedup entre fuentes no
+ * veía el duplicado. Se detectó leyendo un id real en el log: `local:primary/music/coldrain/final
+ * destination//12 8am (album ver.).flac`.
  */
 fun normalizeRelativePath(raw: String): String =
-    raw.replace('\\', '/').trim('/').lowercase()
+    raw.replace('\\', '/').replace(REPEATED_SEPARATORS, "/").trim('/').lowercase()
+
+private val REPEATED_SEPARATORS = Regex("/{2,}")

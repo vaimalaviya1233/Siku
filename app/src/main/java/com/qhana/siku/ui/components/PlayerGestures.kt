@@ -2,8 +2,6 @@ package com.qhana.siku.ui.components
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationVector1D
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -19,6 +17,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.qhana.siku.ui.theme.AppMotionScheme
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -45,6 +44,14 @@ object PlayerGestureConfig {
     /** Tope del arrastre horizontal: pasado el umbral el dedo deja de mover la carátula. */
     val SwipeSongMaxDrag = 110.dp
 
+    /**
+     * Techo del umbral como fracción del tope de arrastre. Umbral y tope vigilan el mismo gesto,
+     * así que uno se deriva del otro: con una carátula ancha (tablet), ancho·[SwipeSongFraction]
+     * superaba [SwipeSongMaxDrag] y el umbral quedaba FUERA del recorrido alcanzable — soltar no
+     * cambiaba de canción nunca. Menor que 1 para que llegar al tope cruce el umbral con margen.
+     */
+    const val SwipeSongThresholdOfMaxDrag = 0.85f
+
     /** Arrastre vertical que cierra el reproductor. */
     val DismissThreshold = 140.dp
 
@@ -57,11 +64,17 @@ object PlayerGestureConfig {
     /** Cuánto se ve el destello del doble toque de salto. */
     const val SeekFlashMs = 500
 
-    /** Retorno de un arrastre que no llegó al umbral: firme y sin rebote. */
-    internal fun <T> settleSpring() = spring<T>(
-        dampingRatio = Spring.DampingRatioNoBouncy,
-        stiffness = Spring.StiffnessMediumLow
-    )
+    /**
+     * Retorno de un arrastre que no llegó al umbral.
+     *
+     * Sale del `MotionScheme` de la app vía [AppMotionScheme] (y no de `MaterialTheme.motionScheme`)
+     * porque esto se llama desde dentro de un `pointerInput`/`launch`, donde no hay composición.
+     *
+     * **Token spatial** —el que rebota— y eso es deliberado: lo que vuelve a su sitio es una
+     * posición, y el pequeño exceso al final es justo lo que hace que el gesto se sienta elástico en
+     * vez de motorizado. Antes era un `spring(NoBouncy, MediumLow)` a mano.
+     */
+    internal fun <T> settleSpring() = AppMotionScheme.defaultSpatialSpec<T>()
 }
 
 /**
@@ -153,6 +166,7 @@ private enum class DragAxis { Undecided, Horizontal, Vertical }
  *
  * [offsetX] se hoistea porque quien dibuja la carátula necesita leerlo para trasladarla.
  */
+@Composable
 fun Modifier.albumArtSwipe(
     enabled: Boolean,
     offsetX: Animatable<Float, AnimationVector1D>,
@@ -161,54 +175,69 @@ fun Modifier.albumArtSwipe(
     maxDragPx: Float,
     onNext: () -> Unit,
     onPrevious: () -> Unit
-): Modifier = if (!enabled) this else pointerInput(enabled, onNext, onPrevious) {
-    var axis = DragAxis.Undecided
-    val songThresholdPx = size.width * PlayerGestureConfig.SwipeSongFraction
+): Modifier {
+    // Los callbacks NO pueden ser clave del `pointerInput`: son instancias nuevas con cada canción
+    // (`PlayerActions` se rememoiza con el id), así que tenerlos como clave reiniciaba el detector
+    // a mitad de un arrastre —sin pasar por `onDragCancel`— y dejaba la carátula desplazada y el
+    // reproductor atenuado hasta el siguiente toque. Mismo patrón que `miniPlayerExpandDrag`.
+    val currentOnNext by rememberUpdatedState(onNext)
+    val currentOnPrevious by rememberUpdatedState(onPrevious)
+    if (!enabled) return this
+    return pointerInput(maxDragPx) {
+        var axis = DragAxis.Undecided
+        // El umbral se DERIVA del tope de arrastre además de del ancho: pasado el tope la carátula
+        // deja de seguir al dedo, así que un umbral mayor que el tope es inalcanzable y soltar no
+        // cambiaría de canción NUNCA (pasaba con carátulas anchas, o sea en tablet).
+        val songThresholdPx = minOf(
+            size.width * PlayerGestureConfig.SwipeSongFraction,
+            maxDragPx * PlayerGestureConfig.SwipeSongThresholdOfMaxDrag
+        )
 
-    fun settle() {
-        scope.launch { offsetX.animateTo(0f, PlayerGestureConfig.settleSpring()) }
-    }
-
-    detectDragGestures(
-        onDragStart = { axis = DragAxis.Undecided },
-        onDragCancel = {
-            axis = DragAxis.Undecided
-            dismiss?.onRelease()
-            settle()
-        },
-        onDragEnd = {
-            when {
-                axis == DragAxis.Vertical -> dismiss?.onRelease()
-                // Arrastrar a la IZQUIERDA trae lo que está a la derecha: la siguiente.
-                offsetX.value <= -songThresholdPx -> onNext()
-                offsetX.value >= songThresholdPx -> onPrevious()
-            }
-            axis = DragAxis.Undecided
-            // Siempre vuelve al centro: el cambio de canción lo cuenta el reveal de la carátula
-            // (ver AlbumArtSection), no una salida por el borde que competiría con él.
-            settle()
-        },
-        onDrag = { change, delta ->
-            if (axis == DragAxis.Undecided && delta != Offset.Zero) {
-                axis = if (abs(delta.x) >= abs(delta.y)) DragAxis.Horizontal else DragAxis.Vertical
-            }
-            when (axis) {
-                DragAxis.Horizontal -> {
-                    change.consume()
-                    scope.launch {
-                        offsetX.snapTo((offsetX.value + delta.x).coerceIn(-maxDragPx, maxDragPx))
-                    }
-                }
-                DragAxis.Vertical -> {
-                    dismiss?.let {
-                        it.onDrag(delta.y)
-                        if (it.offsetY > 0f) change.consume()
-                    }
-                }
-                DragAxis.Undecided -> Unit
-            }
+        fun settle() {
+            scope.launch { offsetX.animateTo(0f, PlayerGestureConfig.settleSpring()) }
         }
-    )
+
+        detectDragGestures(
+            onDragStart = { axis = DragAxis.Undecided },
+            onDragCancel = {
+                axis = DragAxis.Undecided
+                dismiss?.onRelease()
+                settle()
+            },
+            onDragEnd = {
+                when {
+                    axis == DragAxis.Vertical -> dismiss?.onRelease()
+                    // Arrastrar a la IZQUIERDA trae lo que está a la derecha: la siguiente.
+                    offsetX.value <= -songThresholdPx -> currentOnNext()
+                    offsetX.value >= songThresholdPx -> currentOnPrevious()
+                }
+                axis = DragAxis.Undecided
+                // Siempre vuelve al centro: el cambio de canción lo cuenta el reveal de la carátula
+                // (ver AlbumArtSection), no una salida por el borde que competiría con él.
+                settle()
+            },
+            onDrag = { change, delta ->
+                if (axis == DragAxis.Undecided && delta != Offset.Zero) {
+                    axis = if (abs(delta.x) >= abs(delta.y)) DragAxis.Horizontal else DragAxis.Vertical
+                }
+                when (axis) {
+                    DragAxis.Horizontal -> {
+                        change.consume()
+                        scope.launch {
+                            offsetX.snapTo((offsetX.value + delta.x).coerceIn(-maxDragPx, maxDragPx))
+                        }
+                    }
+                    DragAxis.Vertical -> {
+                        dismiss?.let {
+                            it.onDrag(delta.y)
+                            if (it.offsetY > 0f) change.consume()
+                        }
+                    }
+                    DragAxis.Undecided -> Unit
+                }
+            }
+        )
+    }
 }
 
 /**
@@ -218,27 +247,37 @@ fun Modifier.albumArtSwipe(
  *
  * [onSeek] recibe el salto YA firmado y [onFlash] `true` si fue hacia adelante, para el destello.
  */
+@Composable
 fun Modifier.albumArtTaps(
     gesturesEnabled: Boolean,
     onSeek: (Long) -> Unit,
     onFlash: (forward: Boolean) -> Unit,
     onLongPress: () -> Unit
-): Modifier = pointerInput(gesturesEnabled, onSeek, onLongPress) {
-    // El doble toque se declara aparte y tipado: en línea, `if (…) null else { offset -> … }`
-    // hace que Kotlin lea el `else` como un BLOQUE y no como la lambda que espera el parámetro.
-    val onDoubleTap: ((Offset) -> Unit)? = if (gesturesEnabled) {
-        { offset ->
-            val forward = offset.x > size.width / 2f
-            onSeek(if (forward) PlayerGestureConfig.SeekStepMs else -PlayerGestureConfig.SeekStepMs)
-            onFlash(forward)
+): Modifier {
+    // Ver `albumArtSwipe`: los callbacks cambian de instancia con cada canción y como clave del
+    // detector lo reiniciarían a mitad de gesto.
+    val currentOnSeek by rememberUpdatedState(onSeek)
+    val currentOnFlash by rememberUpdatedState(onFlash)
+    val currentOnLongPress by rememberUpdatedState(onLongPress)
+    return pointerInput(gesturesEnabled) {
+        // El doble toque se declara aparte y tipado: en línea, `if (…) null else { offset -> … }`
+        // hace que Kotlin lea el `else` como un BLOQUE y no como la lambda que espera el parámetro.
+        val onDoubleTap: ((Offset) -> Unit)? = if (gesturesEnabled) {
+            { offset ->
+                val forward = offset.x > size.width / 2f
+                currentOnSeek(
+                    if (forward) PlayerGestureConfig.SeekStepMs else -PlayerGestureConfig.SeekStepMs
+                )
+                currentOnFlash(forward)
+            }
+        } else {
+            null
         }
-    } else {
-        null
+        detectTapGestures(
+            onLongPress = { currentOnLongPress() },
+            onDoubleTap = onDoubleTap
+        )
     }
-    detectTapGestures(
-        onLongPress = { onLongPress() },
-        onDoubleTap = onDoubleTap
-    )
 }
 
 /**

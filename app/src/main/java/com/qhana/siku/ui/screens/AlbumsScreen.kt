@@ -132,6 +132,9 @@ fun AlbumsScreen(
         items(albums, key = { it.name }) { album ->
             AlbumTileCard(
                 album = album,
+                // La rejilla se reordena al cambiar el orden o el filtro de origen: sin esto las
+                // celdas saltan de sitio en un frame.
+                modifier = Modifier.animateItem(),
                 onClick = { onAlbumClick(album.name) },
                 onPlayClick = { onPlayAlbum(album.name) },
                 // Carátula = shared element hacia el header del detalle del álbum.

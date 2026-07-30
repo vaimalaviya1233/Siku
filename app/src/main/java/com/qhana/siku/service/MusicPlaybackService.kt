@@ -162,6 +162,13 @@ class MusicPlaybackService : MediaSessionService() {
                 else -> "UNKNOWN($reason)"
             }
             appLogger.log("SERVICE", "ExoPlayer.onMediaItemTransition: mediaId=${mediaItem?.mediaId}, reason=$reasonName")
+            // El watchdog mide "ESTE item lleva N ms sin avanzar": al cambiar de canción esa
+            // medición caduca. Se cancela y se re-evalúa sobre el item nuevo — dejarlo correr
+            // hacía que el veredicto comparase la posición de dos items distintos (y con el
+            // `isLocal` del anterior, que decide si el veredicto se PERSISTE).
+            offloadWatchdogJob?.cancel()
+            offloadWatchdogJob = null
+            evaluateOffloadWatchdog()
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -198,7 +205,12 @@ class MusicPlaybackService : MediaSessionService() {
      */
     private fun evaluateOffloadWatchdog() {
         val p = player ?: return
-        val suspicious = !offloadDisabled &&
+        // `isOffloadRequested()` y no solo `!offloadDisabled`: con el EQ activo el offload está
+        // DESACTIVADO (los processors se saltarían), así que un atasco no puede ser culpa suya.
+        // Vigilarlo igual llevaba a "recuperarse" de un offload que no estaba en uso —cortando el
+        // audio con un stop/prepare/seek— y, con un archivo local, a PERSISTIR el veredicto de
+        // DSP roto de por vida en un dispositivo sano.
+        val suspicious = isOffloadRequested() &&
             p.playbackState == Player.STATE_BUFFERING &&
             p.playWhenReady
 
@@ -210,6 +222,10 @@ class MusicPlaybackService : MediaSessionService() {
         if (offloadWatchdogJob?.isActive == true) return // ya hay uno vigilando
 
         val positionAtStart = p.currentPosition
+        // El item vigilado se captura junto con su posición: el veredicto es "ESTE item no avanzó
+        // ni un milisegundo", y sin la comprobación dos canciones distintas bufferizando en
+        // posición 0 (red mala) se leían como un atasco.
+        val watchedItemId = p.currentMediaItem?.mediaId
         val isLocal = isCurrentItemLocal(p)
         val timeout = if (isLocal) OFFLOAD_STALL_TIMEOUT_LOCAL_MS else OFFLOAD_STALL_TIMEOUT_REMOTE_MS
         offloadWatchdogJob = serviceScope.launch {
@@ -217,12 +233,20 @@ class MusicPlaybackService : MediaSessionService() {
             val player = this@MusicPlaybackService.player ?: return@launch
             val stillStalled = player.playbackState == Player.STATE_BUFFERING &&
                 player.playWhenReady &&
+                player.currentMediaItem?.mediaId == watchedItemId &&
                 player.currentPosition == positionAtStart
-            if (stillStalled && !offloadDisabled) {
+            if (stillStalled && isOffloadRequested()) {
                 disableOffloadAndRecover(player, timeout, persistVerdict = isLocal)
             }
         }
     }
+
+    /**
+     * ¿El offload está pedido de verdad para lo que suena ahora? Es la MISMA condición que aplica
+     * [applyOffloadPreference] al player, y por eso vive en un solo sitio: si el watchdog y la
+     * preferencia pudieran discrepar, el watchdog vigilaría un modo que no está activo.
+     */
+    private fun isOffloadRequested(): Boolean = !offloadDisabled && !equalizerProcessor.isEnabled()
 
     /** `file://` o `content://` = los bytes están en el dispositivo: no existe buffering de red. */
     private fun isCurrentItemLocal(player: ExoPlayer): Boolean {
@@ -278,7 +302,7 @@ class MusicPlaybackService : MediaSessionService() {
      * en offload); ACTIVADO en cualquier otro caso.
      */
     private fun applyOffloadPreference(player: ExoPlayer) {
-        val disable = offloadDisabled || equalizerProcessor.isEnabled()
+        val disable = !isOffloadRequested()
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setAudioOffloadPreferences(
                 AudioOffloadPreferences.Builder()
@@ -341,6 +365,30 @@ class MusicPlaybackService : MediaSessionService() {
         )
         equalizerProcessor.setBassBoost(musicPreferences.loadEqBassBoost())
         equalizerProcessor.setTrebleBoost(musicPreferences.loadEqTrebleBoost())
+        // null = el usuario nunca movió el centro; el default es del processor, no de preferencias.
+        musicPreferences.loadEqBassFreq()?.let { equalizerProcessor.setBassBoostFreq(it) }
+        musicPreferences.loadEqTrebleFreq()?.let { equalizerProcessor.setTrebleBoostFreq(it) }
+        // Protección de nivel. Van aquí por el mismo motivo que lo de arriba: el processor es un
+        // singleton de proceso y este es el sitio donde su estado se rehidrata desde disco.
+        equalizerProcessor.setPreamp(musicPreferences.loadEqPreamp())
+        equalizerProcessor.setLimiterEnabled(musicPreferences.loadEqLimiterEnabled())
+        // El umbral se resuelve AQUÍ y no solo en el ViewModel: si el usuario nunca abre la hoja
+        // del ecualizador, ese colector no llega a existir y el limitador se quedaría con un
+        // umbral que no corresponde al modo elegido.
+        //
+        // En AUTOMÁTICO es 0 dBFS fijo, o sea pura protección contra recorte (true-peak desde el
+        // 29 jul). Hasta esa fecha aquí se replicaba la fórmula "−pico de la curva" del ViewModel:
+        // eso convertía el limitador en un compresor que engancha en cuanto hay curva, que es el
+        // mismo "corregir por detrás" que el proyecto ya rechazó dos veces en el preamp — y de paso
+        // era una fórmula DUPLICADA en dos sitios que tenían que coincidir a mano.
+        equalizerProcessor.setLimiterThreshold(
+            if (musicPreferences.loadEqLimiterThresholdAuto()) {
+                com.qhana.siku.player.audio.EqualizerAudioProcessor.LIMITER_THRESHOLD_MAX_DB
+            } else {
+                musicPreferences.loadEqLimiterThreshold()
+                    ?: com.qhana.siku.player.audio.EqualizerAudioProcessor.LIMITER_THRESHOLD_MAX_DB
+            }
+        )
 
         // setExtensionRendererMode se quitó: no hay renderers de extensión empaquetados,
         // así que no tenía efecto. setEnableDecoderFallback sí importa (cae a otro decoder

@@ -17,6 +17,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -121,10 +122,16 @@ class MainActivity : ComponentActivity() {
             // Estilo elegido en Ajustes → Apariencia. Se observa del DataStore: cambiarlo
             // repinta el tema en vivo, sin recrear la Activity ni recompilar para probar otro.
             val paletteStyleName by themePlaybackViewModel.themePaletteStyle.collectAsStateWithLifecycle()
+            // Izado AQUÍ (y no dentro de MusicPlayerScreen, su dueño natural) porque el tema
+            // necesita leerlo: con el reproductor abierto la animación del esquema se CONGELA
+            // (ver `animateColors` en MusicPlayerTheme) y el cambio de canción lo coreografían
+            // los reveals del NowPlaying, no un fundido global.
+            val playerExpandedState = rememberSaveable { mutableStateOf(false) }
             MusicPlayerTheme(
                 seedColor = seedColor,
                 monochrome = isAchromatic,
-                paletteStyle = paletteStyleFromName(paletteStyleName)
+                paletteStyle = paletteStyleFromName(paletteStyleName),
+                animateColors = !playerExpandedState.value
             ) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
@@ -137,7 +144,8 @@ class MainActivity : ComponentActivity() {
                         onKeepScreenOnChanged = { enabled ->
                             userWantsScreenOn = enabled
                             updateKeepScreenOn(enabled)
-                        }
+                        },
+                        playerExpandedState = playerExpandedState
                     )
                 }
             }

@@ -10,7 +10,6 @@ enum class PlaybackErrorType {
     NETWORK,
     FILE_NOT_FOUND,
     DECODER,
-    LOOP_DETECTED,
     UNKNOWN
 }
 
@@ -19,10 +18,16 @@ enum class PlaybackErrorType {
  *
  * @property errorCode código de Media3 (`PlaybackException.ERROR_CODE_*`), o `-1` si es genérico.
  * @property message mensaje original para logs y UI.
+ * @property songId canción que FALLÓ. Es parte del evento y no se deduce de `currentSong` al
+ *   recibirlo: entre la emisión y el consumo puede haber una transición de item (auto-avance,
+ *   botón de la notificación), y entonces la recuperación —marcar corrupta, borrar el audio,
+ *   forzar descarga— recaía sobre la canción EQUIVOCADA. `null` solo en errores sin item
+ *   asociado, donde el consumidor cae a la canción en curso.
  */
 data class PlaybackErrorInfo(
     val errorCode: Int,
-    val message: String
+    val message: String,
+    val songId: String? = null
 ) {
     val type: PlaybackErrorType
         get() = when (errorCode) {
@@ -44,9 +49,16 @@ data class PlaybackErrorInfo(
             PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
             PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED -> PlaybackErrorType.DECODER
 
-            else -> if (message.contains("loop detected", ignoreCase = true))
-                PlaybackErrorType.LOOP_DETECTED
-            else PlaybackErrorType.UNKNOWN
+            // Sin código conocido, UNKNOWN — y el recovery intenta sanar (refrescar URL,
+            // re-descargar) antes de rendirse. Aquí había una rama que declaraba LOOP_DETECTED
+            // —tratado como corrupción, o sea marcar la canción y borrar su audio— buscando
+            // "loop detected" en el mensaje, justo lo que el kdoc de arriba dice evitar. Era
+            // frágil por partida doble: el texto de Media3 no es API (cambia entre versiones y
+            // no está traducido), y el caso real que pretendía cazar —HTTP 508 Loop Detected—
+            // llega como ERROR_CODE_IO_BAD_HTTP_STATUS y lo captura la rama NETWORK de arriba,
+            // así que nunca alcanzaba este `else`. Un bucle de redirecciones se cura
+            // refrescando la URL, que es exactamente lo que hace el camino UNKNOWN.
+            else -> PlaybackErrorType.UNKNOWN
         }
 
     companion object {

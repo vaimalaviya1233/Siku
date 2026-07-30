@@ -24,6 +24,25 @@ class SongCacheManager @Inject constructor() {
         songs.forEach { updateCaches(it) }
     }
 
+    /**
+     * Guarda [song] con su path TAL CUAL, sin la fusión de [selectBestPath].
+     *
+     * Es para quien SABE que el origen de la canción cambió: la re-descarga forzada
+     * (`switchCurrentToStreaming`) y la reparación de un error de reproducción borran el archivo
+     * local, y la fusión —que siempre prefiere un `file://` ya conocido— resucitaba el path de un
+     * archivo BORRADO. El síntoma era una canción que se anunciaba como descargada (y con la que
+     * "descargar" no hacía nada) hasta que el flow de la BD volvía a emitir.
+     *
+     * La decisión no puede tomarla el caché: desde aquí "path vacío" y "path que ya no existe" son
+     * indistinguibles de una fila incompleta, y por eso la fusión sigue siendo el comportamiento
+     * por defecto.
+     */
+    fun cacheSongLocation(song: Song) {
+        synchronized(songCache) {
+            songCache.put(song.id, song)
+        }
+    }
+
     private fun updateCaches(song: Song) {
         // Synchronized compound read-then-write via LruCache's internal lock
         synchronized(songCache) {

@@ -11,10 +11,8 @@ import com.qhana.siku.data.util.SnackbarManager
 import com.qhana.siku.worker.DownloadScheduler
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -106,17 +104,15 @@ class SourcesViewModel @Inject constructor(
      * ¿Hay alguna fuente de NUBE configurada? Sale del registro ([MusicSourceRegistry]), no de
      * la sesión de OneDrive en particular: un proveedor cloud futuro cuenta solo. Gobierna las
      * features de descarga en Ajustes (tope de GB) — sin nube no hay nada que descargar.
-     * `isConfigured()` es suspend y no reactivo, por eso se refresca bajo demanda
-     * ([refreshCloudPresence]) desde la pantalla que lo muestra.
+     *
+     * REACTIVO: era un snapshot en memoria que la pantalla tenía que refrescar a mano con un
+     * `refreshCloudPresence()`. Arrancaba en `false` y el refresco era asíncrono, así que el
+     * primer frame de Ajustes → Descargas pintaba el tope deshabilitado y con el texto de "solo
+     * para nube"; y cualquier cambio de sesión mientras la pantalla seguía viva lo dejaba
+     * obsoleto, porque su `LaunchedEffect(Unit)` no se vuelve a lanzar.
      */
-    private val _hasCloudSource = MutableStateFlow(false)
-    val hasCloudSource: StateFlow<Boolean> = _hasCloudSource.asStateFlow()
-
-    fun refreshCloudPresence() {
-        viewModelScope.launch {
-            _hasCloudSource.value = sourceRegistry.activeSources().any { it.type.isCloud }
-        }
-    }
+    val hasCloudSource: StateFlow<Boolean> = sourceRegistry.hasCloudSource
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     /**
      * Carpeta de OneDrive que se escanea. Reactiva por el mismo motivo que [localFolderUris]: se

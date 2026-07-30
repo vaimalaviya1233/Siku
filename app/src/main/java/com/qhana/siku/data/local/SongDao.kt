@@ -151,8 +151,14 @@ interface SongDao {
             sb.append("SELECT * FROM songs WHERE 1=1")
 
             if (searchQuery.isNotBlank()) {
-                sb.append(" AND (title LIKE ? OR artist LIKE ? OR album LIKE ?)")
-                val likeQuery = "%$searchQuery%"
+                // `escapeLike` + `ESCAPE '\'`: sin ellos, buscar "100%" traía todo lo que empieza
+                // por "100" y un "_" casaba con cualquier carácter. No es inyección (el texto va
+                // como bind), son resultados incorrectos.
+                sb.append(
+                    " AND (title LIKE ? ESCAPE '\\' OR artist LIKE ? ESCAPE '\\'" +
+                        " OR album LIKE ? ESCAPE '\\')"
+                )
+                val likeQuery = "%${escapeLike(searchQuery)}%"
                 args.add(likeQuery)
                 args.add(likeQuery)
                 args.add(likeQuery)
@@ -419,8 +425,72 @@ interface SongDao {
     // `lyricsAttemptedAt = NULL`: aquí llegan los TAGS reales del archivo — un NotFound de
     // letras sellado antes (con el nombre de archivo como título) quedó cacheado bajo una
     // identidad que ya no existe, así que se rehabilita la búsqueda automática.
-    @Query("UPDATE songs SET title = :title, artist = :artist, album = :album, duration = :duration, albumArtUriString = :albumArtUri, needsMetadata = 0, lyricsAttemptedAt = NULL WHERE id = :songId")
-    suspend fun updateSongMetadata(songId: String, title: String, artist: String, album: String, duration: Long, albumArtUri: String?)
+    //
+    // `trackNumber`/`year` van con CASE y no a pelo: un 0 significa "el archivo no lo declara",
+    // y escribirlo borraría lo que la fila ya supiera por otro camino (el índice de MediaStore
+    // trae ambos, y el análisis de un archivo mal etiquetado no debe pisarlos con ceros).
+    @Query("""
+        UPDATE songs SET
+            title = :title,
+            artist = :artist,
+            album = :album,
+            duration = :duration,
+            albumArtUriString = :albumArtUri,
+            trackNumber = CASE WHEN :trackNumber > 0 THEN :trackNumber ELSE trackNumber END,
+            year = CASE WHEN :year > 0 THEN :year ELSE year END,
+            needsMetadata = 0,
+            lyricsAttemptedAt = NULL
+        WHERE id = :songId
+    """)
+    suspend fun updateSongMetadata(
+        songId: String,
+        title: String,
+        artist: String,
+        album: String,
+        duration: Long,
+        albumArtUri: String?,
+        trackNumber: Int,
+        year: Int
+    )
+
+    /**
+     * Canciones a las que les falta el número de pista y cuyo audio SÍ está en el dispositivo,
+     * así que releer el tag no cuesta red.
+     *
+     * Es la lista de la migración de datos descrita en `MusicPreferences.saveTrackInfoBackfilled`:
+     * `trackNumber`/`year` son columnas desde la v12 pero nunca se escribieron, de modo que toda
+     * la biblioteca anterior vale 0 y `ORDER BY trackNumber` degeneraba en orden alfabético.
+     *
+     * Se filtra por `trackNumber` y no por `year` porque casi todo archivo etiquetado trae número
+     * de pista, mientras que el año falta a menudo de forma legítima: usarlo como criterio metería
+     * en cada pasada a discos que nunca lo van a tener. El análisis lee los dos de una vez, así
+     * que el año se rellena igual para todo el que sí lo declare.
+     *
+     * @param localOnly true = solo las que tienen el audio en el dispositivo (no gasta red).
+     *        false = TODAS, incluidas las de nube sin descargar, que el backfiller resuelve
+     *        pidiendo la cabecera remota y por eso solo pide con WiFi.
+     */
+    @Query("""
+        SELECT * FROM songs
+        WHERE trackNumber = 0 AND isCorrupted = 0
+          AND (
+            uriString LIKE 'file://%' OR uriString LIKE 'content://%'
+            OR :localOnly = 0
+          )
+        ORDER BY album COLLATE NOCASE ASC
+    """)
+    suspend fun getSongsNeedingTrackInfo(localOnly: Boolean): List<SongEntity>
+
+    /**
+     * Escribe SOLO número de pista y año. A diferencia de [updateSongMetadata] no toca el resto
+     * de la metadata ni `needsMetadata`: el backfill re-analiza archivos cuyos tags de texto ya
+     * están bien, y reescribirlos podría pisar una corrección manual con lo que diga el archivo.
+     *
+     * Sin CASE: aquí un 0 es información ("lo miré y no lo tiene"), y como la fila ya estaba a 0
+     * escribirlo no cambia nada. Es la diferencia con los updates que mezclan varias fuentes.
+     */
+    @Query("UPDATE songs SET trackNumber = :trackNumber, year = :year WHERE id = :songId")
+    suspend fun updateTrackInfo(songId: String, trackNumber: Int, year: Int)
 
     // ==================== METADATA LIGERA (sin descargar el audio) ====================
 
@@ -443,12 +513,28 @@ interface SongDao {
      * `artworkAttemptedAt` es lo que evita que esa segunda condición se vuelva trabajo perpetuo:
      * un álbum que de verdad no trae imagen se sella al leerlo y sale de la lista (mismo
      * criterio que en [getSongsWithPendingArtwork] — solo sella una lectura CONCLUYENTE).
+     *
+     * El `needsMetadata = 1` de la primera condición es el sello equivalente para los TAGS, y lo
+     * aporta una columna que ya existía en vez de una nueva. Esa bandera la apaga
+     * [updateSongMetadata], o sea el análisis del archivo COMPLETO tras descargarlo
+     * (`MediaMetadataRetriever`, no los lectores parciales). Ese camino es estrictamente más
+     * capaz que esta fase —lee el archivo entero y no los primeros 256 KB—, así que si él no
+     * encontró artista, leer la cabecera no va a encontrarlo nunca: la fila se queda con el
+     * centinela para siempre y sin este filtro volvía a la lista en CADA sync.
+     *
+     * Medido en la biblioteca del autor: 4 archivos sin ningún tag de artista (tres MP3 con un
+     * ID3v1 vacío y un WAV sin chunk de tags) hacían aparecer "leyendo datos de canciones" en
+     * cada arranque, sin nada que leer.
+     *
+     * Ojo con la tentación de sellar TODA fila que la fase no resuelva: una cuyos tags existen
+     * pero caen fuera del fragmento (bloque PICTURE gigante antes del comentario Vorbis) SÍ
+     * merece reintentarse, y la distingue justamente `needsMetadata = 1`.
      */
     @Query("""
         SELECT * FROM songs
         WHERE sourceType != 'LOCAL' AND isCorrupted = 0
           AND (
-            artist = :unknownArtist
+            (artist = :unknownArtist AND needsMetadata = 1)
             OR ((albumArtUriString IS NULL OR albumArtUriString = '') AND artworkAttemptedAt IS NULL)
           )
         ORDER BY dateAdded DESC
@@ -472,6 +558,8 @@ interface SongDao {
             artist = :artist,
             album = :album,
             genre = COALESCE(:genre, genre),
+            trackNumber = CASE WHEN :trackNumber > 0 THEN :trackNumber ELSE trackNumber END,
+            year = CASE WHEN :year > 0 THEN :year ELSE year END,
             duration = CASE WHEN :durationMs > 0 THEN :durationMs ELSE duration END,
             lyricsAttemptedAt = NULL
         WHERE id = :songId
@@ -482,6 +570,8 @@ interface SongDao {
         artist: String,
         album: String,
         genre: String?,
+        trackNumber: Int,
+        year: Int,
         durationMs: Long
     )
 

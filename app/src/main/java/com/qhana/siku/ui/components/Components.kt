@@ -32,6 +32,14 @@ internal object ComponentConfig {
     val MiniPlayerArtSize = MiniPlayerHeight - 16.dp
     // Diámetro/lado de los controles de transporte. 48dp = mínimo táctil recomendado.
     val MiniPlayerButtonSize = 48.dp
+    // Aire A AMBOS LADOS del bloque de texto (carátula→texto y texto→transporte): el gap
+    // leading→texto de los ítems de lista, para que el mini se lea como una fila más de la
+    // biblioteca y no como otro componente. Se usa también a la derecha para que el título no
+    // llegue pegado al play — el gap de los botones (4dp) es demasiado poco ahí. El texto NO lleva
+    // ancho propio: la Column va con weight(1f) y se come todo lo que sobre entre ambos gaps.
+    val MiniPlayerTextGap = 12.dp
+    // Separación entre las dos líneas del bloque de texto (título / artista).
+    val MiniPlayerTextLineGap = 2.dp
     // Padding interno del container y gap entre sus botones de acción.
     val FloatingBarInnerPadding = 8.dp
     val FloatingBarItemGap = 4.dp

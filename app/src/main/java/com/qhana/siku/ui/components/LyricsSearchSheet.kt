@@ -96,7 +96,8 @@ fun LyricsSearchSheet(
                         CandidateItem(
                             candidate = candidate,
                             onClick = { onCandidateSelected(candidate) },
-                            onLongClick = { preview = candidate }
+                            onLongClick = { preview = candidate },
+                            modifier = Modifier.animateItem()
                         )
                     }
                 }
@@ -131,10 +132,11 @@ private fun CenteredMessage(content: @Composable () -> Unit) {
 private fun CandidateItem(
     candidate: LyricsCandidate,
     onClick: () -> Unit,
-    onLongClick: () -> Unit
+    onLongClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     ListItem(
-        modifier = Modifier.combinedClickable(
+        modifier = modifier.combinedClickable(
             onClick = onClick,
             onLongClick = onLongClick
         ),

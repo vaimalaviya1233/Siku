@@ -21,6 +21,20 @@ class DownloadScheduler @Inject constructor(
     private val workManager: WorkManager
 ) {
 
+    private companion object {
+        /**
+         * Base del backoff exponencial de TODOS los trabajos que encola esta clase (descarga
+         * individual, scan, reintentos). Estaba repetida en los cuatro `setBackoffCriteria`,
+         * que es justo donde una divergencia no se nota: cada trabajo reintentaría a su ritmo
+         * sin que nada falle.
+         *
+         * Un minuto y no el mínimo que permite WorkManager (10 s): lo que hace fallar a estos
+         * trabajos es quedarse sin red o que OneDrive esté limitando peticiones, y ninguna de
+         * las dos cosas se arregla en diez segundos — reintentar antes solo gasta batería.
+         */
+        const val BACKOFF_MINUTES = 1L
+    }
+
     /**
      * Schedules a single song download.
      * @param songId Song ID.
@@ -47,7 +61,7 @@ class DownloadScheduler @Inject constructor(
             )
             .setBackoffCriteria(
                 BackoffPolicy.EXPONENTIAL,
-                1,
+                BACKOFF_MINUTES,
                 TimeUnit.MINUTES
             )
 
@@ -93,7 +107,7 @@ class DownloadScheduler @Inject constructor(
             .setConstraints(constraints)
             .setBackoffCriteria(
                 BackoffPolicy.EXPONENTIAL,
-                1,
+                BACKOFF_MINUTES,
                 TimeUnit.MINUTES
             )
             .build()
@@ -119,7 +133,7 @@ class DownloadScheduler @Inject constructor(
         val request = OneTimeWorkRequestBuilder<ScanWorker>()
             .setInputData(workDataOf("force_refresh" to false))
             .setConstraints(constraints)
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, BACKOFF_MINUTES, TimeUnit.MINUTES)
             .build()
 
         // APPEND_OR_REPLACE: si el ScanWorker actual sigue corriendo (este método se llama
@@ -145,7 +159,7 @@ class DownloadScheduler @Inject constructor(
         val request = OneTimeWorkRequestBuilder<ScanWorker>()
             .setInputData(workDataOf("force_refresh" to false))
             .setConstraints(constraints)
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, BACKOFF_MINUTES, TimeUnit.MINUTES)
             .apply { if (initialDelayMs > 0) setInitialDelay(initialDelayMs, TimeUnit.MILLISECONDS) }
             .build()
 

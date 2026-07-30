@@ -1,14 +1,6 @@
 package com.qhana.siku.ui.navigation
 
 import android.net.Uri
-import androidx.compose.animation.AnimatedContentTransitionScope
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
-import androidx.compose.runtime.Composable
-import androidx.navigation.NavBackStackEntry
 
 /**
  * Rutas de navegación de la aplicación.
@@ -98,30 +90,7 @@ private fun decodeNameArg(raw: String?): String = when (raw) {
     else -> Uri.decode(raw)
 }
 
-// Extension functions for consistent transitions across the app
-object Transitions {
-    val enterTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> androidx.compose.animation.EnterTransition) = {
-        slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Start, tween(400)) + fadeIn(tween(400))
-    }
-
-    val exitTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> androidx.compose.animation.ExitTransition) = {
-        slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Start, tween(400)) + fadeOut(tween(200))
-    }
-
-    val popEnterTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> androidx.compose.animation.EnterTransition) = {
-        slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.End, tween(400)) + fadeIn(tween(400))
-    }
-
-    val popExitTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> androidx.compose.animation.ExitTransition) = {
-        slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.End, tween(400)) + fadeOut(tween(200))
-    }
-    
-    // Vertical slide for Now Playing screen (Modal feel)
-    val enterTransitionVertical: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> androidx.compose.animation.EnterTransition) = {
-        slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Up, tween(400)) + fadeIn(tween(400))
-    }
-
-    val exitTransitionVertical: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> androidx.compose.animation.ExitTransition) = {
-        slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Down, tween(400)) + fadeOut(tween(200))
-    }
-}
+// Las transiciones de navegación viven en `ui/theme/Motion.kt` (`appNavForwardEnter` y compañía) y
+// se aplican como DEFAULTS del NavHost en `AppNavHost`. Aquí había un objeto `Transitions` con seis
+// lambdas de `tween(400)`/`tween(200)`: no lo referenciaba nadie —las rutas declaraban las suyas a
+// mano— así que era una tercera copia muerta de la misma decisión.

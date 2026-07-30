@@ -39,11 +39,13 @@ import com.qhana.siku.data.model.PlayerToolbarAction
 import com.qhana.siku.data.model.PlayerToolbarConfig
 import com.qhana.siku.data.model.ReplayGainMode
 import com.qhana.siku.data.model.ToolbarActionState
+import com.qhana.siku.ui.components.ConnectedChoiceGroup
 import com.qhana.siku.ui.components.DisconnectOneDriveDialog
 import com.qhana.siku.ui.components.DeviceScanSourceCard
 import com.qhana.siku.ui.components.LocalFoldersSourceCard
 import com.qhana.siku.ui.components.rememberDeviceScanActivator
 import com.qhana.siku.ui.components.MaterialSymbol
+import com.qhana.siku.ui.components.MenuItemIcon
 import com.qhana.siku.ui.components.PlayerGestureConfig
 import com.qhana.siku.ui.components.OneDriveSourceCard
 import com.qhana.siku.ui.components.rememberOneDriveFolderChanger
@@ -55,6 +57,92 @@ import com.qhana.siku.ui.viewmodel.BrowseViewModel
 import com.qhana.siku.ui.viewmodel.LibraryViewModel
 import com.qhana.siku.ui.viewmodel.SourcesViewModel
 import com.qhana.siku.ui.viewmodel.SyncViewModel
+
+/**
+ * Medidas compartidas por todas las pantallas de Ajustes. Existen porque el radio de las tarjetas
+ * y las dos separaciones estaban repetidos literalmente en ~15 sitios del archivo: cambiar el
+ * lenguaje visual obligaba a un buscar-y-reemplazar y cualquier olvido quedaba como una tarjeta
+ * con otra forma.
+ */
+/** Modos de ReplayGain, en el orden en que se ofrecen. */
+private val REPLAY_GAIN_MODES = listOf(
+    ReplayGainMode.OFF,
+    ReplayGainMode.TRACK,
+    ReplayGainMode.ALBUM
+)
+
+private object SettingsTokens {
+    /** Esquina de un bloque SUELTO (los agrupados la reciben de [rememberListItemShape]). */
+    val BlockCorner = 12.dp
+    /** Separación DENTRO de un grupo: mínima, para que se lea como un bloque continuo. */
+    val GroupGap = 2.dp
+    /** Separación ENTRE grupos o bloques independientes. */
+    val SectionGap = 8.dp
+    /** Padding interno de una fila. */
+    val TilePadding = 16.dp
+}
+
+/**
+ * Grupo de ajustes con el patrón de LISTA AGRUPADA de M3 Expressive: los ítems forman un bloque
+ * continuo — esquinas pronunciadas arriba del primero y abajo del último, pequeñas en los del
+ * medio — separados por [SettingsTokens.GroupGap]. Es el mismo lenguaje que ya usa el hub de
+ * categorías, que hasta ahora era el único sitio de Ajustes que lo aplicaba.
+ *
+ * Recibe la LISTA de ítems y no un slot `content` porque el reparto de esquinas necesita saber
+ * cuántos hay, y en Compose no se pueden contar los hijos de un slot antes de componerlos. Cada
+ * ítem recibe la forma que le toca y debe aplicarla a su propia superficie.
+ */
+@Composable
+private fun SettingsGroup(items: List<@Composable (Shape) -> Unit>) {
+    items.forEachIndexed { index, item ->
+        item(rememberListItemShape(index, items.size))
+        if (index < items.lastIndex) Spacer(modifier = Modifier.height(SettingsTokens.GroupGap))
+    }
+}
+
+/**
+ * Fila de switch con icono, pensada para ir dentro de un [SettingsGroup] (de ahí que la forma
+ * venga de fuera). Sustituye a tres bloques de ~33 líneas idénticos que solo se diferenciaban en
+ * el icono, los textos y el estado.
+ *
+ * No confundir con [SettingsSwitchRow], que es la fila DESNUDA (sin superficie propia ni icono)
+ * que se usa dentro de una tarjeta que ya agrupa varios switches bajo un encabezado.
+ */
+@Composable
+private fun SettingsSwitchTile(
+    icon: String,
+    title: String,
+    description: String,
+    checked: Boolean,
+    shape: Shape,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Surface(
+        shape = shape,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(SettingsTokens.TilePadding),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            MaterialSymbol(icon, size = 24.sp)
+            Spacer(modifier = Modifier.width(16.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = title, style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    text = description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(modifier = Modifier.width(16.dp))
+            Switch(checked = checked, onCheckedChange = onCheckedChange)
+        }
+    }
+}
 
 /**
  * Ajustes estilo Ajustes de Android: HUB de categorías (icono + título + estado, en lista
@@ -197,7 +285,9 @@ fun SettingsScreen(
                     )
                 }
             }
-            if (index < categories.lastIndex) Spacer(modifier = Modifier.height(2.dp))
+            if (index < categories.lastIndex) {
+                Spacer(modifier = Modifier.height(SettingsTokens.GroupGap))
+            }
         }
     }
 }
@@ -334,7 +424,7 @@ fun SettingsBackupScreen(
         onBackClick = onBackClick
     ) {
         Surface(
-            shape = RoundedCornerShape(12.dp),
+            shape = RoundedCornerShape(SettingsTokens.BlockCorner),
             color = MaterialTheme.colorScheme.surfaceContainerHigh
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
@@ -386,7 +476,7 @@ fun SettingsPlaybackScreen(
         onBackClick = onBackClick
     ) {
         Surface(
-            shape = RoundedCornerShape(12.dp),
+            shape = RoundedCornerShape(SettingsTokens.BlockCorner),
             color = MaterialTheme.colorScheme.surfaceContainerHigh
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
@@ -397,23 +487,21 @@ fun SettingsPlaybackScreen(
                     modifier = Modifier.padding(bottom = 12.dp)
                 )
 
-                // Selector de modo OFF / TRACK / ALBUM
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                    val modes = listOf(
-                        ReplayGainMode.OFF to stringResource(R.string.settings_rg_off),
-                        ReplayGainMode.TRACK to stringResource(R.string.settings_rg_track),
-                        ReplayGainMode.ALBUM to stringResource(R.string.settings_rg_album)
-                    )
-                    modes.forEachIndexed { index, (mode, label) ->
-                        SegmentedButton(
-                            selected = replayGainMode == mode,
-                            onClick = { viewModel.setReplayGainMode(mode) },
-                            shape = SegmentedButtonDefaults.itemShape(index = index, count = modes.size)
-                        ) {
-                            Text(label, style = MaterialTheme.typography.labelMedium)
+                // Selector de modo OFF / TRACK / ALBUM. Connected button group, no segmentado:
+                // el spec de M3 Expressive retiró `SegmentedButton` de las recomendaciones y este
+                // es su reemplazo directo.
+                ConnectedChoiceGroup(
+                    options = REPLAY_GAIN_MODES,
+                    selected = replayGainMode,
+                    onSelect = { viewModel.setReplayGainMode(it) },
+                    labelFor = {
+                        when (it) {
+                            ReplayGainMode.OFF -> stringResource(R.string.settings_rg_off)
+                            ReplayGainMode.TRACK -> stringResource(R.string.settings_rg_track)
+                            ReplayGainMode.ALBUM -> stringResource(R.string.settings_rg_album)
                         }
                     }
-                }
+                )
 
                 val modeHint = when (replayGainMode) {
                     ReplayGainMode.OFF -> stringResource(R.string.settings_rg_off_desc)
@@ -446,7 +534,7 @@ fun SettingsPlaybackScreen(
 
         // Ecualizador: elegir entre el propio (hoja del NowPlaying) y el del sistema.
         Surface(
-            shape = RoundedCornerShape(12.dp),
+            shape = RoundedCornerShape(SettingsTokens.BlockCorner),
             color = MaterialTheme.colorScheme.surfaceContainerHigh
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
@@ -512,7 +600,7 @@ fun SettingsGesturesScreen(
         // ENUMERA porque, apagados, no hay forma de que el usuario sepa qué se está perdiendo —
         // un gesto que nadie te contó no existe.
         Surface(
-            shape = RoundedCornerShape(12.dp),
+            shape = RoundedCornerShape(SettingsTokens.BlockCorner),
             color = MaterialTheme.colorScheme.surfaceContainerHigh
         ) {
             Row(
@@ -582,7 +670,7 @@ private fun LyricsSaveSetting(
     }
 
     Surface(
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(SettingsTokens.BlockCorner),
         color = MaterialTheme.colorScheme.surfaceContainerHigh
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -772,7 +860,6 @@ fun SettingsDownloadsScreen(
     // ¿Hay alguna fuente de NUBE? Del registro de fuentes, no de OneDrive en particular:
     // un proveedor cloud futuro cuenta sin tocar este gate.
     val hasCloudSource by sourcesViewModel.hasCloudSource.collectAsStateWithLifecycle()
-    LaunchedEffect(Unit) { sourcesViewModel.refreshCloudPresence() }
 
     SettingsScaffold(
         title = stringResource(R.string.settings_downloads_header),
@@ -787,10 +874,10 @@ fun SettingsDownloadsScreen(
             enabled = hasCloudSource,
             description = if (hasCloudSource) stringResource(R.string.download_storage_limit_desc)
             else stringResource(R.string.settings_downloads_cloud_only),
-            shape = RoundedCornerShape(12.dp)
+            shape = RoundedCornerShape(SettingsTokens.BlockCorner)
         )
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(SettingsTokens.SectionGap))
 
         // Fotos de artistas (Deezer): política de red del backfill y del fetch del detalle.
         // El estado reactivo sale de un BrowseViewModel propio de esta pantalla; las acciones
@@ -801,7 +888,7 @@ fun SettingsDownloadsScreen(
         val photosBannerEnabled by browseViewModel.artistPhotosBannerEnabled.collectAsStateWithLifecycle()
         val photoDetailOnMetered by browseViewModel.artistPhotoDetailOnMetered.collectAsStateWithLifecycle()
         Surface(
-            shape = RoundedCornerShape(12.dp),
+            shape = RoundedCornerShape(SettingsTokens.BlockCorner),
             color = MaterialTheme.colorScheme.surfaceContainerHigh
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
@@ -850,6 +937,13 @@ fun SettingsAppearanceScreen(
     val nowPlayingWavyProgress = uiState.nowPlayingWavyProgress
     val nowPlayingDetailedFormat = uiState.nowPlayingDetailedFormat
 
+    // Regenerar es DESTRUCTIVO e irreversible: además de vaciar los colores extraídos —que los
+    // vuelve a calcular el ArtworkWorker— borra los que el usuario eligió a mano
+    // (`clearManualColorIds`), y eso no lo reconstruye nadie. Estaba a un solo toque, sin aviso, en
+    // una lista donde las filas vecinas son switches inocuos; se perdió una biblioteca entera de
+    // overrides por tocarlo de pasada.
+    var showRegenerateConfirm by remember { mutableStateOf(false) }
+
     SettingsScaffold(
         title = stringResource(R.string.settings_appearance_header),
         onBackClick = onBackClick
@@ -861,156 +955,112 @@ fun SettingsAppearanceScreen(
             description = stringResource(R.string.settings_regenerate_desc),
             enabled = !isRegenerating,
             loading = isRegenerating,
-            onClick = { viewModel.regenerateColors() }
+            onClick = { showRegenerateConfirm = true }
         )
 
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // Fondo del reproductor: color sólido tonal vs degradado según la carátula.
-        Surface(
-            shape = RoundedCornerShape(12.dp),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                MaterialSymbol("gradient", size = 24.sp)
-
-                Spacer(modifier = Modifier.width(16.dp))
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = stringResource(R.string.settings_solid_bg),
-                        style = MaterialTheme.typography.bodyLarge
-                    )
-                    Text(
-                        text = stringResource(R.string.settings_solid_bg_desc),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+        if (showRegenerateConfirm) {
+            AlertDialog(
+                onDismissRequest = { showRegenerateConfirm = false },
+                title = { Text(stringResource(R.string.settings_regenerate_confirm_title)) },
+                text = { Text(stringResource(R.string.settings_regenerate_confirm_message)) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showRegenerateConfirm = false
+                        viewModel.regenerateColors()
+                    }) { Text(stringResource(R.string.settings_regenerate_confirm_action)) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showRegenerateConfirm = false }) {
+                        Text(stringResource(R.string.common_cancel))
+                    }
                 }
-
-                Spacer(modifier = Modifier.width(16.dp))
-
-                Switch(
-                    checked = nowPlayingSolidBackground,
-                    onCheckedChange = { viewModel.setNowPlayingSolidBackground(it) }
-                )
-            }
+            )
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(SettingsTokens.SectionGap))
 
-        // Barra de progreso del reproductor: píldora plana (diseño propio) vs onda Expressive.
-        // Solo afecta al NowPlaying — en el MiniPlayer la barra mide 3dp y la onda no se leería.
-        Surface(
-            shape = RoundedCornerShape(12.dp),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                MaterialSymbol("waves", size = 24.sp)
-
-                Spacer(modifier = Modifier.width(16.dp))
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = stringResource(R.string.settings_wavy_progress),
-                        style = MaterialTheme.typography.bodyLarge
+        // Los tres conmutadores del NowPlaying van JUNTOS en un grupo. Antes estaban sueltos y
+        // separados entre sí por el estilo de paleta, así que tres ajustes del mismo sitio se
+        // leían como tres cosas sin relación.
+        SettingsGroup(
+            listOf<@Composable (Shape) -> Unit>(
+                // Fondo del reproductor: color sólido tonal vs degradado según la carátula.
+                { shape ->
+                    SettingsSwitchTile(
+                        icon = "gradient",
+                        title = stringResource(R.string.settings_solid_bg),
+                        description = stringResource(R.string.settings_solid_bg_desc),
+                        checked = nowPlayingSolidBackground,
+                        shape = shape,
+                        onCheckedChange = { viewModel.setNowPlayingSolidBackground(it) }
                     )
-                    Text(
-                        text = stringResource(R.string.settings_wavy_progress_desc),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                // Barra de progreso: píldora plana (diseño propio) vs onda Expressive. Solo afecta
+                // al NowPlaying — en el MiniPlayer la barra mide 3dp y la onda no se leería.
+                { shape ->
+                    SettingsSwitchTile(
+                        icon = "waves",
+                        title = stringResource(R.string.settings_wavy_progress),
+                        description = stringResource(R.string.settings_wavy_progress_desc),
+                        checked = nowPlayingWavyProgress,
+                        shape = shape,
+                        onCheckedChange = { viewModel.setNowPlayingWavyProgress(it) }
+                    )
+                },
+                // Chip de formato: solo el contenedor (FLAC) o la ficha técnica
+                // (FLAC · 16 bit · 44.1 kHz). El mismo ajuste se conmuta tocando el chip en el
+                // reproductor; ambos escriben la misma preferencia.
+                { shape ->
+                    SettingsSwitchTile(
+                        icon = "graphic_eq",
+                        title = stringResource(R.string.settings_detailed_format),
+                        description = stringResource(R.string.settings_detailed_format_desc),
+                        checked = nowPlayingDetailedFormat,
+                        shape = shape,
+                        onCheckedChange = { viewModel.setNowPlayingDetailedFormat(it) }
                     )
                 }
+            )
+        )
 
-                Spacer(modifier = Modifier.width(16.dp))
-
-                Switch(
-                    checked = nowPlayingWavyProgress,
-                    onCheckedChange = { viewModel.setNowPlayingWavyProgress(it) }
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(SettingsTokens.SectionGap))
 
         // Estilo de paleta: cuánto croma se aplica al generar el tema desde el color del álbum.
         // Cambia el tema EN VIVO (no hace falta regenerar colores: el estilo actúa sobre el seed
-        // ya guardado, no sobre la extracción).
+        // ya guardado, no sobre la extracción). Va SUELTO: no es una fila, es un bloque con su
+        // propio selector, y meterlo en el grupo rompería la continuidad de los switches.
         ThemePaletteStyleSetting(
             selected = uiState.themePaletteStyle,
             onSelect = { viewModel.setThemePaletteStyle(it) }
         )
 
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // Chip de formato del NowPlaying: solo el contenedor (FLAC) o la ficha técnica
-        // (FLAC · 16 bit · 44.1 kHz). El mismo ajuste se conmuta tocando el chip en el
-        // reproductor; ambos escriben la misma preferencia.
-        Surface(
-            shape = RoundedCornerShape(12.dp),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                MaterialSymbol("graphic_eq", size = 24.sp)
-
-                Spacer(modifier = Modifier.width(16.dp))
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = stringResource(R.string.settings_detailed_format),
-                        style = MaterialTheme.typography.bodyLarge
-                    )
-                    Text(
-                        text = stringResource(R.string.settings_detailed_format_desc),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(16.dp))
-
-                Switch(
-                    checked = nowPlayingDetailedFormat,
-                    onCheckedChange = { viewModel.setNowPlayingDetailedFormat(it) }
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(SettingsTokens.SectionGap))
 
         // Las dos personalizaciones con lista drag & drop viven en su propia pantalla: metidas
         // aquí ocupaban Apariencia entera y enterraban el resto de ajustes.
-        SettingsActionRow(
-            icon = "tab",
-            title = stringResource(R.string.settings_tabs_header),
-            description = stringResource(R.string.settings_tabs_desc),
-            enabled = true,
-            onClick = { onNavigate(Screen.SettingsTabs.route) }
-        )
-
-        Spacer(modifier = Modifier.height(2.dp))
-
-        SettingsActionRow(
-            icon = "bottom_navigation",
-            title = stringResource(R.string.settings_player_bar_header),
-            description = stringResource(R.string.settings_player_bar_desc),
-            enabled = true,
-            onClick = { onNavigate(Screen.SettingsPlayerBar.route) }
+        SettingsGroup(
+            listOf<@Composable (Shape) -> Unit>(
+                { shape ->
+                    SettingsActionRow(
+                        icon = "tab",
+                        title = stringResource(R.string.settings_tabs_header),
+                        description = stringResource(R.string.settings_tabs_desc),
+                        enabled = true,
+                        onClick = { onNavigate(Screen.SettingsTabs.route) },
+                        shape = shape
+                    )
+                },
+                { shape ->
+                    SettingsActionRow(
+                        icon = "bottom_navigation",
+                        title = stringResource(R.string.settings_player_bar_header),
+                        description = stringResource(R.string.settings_player_bar_desc),
+                        enabled = true,
+                        onClick = { onNavigate(Screen.SettingsPlayerBar.route) },
+                        shape = shape
+                    )
+                }
+            )
         )
 
         // El "laboratorio de color" (7 sliders de tuning del extractor) se eliminó con el
@@ -1034,7 +1084,7 @@ fun SettingsTabsScreen(
         onBackClick = onBackClick
     ) {
         Surface(
-            shape = RoundedCornerShape(12.dp),
+            shape = RoundedCornerShape(SettingsTokens.BlockCorner),
             color = MaterialTheme.colorScheme.surfaceContainerHigh
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
@@ -1067,7 +1117,7 @@ fun SettingsPlayerBarScreen(
         onBackClick = onBackClick
     ) {
         Surface(
-            shape = RoundedCornerShape(12.dp),
+            shape = RoundedCornerShape(SettingsTokens.BlockCorner),
             color = MaterialTheme.colorScheme.surfaceContainerHigh
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
@@ -1219,7 +1269,7 @@ private fun ThemePaletteStyleSetting(
     val current = PaletteStyleOptions.firstOrNull { it.first == selected } ?: PaletteStyleOptions.first()
 
     Surface(
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(SettingsTokens.BlockCorner),
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         onClick = { expanded = true }
     ) {
@@ -1253,27 +1303,29 @@ private fun ThemePaletteStyleSetting(
                     size = 24.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                    PaletteStyleOptions.forEach { (name, labels) ->
-                        DropdownMenuItem(
-                            text = {
-                                Column {
-                                    Text(stringResource(labels.first))
-                                    Text(
-                                        text = stringResource(labels.second),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            },
-                            trailingIcon = if (name == current.first) {
-                                { MaterialSymbol("check", size = 20.sp) }
-                            } else null,
-                            onClick = {
-                                expanded = false
-                                onSelect(name)
-                            }
-                        )
+                // Elegir estilo de paleta es una SELECCIÓN EXCLUSIVA: sobrecarga `selected`, que
+                // marca el activo con contenedor y morph de forma. La descripción va en el slot
+                // `supportingText` del propio item y no en una `Column` metida dentro de `text`
+                // —el componente ya sabe maquetar título + apoyo, con su tipografía y su color— y
+                // el check pasa a `selectedLeadingIcon`, que además lo anima al entrar.
+                DropdownMenuPopup(expanded = expanded, onDismissRequest = { expanded = false }) {
+                    DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
+                        PaletteStyleOptions.forEachIndexed { index, (name, labels) ->
+                            DropdownMenuItem(
+                                selected = name == current.first,
+                                onClick = {
+                                    expanded = false
+                                    onSelect(name)
+                                },
+                                text = { Text(stringResource(labels.first)) },
+                                shapes = MenuDefaults.itemShape(
+                                    index = index,
+                                    count = PaletteStyleOptions.size
+                                ),
+                                selectedLeadingIcon = { MenuItemIcon("check") },
+                                supportingText = { Text(stringResource(labels.second)) }
+                            )
+                        }
                     }
                 }
             }
@@ -1364,18 +1416,21 @@ private fun SettingsActionRow(
     description: String,
     enabled: Boolean,
     onClick: () -> Unit,
-    loading: Boolean = false
+    loading: Boolean = false,
+    /** La pasa [SettingsGroup] cuando la fila va dentro de un grupo; suelta, es un bloque. */
+    shape: Shape = RoundedCornerShape(SettingsTokens.BlockCorner)
 ) {
     Surface(
-        shape = RoundedCornerShape(12.dp),
+        shape = shape,
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         enabled = enabled,
-        onClick = onClick
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth()
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(SettingsTokens.TilePadding),
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (loading) {

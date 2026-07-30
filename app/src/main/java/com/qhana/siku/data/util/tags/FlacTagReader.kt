@@ -52,6 +52,10 @@ class FlacTagReader @Inject constructor() : PartialTagReader {
                     } else {
                         // No cabía en el fragmento: se devuelve dónde está para una segunda
                         // petición EXACTA, en vez de pedir a ciegas un fragmento más grande.
+                        // OJO: el rango cubre el BLOQUE entero, no la imagen — quien lo pida
+                        // tiene que pasarlo por [decodePictureRange]. Acotar aquí el rango a los
+                        // bytes de la imagen es imposible: sus offsets viven en la parte del
+                        // bloque que precisamente NO se llegó a leer.
                         pictureRange = bodyStart.toLong() until (bodyStart.toLong() + length)
                     }
             }
@@ -68,6 +72,10 @@ class FlacTagReader @Inject constructor() : PartialTagReader {
             album = tags["ALBUM"],
             albumArtist = tags["ALBUMARTIST"],
             genre = tags["GENRE"],
+            trackNumber = parseTrackNumber(tags["TRACKNUMBER"]),
+            // `DATE` es la clave estándar de Vorbis y admite ISO-8601 completo; `YEAR` es una
+            // extensión de facto que escriben algunos taggers viejos. [parseYear] acepta ambas.
+            year = parseYear(tags["DATE"] ?: tags["YEAR"]),
             durationMs = durationMs,
             // No hay clave estándar para la letra en Vorbis: `LYRICS` es la de MusicBee/foobar
             // (y donde suele ir el LRC con marcas de tiempo), `UNSYNCEDLYRICS` la de Picard.
@@ -76,6 +84,14 @@ class FlacTagReader @Inject constructor() : PartialTagReader {
             pictureRange = pictureRange
         )
     }
+
+    /**
+     * Los bytes que trajo el rango de [TagFragment.pictureRange] son el bloque PICTURE COMPLETO
+     * (tipo, mime, descripción, dimensiones… y al final la imagen), así que hay que quitarles la
+     * envoltura con la MISMA lógica que cuando el bloque sí cabe en el fragmento.
+     */
+    override fun decodePictureRange(bytes: ByteArray): ByteArray? =
+        extractPictureData(bytes, 0, bytes.size)
 
     /**
      * STREAMINFO empaqueta los campos a nivel de BIT, no de byte: a partir del offset 10 vienen
@@ -111,8 +127,12 @@ class FlacTagReader @Inject constructor() : PartialTagReader {
         var p = start
         if (p + 4 > end) return emptyMap()
         val vendorLength = readUInt32LE(buf, p)
+        // La longitud se valida ANTES de avanzar: un uint32 corrupto cercano a 2³¹ desbordaba el
+        // Int al sumarlo, dejaba `p` NEGATIVO —con lo que `p + 4 > end` ya no era cierto— y el
+        // siguiente acceso reventaba con AIOOBE. Restar es inmune: `end` y `p` están en rango.
+        if (vendorLength < 0 || vendorLength > end - p - 4) return emptyMap()
         p += 4 + vendorLength
-        if (p + 4 > end || vendorLength < 0) return emptyMap()
+        if (p + 4 > end) return emptyMap()
         val count = readUInt32LE(buf, p)
         p += 4
 
@@ -121,7 +141,7 @@ class FlacTagReader @Inject constructor() : PartialTagReader {
             if (p + 4 > end) return out
             val entryLength = readUInt32LE(buf, p)
             p += 4
-            if (entryLength < 0 || p + entryLength > end) return out
+            if (entryLength < 0 || entryLength > end - p) return out
             val entry = String(buf, p, entryLength, Charsets.UTF_8)
             p += entryLength
             val separator = entry.indexOf('=')
@@ -142,13 +162,19 @@ class FlacTagReader @Inject constructor() : PartialTagReader {
         val end = start + length
         var p = start + 4 // picture type
         if (p + 4 > end) return null
-        val mimeLength = readUInt32BE(buf, p); p += 4 + mimeLength
-        if (p + 4 > end || mimeLength < 0) return null
-        val descLength = readUInt32BE(buf, p); p += 4 + descLength
-        if (p + 20 > end || descLength < 0) return null
-        p += 16 // ancho, alto, profundidad de color, nº de colores indexados
+        // Cada longitud se valida ANTES de avanzar el puntero, por el desbordamiento de Int que
+        // se explica en [parseVorbisComment].
+        val mimeLength = readUInt32BE(buf, p)
+        if (mimeLength < 0 || mimeLength > end - p - 4) return null
+        p += 4 + mimeLength
+        if (p + 4 > end) return null
+        val descLength = readUInt32BE(buf, p)
+        if (descLength < 0 || descLength > end - p - 4) return null
+        p += 4 + descLength
+        if (p + PICTURE_DIMENSIONS_BYTES + 4 > end) return null
+        p += PICTURE_DIMENSIONS_BYTES // ancho, alto, profundidad de color, nº de colores indexados
         val dataLength = readUInt32BE(buf, p); p += 4
-        if (dataLength <= 0 || p + dataLength > end) return null
+        if (dataLength <= 0 || dataLength > end - p) return null
         return buf.copyOfRange(p, p + dataLength)
     }
 
@@ -176,6 +202,8 @@ class FlacTagReader @Inject constructor() : PartialTagReader {
         const val TYPE_PICTURE = 6
         /** STREAMINFO es de tamaño fijo por spec. */
         const val STREAMINFO_BYTES = 34
+        /** Ancho, alto, profundidad de color y nº de colores indexados: 4 uint32 en el PICTURE. */
+        const val PICTURE_DIMENSIONS_BYTES = 16
         /** Tope de sanidad: un count corrupto no debe hacernos iterar miles de millones de veces. */
         const val MAX_COMMENTS = 512
     }

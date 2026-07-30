@@ -52,6 +52,9 @@ class OneDriveMusicSource @Inject constructor(
     /** OneDrive está configurado si hay una cuenta de Microsoft conectada. */
     override suspend fun isConfigured(): Boolean = authManager.hasAccount()
 
+    /** La misma sesión, observable. Su dueño es `AuthManager`; aquí solo se reexpone. */
+    override val isConfiguredFlow: kotlinx.coroutines.flow.Flow<Boolean> = authManager.hasSession
+
     override suspend fun discover(force: Boolean, ctx: DiscoverContext): DiscoverResult {
         // Token: si la auth falla, señalamos con SourceAuthException para que el orquestador
         // devuelva Failed(isAuthError=true) — antes esto lo hacía SyncManager.startSync.
@@ -110,7 +113,12 @@ class OneDriveMusicSource @Inject constructor(
                     fresh,
                     pictureRange.first,
                     (pictureRange.last - pictureRange.first + 1).toInt()
-                )
+                )?.let {
+                    // El rango trae el BLOQUE del contenedor, no la imagen: lo desenvuelve el
+                    // mismo lector que lo produjo. Sin esto se persistía un "jpg" con la cabecera
+                    // del bloque delante —indecodificable— y encima se repartía al álbum entero.
+                    reader.decodePictureRange(it)
+                }
             }
         }
 
@@ -120,6 +128,8 @@ class OneDriveMusicSource @Inject constructor(
             album = tags.album,
             albumArtist = tags.albumArtist,
             genre = tags.genre,
+            trackNumber = tags.trackNumber,
+            year = tags.year,
             durationMs = tags.durationMs,
             artwork = tags.pictureData,
             fetchArtwork = fetchArtwork
@@ -136,13 +146,23 @@ class OneDriveMusicSource @Inject constructor(
         val folder = musicPreferences.loadOneDriveFolderPath()
         val initialUrl = deltaUrlFor(folder)
         val savedToken = musicPreferences.loadDeltaToken()
-        val isFullScan = savedToken == null
+        // `var` y no `val`: un 410 a mitad del recorrido reinicia la enumeración desde cero y eso
+        // CONVIERTE el scan incremental en completo. Sin actualizarlo, la re-enumeración corría sin
+        // reconciliación y los archivos borrados en OneDrive durante la ventana en que el token
+        // caducó no llegaban ni como `deleted` (el delta se reinició) ni como huérfanos.
+        var isFullScan = savedToken == null
         var nextLink = savedToken ?: initialUrl
         var changesCount = 0
         var deletedCount = 0
         var hasMore = true
-        // During a full scan, collect all remote IDs for reconciliation
-        val allRemoteIds = if (isFullScan) HashSet<String>(512) else null
+        // Ids remotos vistos, para la reconciliación del scan completo. Se acumulan SIEMPRE: si un
+        // 410 promueve el scan a completo a mitad de camino, ya se han visto páginas que no se
+        // volverían a recorrer, y reconciliar con una foto incompleta borraría canciones vivas.
+        // Por eso `enumerationComplete` (abajo) es lo que decide si la foto sirve.
+        val allRemoteIds = HashSet<String>(512)
+        // La enumeración llegó hasta el deltaLink final sin cortes: solo entonces "no lo vi" es
+        // "ya no está". Un `isStopped`, una excepción o un 410 a mitad la invalidan.
+        var enumerationComplete = false
 
         Log.d(TAG, "syncWithDelta: ${if (isFullScan) "FULL scan" else "incremental scan"}")
 
@@ -159,6 +179,12 @@ class OneDriveMusicSource @Inject constructor(
                 when (e.code()) {
                     410 -> {
                         musicPreferences.clearDeltaToken()
+                        // El delta caducó: la enumeración vuelve a empezar de cero, así que este
+                        // scan PASA a ser completo y con ello recupera la reconciliación. Lo visto
+                        // hasta aquí se descarta: la foto válida es la del recorrido nuevo, no una
+                        // mezcla de los dos.
+                        isFullScan = true
+                        allRemoteIds.clear()
                         oneDriveApi.getDelta(token, initialUrl)
                     }
                     // La carpeta configurada no existe (o la renombraron). Sin esto el usuario
@@ -177,7 +203,7 @@ class OneDriveMusicSource @Inject constructor(
                 if (item.deleted != null) {
                     delete.add(id)
                 } else if (item.file != null && isAudioFile(item.name ?: "")) {
-                    allRemoteIds?.add(id)
+                    allRemoteIds.add(id)
                     val relPath = relativePathOf(item, folder)
                     // PREFER_LOCAL: existe copia local de esta ruta → no se importa. Va
                     // DESPUÉS de allRemoteIds.add: si una copia vieja sigue en la BD, la
@@ -211,7 +237,13 @@ class OneDriveMusicSource @Inject constructor(
                 }
             )
             nextLink = response.nextLink ?: response.deltaLink ?: ""
-            if (response.deltaLink != null) { musicPreferences.saveDeltaToken(response.deltaLink); hasMore = false }
+            // Llegar al deltaLink es la ÚNICA señal de que se recorrió todo: es el final que
+            // declara Graph. Salir por `nextLink` vacío o por `isStopped` deja la foto a medias.
+            if (response.deltaLink != null) {
+                musicPreferences.saveDeltaToken(response.deltaLink)
+                hasMore = false
+                enumerationComplete = true
+            }
             if (nextLink.isEmpty()) hasMore = false
         }
 
@@ -219,7 +251,12 @@ class OneDriveMusicSource @Inject constructor(
         // en OneDrive. Por sourceType, NUNCA getAllSongIds(): con la fuente local
         // configurada, comparar TODOS los ids contra los remotos marcaba las canciones
         // locales como huérfanas y las borraba en cada pull-to-refresh.
-        if (isFullScan && allRemoteIds != null && allRemoteIds.isNotEmpty() && !ctx.isStopped()) {
+        //
+        // La condición es que la ENUMERACIÓN COMPLETARA, no que haya visto algo: "no pude listar"
+        // y "no hay nada" son cosas distintas, y exigir `isNotEmpty()` confundía las dos — quien
+        // vaciaba su carpeta de OneDrive se quedaba con toda la biblioteca de nube como fantasma,
+        // sin más salida que cerrar sesión. Mismo criterio que `Listing.covers` en la fuente local.
+        if (isFullScan && enumerationComplete && !ctx.isStopped()) {
             val localIds = musicRepository.getSongIdsBySourceType(SourceType.ONEDRIVE)
             val orphanIds = localIds.filter { it !in allRemoteIds }
             if (orphanIds.isNotEmpty()) {
@@ -261,9 +298,15 @@ class OneDriveMusicSource @Inject constructor(
         return relative.takeIf { it.isNotBlank() }
     }
 
+    /**
+     * Las extensiones tienen que ser LAS MISMAS que en `LocalMusicSource`: el dedup entre fuentes
+     * compara `relativePath`, así que un formato que una fuente indexa y la otra no deja el mismo
+     * archivo duplicado sin que nadie lo detecte. `.opus` faltaba justo aquí.
+     */
     private fun isAudioFile(name: String): Boolean {
         val n = name.lowercase(Locale.ROOT)
-        return n.endsWith(".mp3") || n.endsWith(".m4a") || n.endsWith(".flac") || n.endsWith(".wav") || n.endsWith(".ogg") || n.endsWith(".aac")
+        return n.endsWith(".mp3") || n.endsWith(".m4a") || n.endsWith(".flac") ||
+            n.endsWith(".wav") || n.endsWith(".ogg") || n.endsWith(".aac") || n.endsWith(".opus")
     }
 
     private companion object {

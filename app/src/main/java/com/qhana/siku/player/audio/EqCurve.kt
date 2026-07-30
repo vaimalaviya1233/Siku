@@ -21,6 +21,12 @@ import kotlin.math.sin
  * mismas iteraciones y el mismo techo que `recomputeCompensation`. Si se toca una, la otra
  * también.
  *
+ * El DISEÑO del filtro ya no está duplicado: los coeficientes salen de
+ * [EqualizerAudioProcessor.matchedPeakCoeffs], que vive en el companion del processor porque las
+ * dos rutas necesitan exactamente la misma fórmula y tenerla dos veces era la forma más fácil de
+ * que se separaran. Lo que sigue duplicado a propósito es esto: el punto fijo y el barrido de la
+ * rejilla, que son justo las partes con restricciones opuestas.
+ *
  * Se evalúa a [REFERENCE_SAMPLE_RATE] porque el indicador es informativo y el pico es
  * indistinguible entre 44.1, 48 y 96 kHz (medido: mismas ganancias compensadas hasta el segundo
  * decimal). El processor sí usa el sample rate real.
@@ -34,13 +40,28 @@ object EqCurve {
     /** Sample rate de referencia del cálculo de UI (ver kdoc). */
     private const val REFERENCE_SAMPLE_RATE = 44_100.0
 
-    /** Puntos de la rejilla logarítmica del barrido. Suficientes para no perderse un pico. */
-    private const val GRID_POINTS = 160
+    /**
+     * Puntos de la rejilla logarítmica del barrido. Suficientes para no perderse un pico, y
+     * también para dibujar la curva sin que se vean los segmentos (ver [response]).
+     */
+    const val GRID_POINTS = 160
 
-    private const val GRID_LOW_HZ = 20.0
+    const val GRID_LOW_HZ = 20.0
 
-    /** Coeficientes de un peaking RBJ: 5 doubles consecutivos por filtro (b0,b1,b2,a1,a2). */
-    private const val COEFFS_PER_FILTER = 5
+    /** Extremo alto de la rejilla: Nyquist del sample rate de referencia. */
+    const val GRID_HIGH_HZ = REFERENCE_SAMPLE_RATE / 2.0
+
+    /**
+     * Frecuencia del punto [index] de la rejilla. La rejilla es LOGARÍTMICA, así que el gráfico
+     * puede repartir los puntos a intervalos iguales en X y obtener un eje de frecuencia
+     * logarítmico —que es como se percibe el tono— sin hacer ninguna conversión.
+     */
+    fun frequencyAt(index: Int): Double =
+        GRID_LOW_HZ * (GRID_HIGH_HZ / GRID_LOW_HZ).pow(index / (GRID_POINTS - 1.0))
+
+
+    /** 5 doubles consecutivos por filtro (b0,b1,b2,a1,a2); la constante es del processor. */
+    private const val COEFFS_PER_FILTER = EqualizerAudioProcessor.COEFFS_PER_FILTER
 
     // Rejilla de evaluación: z = e^{-jω} y z² en cada punto, calculados una sola vez.
     private val gridZRe = DoubleArray(GRID_POINTS)
@@ -66,13 +87,65 @@ object EqCurve {
      * Pico en dB de la curva COMPLETA: bandas (ya compensadas) más los dos refuerzos. Es lo que la
      * señal puede ganar sobre su nivel original, o sea el headroom que hace falta para que un
      * máster a fondo de escala no recorte.
+     *
+     * Los centros de los refuerzos llegan por parámetro y NO se leen de las constantes: el usuario
+     * los mueve, y mover el centro cambia el pico (un refuerzo de graves a 250 Hz se solapa con
+     * bandas distintas que uno a 40 Hz). Leer el default aquí haría que el indicador midiera una
+     * curva que no es la que suena.
+     *
+     * NO incluye el preamp A PROPÓSITO: este valor es lo que pide la CURVA, y de él sale el preamp
+     * SUGERIDO por la UI (que es exactamente su negativo, la convención de los perfiles de AutoEQ).
+     * Si el preamp entrara aquí, sugerirlo se volvería circular. El headroom que se muestra al
+     * usuario es este número MÁS el preamp, y esa suma la hace quien lo pinta.
+     *
+     * LIMITACIÓN: esto mide la ganancia de la CURVA, no el nivel de salida — no sabe a qué nivel
+     * está masterizada la canción. Sobre un máster moderno a 0 dBFS un refuerzo modesto ya recorta
+     * con el indicador en verde. Ver el comentario de los umbrales en `EqualizerSheet`.
      */
     fun peakGainDb(
         bandGainsDb: FloatArray,
         frequencies: FloatArray,
         bassBoostDb: Float,
-        trebleBoostDb: Float
+        trebleBoostDb: Float,
+        bassBoostFreqHz: Double,
+        trebleBoostFreqHz: Double
     ): Float {
+        var peak = 0f
+        val curve = response(
+            bandGainsDb, frequencies, bassBoostDb, trebleBoostDb, bassBoostFreqHz, trebleBoostFreqHz
+        )
+        for (db in curve) if (db > peak) peak = db
+        return peak
+    }
+
+    /**
+     * Respuesta en frecuencia COMPLETA: [GRID_POINTS] magnitudes en dB sobre la rejilla
+     * logarítmica, en el mismo orden que [frequencyAt]. Es lo que dibuja el gráfico de la hoja del
+     * ecualizador.
+     *
+     * Incluye los refuerzos, que es justo el punto: son ADITIVOS sobre la curva de bandas y su
+     * efecto combinado no se puede deducir mirando los controles por separado — no verlo fue una
+     * de las causas de que los boosts sonaran mal (ver el kdoc de [EqualizerAudioProcessor]).
+     *
+     * Se recalcula en cada frame de arrastre de un slider. Por eso los coeficientes de cada filtro
+     * se calculan una sola vez y la rejilla de `z` está precalculada: sin eso serían miles de senos
+     * y cosenos por frame. [peakGainDb] es el máximo de este mismo barrido.
+     */
+    fun response(
+        bandGainsDb: FloatArray,
+        frequencies: FloatArray,
+        bassBoostDb: Float,
+        trebleBoostDb: Float,
+        bassBoostFreqHz: Double,
+        trebleBoostFreqHz: Double,
+        /**
+         * Desplaza la curva ENTERA, que es justo lo que hace un preamp: una ganancia global no
+         * cambia la forma, solo la altura. Va aquí y no en [peakGainDb] porque el gráfico tiene
+         * que enseñar lo que de verdad va a sonar — si el preamp no bajara la curva, el usuario
+         * lo movería y no vería absolutamente nada.
+         */
+        preampDb: Float = 0f
+    ): FloatArray {
         val q = qFor(frequencies.size)
         val compensated = compensate(bandGainsDb, frequencies, q)
 
@@ -88,30 +161,30 @@ object EqCurve {
         }
         if (abs(bassBoostDb) >= EqualizerAudioProcessor.IDENTITY_EPSILON_DB) {
             gains.add(bassBoostDb.toDouble())
-            freqs.add(EqualizerAudioProcessor.BASS_BOOST_FREQ_HZ)
+            freqs.add(bassBoostFreqHz)
             qs.add(EqualizerAudioProcessor.BOOST_Q)
         }
         if (abs(trebleBoostDb) >= EqualizerAudioProcessor.IDENTITY_EPSILON_DB) {
             gains.add(trebleBoostDb.toDouble())
-            freqs.add(EqualizerAudioProcessor.TREBLE_BOOST_FREQ_HZ)
+            freqs.add(trebleBoostFreqHz)
             qs.add(EqualizerAudioProcessor.BOOST_Q)
         }
-        if (gains.isEmpty()) return 0f
+        // Curva plana: no hay filtros que evaluar y la respuesta es el preamp en todos los puntos
+        // (una recta a su altura, que es exactamente lo que hace un preamp sin EQ).
+        if (gains.isEmpty()) return FloatArray(GRID_POINTS) { preampDb }
 
         val coeffs = DoubleArray(gains.size * COEFFS_PER_FILTER)
         for (i in gains.indices) {
             peakCoeffs(gains[i], freqs[i], qs[i], coeffs, i * COEFFS_PER_FILTER)
         }
 
-        var peak = 0.0
-        for (p in 0 until GRID_POINTS) {
-            var db = 0.0
+        return FloatArray(GRID_POINTS) { p ->
+            var db = preampDb.toDouble()
             for (i in gains.indices) {
                 db += magnitudeDb(coeffs, i * COEFFS_PER_FILTER, p)
             }
-            if (db > peak) peak = db
+            db.toFloat()
         }
-        return peak.toFloat()
     }
 
     private fun qFor(bandCount: Int): Double =
@@ -148,7 +221,12 @@ object EqCurve {
         return out
     }
 
-    /** Coeficientes de un peaking-EQ RBJ, escritos en [out] desde [offset]. */
+    /**
+     * Coeficientes de un peaking-EQ **matched**, escritos en [out] desde [offset]. Delega en
+     * [EqualizerAudioProcessor.matchedPeakCoeffs] a [REFERENCE_SAMPLE_RATE], que es la MISMA
+     * función que usa el hilo de audio: por construcción, el gráfico no puede dibujar una curva
+     * distinta de la que suena.
+     */
     private fun peakCoeffs(
         gainDb: Double,
         f0: Double,
@@ -156,16 +234,9 @@ object EqCurve {
         out: DoubleArray,
         offset: Int
     ) {
-        val a = 10.0.pow(gainDb / 40.0)
-        val w0 = 2.0 * PI * f0 / REFERENCE_SAMPLE_RATE
-        val alpha = sin(w0) / (2.0 * q)
-        val cosW0 = cos(w0)
-        val a0 = 1.0 + alpha / a
-        out[offset] = (1.0 + alpha * a) / a0
-        out[offset + 1] = (-2.0 * cosW0) / a0
-        out[offset + 2] = (1.0 - alpha * a) / a0
-        out[offset + 3] = (-2.0 * cosW0) / a0
-        out[offset + 4] = (1.0 - alpha / a) / a0
+        EqualizerAudioProcessor.matchedPeakCoeffs(
+            gainDb, f0, q, REFERENCE_SAMPLE_RATE, out, offset
+        )
     }
 
     /** Magnitud en dB en el punto [gridIndex] de la rejilla precalculada. */

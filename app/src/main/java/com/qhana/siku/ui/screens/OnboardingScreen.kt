@@ -63,6 +63,14 @@ import com.qhana.siku.ui.components.StorageLimitCard
 import com.qhana.siku.ui.components.rememberDeviceScanActivator
 import com.qhana.siku.ui.viewmodel.SourcesViewModel
 import com.qhana.siku.ui.viewmodel.SyncViewModel
+import com.qhana.siku.ui.theme.EXPRESSIVE_DEFAULT_EFFECTS_MS
+import com.qhana.siku.ui.theme.EXPRESSIVE_FAST_EFFECTS_MS
+import com.qhana.siku.ui.theme.ExpressiveDefaultEffectsEasing
+import com.qhana.siku.ui.theme.ExpressiveFastEffectsEasing
+import com.qhana.siku.ui.theme.SCREEN_ENTER_MS
+import com.qhana.siku.ui.theme.ScreenEnterEasing
+import androidx.compose.animation.core.tween
+
 
 /** Música del propio teléfono: dispositivo entero o carpetas. Se puede omitir. */
 private const val STEP_LOCAL = 0
@@ -121,9 +129,10 @@ fun OnboardingScreen(
     val scanWholeDevice by viewModel.scanWholeDevice.collectAsStateWithLifecycle()
     val oneDriveFolder by viewModel.oneDriveFolderPath.collectAsStateWithLifecycle()
 
-    // "Hay nube" = la sesión de OneDrive, que es reactiva y es lo que se conecta en esta
-    // pantalla. (El registro de fuentes sería más general, pero su `isConfigured` es suspend y
-    // no reactivo: aquí el paso debe aparecer en el instante en que vuelve el login.)
+    // "Hay nube" = la sesión de OneDrive. Aquí SÍ se usa la sesión y no el registro de fuentes
+    // (`SourcesViewModel.hasCloudSource`, hoy también reactivo) porque son cosas distintas en
+    // esta pantalla: lo que gobierna los pasos es la cuenta que el usuario acaba de conectar
+    // AQUÍ, y `isLoggedIn` además distingue el "todavía no lo sé" del arranque.
     val hasCloudSource = isLoggedIn
 
     // Cada paso de fuente se puede omitir, pero terminar sin NINGUNA dejaría una biblioteca
@@ -183,14 +192,18 @@ fun OnboardingScreen(
         if (next != null) step = next else finishOnboarding()
     }
 
-    val forwardSpatial = MaterialTheme.motionScheme.defaultSpatialSpec<IntOffset>()
-    val enterFade = MaterialTheme.motionScheme.defaultEffectsSpec<Float>()
-    val exitFade = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
+    // Cambiar de paso mueve TODA la región de contenido: es una transición (shared axis), no un
+    // componente, así que va con easing + duración del spec y no con springs. Ver Motion.kt.
+    // El movimiento va por el token SPATIAL y las opacidades por los de EFFECTS, cada uno con su
+    // duración: es como el spec define el shared axis y la razón de que sean tres specs y no uno.
+    val forwardSpatial = tween<IntOffset>(SCREEN_ENTER_MS, easing = ScreenEnterEasing)
+    val enterFade = tween<Float>(EXPRESSIVE_DEFAULT_EFFECTS_MS, easing = ExpressiveDefaultEffectsEasing)
+    val exitFade = tween<Float>(EXPRESSIVE_FAST_EFFECTS_MS, easing = ExpressiveFastEffectsEasing)
 
     AnimatedContent(
         targetState = step,
         // Avanzar entra desde la derecha y retroceder desde la izquierda: el gesto refleja la
-        // dirección del flujo. Specs del MotionScheme, no duraciones sueltas.
+        // dirección del flujo.
         transitionSpec = {
             val forward = targetState > initialState
             (slideInHorizontally(animationSpec = forwardSpatial) { w -> if (forward) w / 3 else -w / 3 } +

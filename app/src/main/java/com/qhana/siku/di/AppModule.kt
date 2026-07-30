@@ -28,6 +28,7 @@ import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import java.util.concurrent.TimeUnit
+import com.qhana.siku.BuildConfig
 import com.qhana.siku.data.config.AppConfig
 import com.qhana.siku.data.coordinator.SyncManager
 import com.qhana.siku.data.manager.MusicDownloader
@@ -252,17 +253,20 @@ object AppModule {
     fun provideLyricsOkHttpClient(): OkHttpClient {
         // LrcLib pide explícitamente que los clientes se identifiquen con un User-Agent
         // que incluya nombre + versión + URL/contacto. Esta app es de uso privado.
+        // La versión sale de BuildConfig: escrita a mano se quedó en "1.0" mientras la app iba
+        // por la 1.1.1, o sea que llevábamos tiempo identificándonos con una versión falsa ante
+        // el único proveedor de letras que tenemos.
         val userAgentInterceptor = okhttp3.Interceptor { chain ->
             val request = chain.request().newBuilder()
-                .header("User-Agent", "SikuMusic/1.0")
+                .header("User-Agent", "SikuMusic/${BuildConfig.VERSION_NAME}")
                 .build()
             chain.proceed(request)
         }
         return OkHttpClient.Builder()
             .addInterceptor(userAgentInterceptor)
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(10, TimeUnit.SECONDS)
-            .writeTimeout(10, TimeUnit.SECONDS)
+            .connectTimeout(AppConfig.THIRD_PARTY_API_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .readTimeout(AppConfig.THIRD_PARTY_API_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .writeTimeout(AppConfig.THIRD_PARTY_API_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .build()
     }
 

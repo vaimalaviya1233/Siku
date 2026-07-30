@@ -14,6 +14,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -31,30 +32,45 @@ class BackupViewModel @Inject constructor(
     private val _isBusy = MutableStateFlow(false)
     val isBusy: StateFlow<Boolean> = _isBusy.asStateFlow()
 
-    fun exportPlaylists() {
-        if (_isBusy.value) return
-        viewModelScope.launch {
-            _isBusy.value = true
-            when (val result = backupRepository.export()) {
-                is AppResult.Success ->
-                    snackbarManager.show(context.getString(R.string.backup_export_success, result.data))
-                is AppResult.Error -> snackbarManager.show(messageFor(result.error))
-                AppResult.Loading -> Unit
-            }
-            _isBusy.value = false
+    fun exportPlaylists() = runBusy {
+        when (val result = backupRepository.export()) {
+            is AppResult.Success ->
+                snackbarManager.show(context.getString(R.string.backup_export_success, result.data))
+            is AppResult.Error -> snackbarManager.show(messageFor(result.error))
+            AppResult.Loading -> Unit
         }
     }
 
-    fun importPlaylists() {
+    fun importPlaylists() = runBusy {
+        when (val result = backupRepository.import()) {
+            is AppResult.Success -> snackbarManager.show(summaryMessage(result.data))
+            is AppResult.Error -> snackbarManager.show(messageFor(result.error))
+            AppResult.Loading -> Unit
+        }
+    }
+
+    /**
+     * Corre [block] con [isBusy] levantado, y lo baja pase lo que pase.
+     *
+     * El `finally` no es cosmético: [isBusy] es a la vez el indicador visual Y el guard de
+     * reentrada (`if (_isBusy.value) return`), así que una excepción que lo dejara en `true`
+     * —y son operaciones de RED, que es donde más se lanza— inutilizaba **exportar e importar
+     * a la vez y de forma permanente**, con los dos botones deshabilitados hasta reiniciar la
+     * app. Bajarlo en la última línea del `launch` solo funcionaba en el camino feliz.
+     */
+    private fun runBusy(block: suspend () -> Unit) {
         if (_isBusy.value) return
         viewModelScope.launch {
             _isBusy.value = true
-            when (val result = backupRepository.import()) {
-                is AppResult.Success -> snackbarManager.show(summaryMessage(result.data))
-                is AppResult.Error -> snackbarManager.show(messageFor(result.error))
-                AppResult.Loading -> Unit
+            try {
+                block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                snackbarManager.show(e.message ?: e.javaClass.simpleName)
+            } finally {
+                _isBusy.value = false
             }
-            _isBusy.value = false
         }
     }
 

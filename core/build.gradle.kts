@@ -6,7 +6,8 @@ plugins {
 
 android {
     namespace = "com.qhana.siku.core"
-    compileSdk = 36
+    // Igual que :app — los dos módulos deben compilar contra la misma API.
+    compileSdk = 37
 
     defaultConfig {
         minSdk = 26

@@ -35,6 +35,22 @@ interface PartialTagReader {
      */
     fun read(fragment: ByteArray): TagFragment?
 
+    /**
+     * Convierte en imagen los bytes que trajo el rango de [TagFragment.pictureRange].
+     *
+     * Ese rango apunta al BLOQUE del contenedor —no a la imagen—, porque los offsets internos que
+     * lo permitirían acotar viven justamente en la parte que no cabía en el fragmento. Quien lo
+     * pida tiene que devolvérselo al MISMO lector que lo produjo para que le quite la envoltura:
+     * escribir esos bytes tal cual como `.jpg` da un archivo indecodificable.
+     *
+     * Devuelve `null` si el bloque no se puede interpretar (rango truncado, datos corruptos), y el
+     * llamador lo trata como "no se pudo traer" — o sea, se reintenta más adelante en vez de
+     * persistir basura.
+     *
+     * Default: identidad, para contenedores cuyo rango ya sean los bytes de la imagen.
+     */
+    fun decodePictureRange(bytes: ByteArray): ByteArray? = bytes
+
     companion object {
         /**
          * 256 KB: en la biblioteca de referencia cubre el 93% de los archivos de una sola
@@ -58,6 +74,10 @@ data class TagFragment(
     val album: String? = null,
     val albumArtist: String? = null,
     val genre: String? = null,
+    /** Número de pista; 0 = la cabecera no lo declara (ver [parseTrackNumber]). */
+    val trackNumber: Int = 0,
+    /** Año de publicación; 0 = la cabecera no lo declara (ver [parseYear]). */
+    val year: Int = 0,
     /** Duración si la cabecera la declara (FLAC sí, en STREAMINFO; ID3 no). 0 = desconocida. */
     val durationMs: Long = 0L,
     /**
@@ -76,6 +96,7 @@ data class TagFragment(
         if (other !is TagFragment) return false
         return title == other.title && artist == other.artist && album == other.album &&
             albumArtist == other.albumArtist && genre == other.genre &&
+            trackNumber == other.trackNumber && year == other.year &&
             lyrics == other.lyrics && pictureRange == other.pictureRange &&
             (pictureData?.contentEquals(other.pictureData) ?: (other.pictureData == null))
     }
@@ -86,6 +107,8 @@ data class TagFragment(
         result = 31 * result + (album?.hashCode() ?: 0)
         result = 31 * result + (albumArtist?.hashCode() ?: 0)
         result = 31 * result + (genre?.hashCode() ?: 0)
+        result = 31 * result + trackNumber
+        result = 31 * result + year
         result = 31 * result + (lyrics?.hashCode() ?: 0)
         result = 31 * result + (pictureRange?.hashCode() ?: 0)
         result = 31 * result + (pictureData?.contentHashCode() ?: 0)

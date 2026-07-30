@@ -34,9 +34,13 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -67,6 +71,43 @@ class MusicController @Inject constructor(
         private const val PLAY_HALF_DIVISOR = 2
         private const val PLAY_ABSOLUTE_THRESHOLD_MS = 4 * 60_000L
         private const val PLAY_UNKNOWN_DURATION_THRESHOLD_MS = 60_000L
+
+        /**
+         * Aterrizar dentro de este margen desde el principio de un item significa que EMPEZÓ de
+         * nuevo, y por tanto que su escucha vuelve a estar por contar (ver [playRecordedForSongId]).
+         * Un segundo: cualquier reinicio real cae dentro y ningún avance normal lo hace.
+         */
+        private const val PLAY_RESTART_POSITION_MS = 1_000L
+
+        // --- Reintentos ante error de red (ver [nextNetworkRetryDelayMs]) ---
+        private const val MAX_NETWORK_RETRIES = 5
+        private const val NETWORK_RETRY_BASE_MS = 2_000L
+        // Tope del desplazamiento del backoff: la espera se dobla hasta BASE << este valor
+        // (2s, 4s, 8s, 16s, 32s) y ahí se queda, aunque suban los reintentos máximos.
+        private const val NETWORK_RETRY_MAX_SHIFT = 4
+
+        /**
+         * Capacidad del búfer de [playbackError]. Se emite con `tryEmit` (no suspende: sale de
+         * callbacks del player), así que lo que no cabe se DESCARTA. Con capacidad 1 bastaba con
+         * que el colector estuviera ocupado —y lo está: la recuperación hace red— para perder en
+         * silencio el segundo error de una cascada, que es justo cuando hace falta. Con margen
+         * para una cola entera fallando en ráfaga, ningún error se pierde.
+         */
+        private const val PLAYBACK_ERROR_BUFFER = 16
+
+        /**
+         * Espera máxima a que el `MediaController` se conecte al servicio. Defensivo: el
+         * `Future` normalmente resuelve en milisegundos y solo se agota si el servicio no
+         * llega a arrancar, caso en el que la conexión se da por fallida y se libera.
+         */
+        private const val CONTROLLER_CONNECT_TIMEOUT_SECONDS = 30L
+
+        /**
+         * Por debajo de esta posición, "anterior" salta al tema previo; por encima, reinicia el
+         * actual. Es la convención de todos los reproductores: una vez entrado en la canción, lo
+         * que se espera de "anterior" es volver a empezarla.
+         */
+        private const val PREVIOUS_RESTARTS_AFTER_MS = 3_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -79,10 +120,44 @@ class MusicController @Inject constructor(
     private val _currentSong = MutableStateFlow<Song?>(null)
     val currentSong: StateFlow<Song?> = _currentSong.asStateFlow()
 
-    private val _playbackState = MutableStateFlow(PlaybackState.IDLE)
-    val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
+    /**
+     * Lo que el player dice de sí mismo. ÚNICO escritor: [updatePlaybackState], que lo LEE del
+     * `MediaController` — nunca se dicta un estado a ciegas después de dar una orden.
+     *
+     * Que esto sea la única fuente es load-bearing. Antes convivían tres escritores (este, un
+     * BUFFERING optimista escrito tras `play()` y otro que ponía el UseCase al empezar), y el
+     * `MediaController` aplica los comandos de forma OPTIMISTA notificando en el acto: con el
+     * player ya listo —archivo LOCAL, o un seek dentro de una cola ya cargada— el estado real
+     * llegaba ANTES de la escritura optimista que lo pisaba, y después no volvía a haber ningún
+     * evento que la desmintiera. Resultado: "cargando" congelado sobre una canción que sonaba,
+     * hasta que el usuario tocaba pausa. Con streaming el buffering real siempre generaba un
+     * evento posterior, y por eso el síntoma solo salía —y al azar— con música del dispositivo.
+     */
+    private val _playerState = MutableStateFlow(PlaybackState.IDLE)
 
-    private val _playbackError = MutableSharedFlow<PlaybackErrorInfo>(extraBufferCapacity = 1)
+    /**
+     * Peticiones de reproducción en vuelo (ver [withPlaybackRequest]). Es un CONTADOR, no un
+     * flag: las peticiones se anidan (`shuffleAllFromLibrary` envuelve a `playShuffled`).
+     */
+    private val _pendingPlayRequests = MutableStateFlow(0)
+
+    /**
+     * Estado que ve la UI: el del player, más el "cargando" de una petición que aún no llegó a
+     * moverlo (resolver la URL, leer la cola de la BD — con streaming son segundos).
+     *
+     * El optimismo vive AQUÍ y no como una escritura suelta, y por eso no se puede quedar
+     * pegado: dura exactamente lo que dura la petición que lo levantó ([withPlaybackRequest] lo
+     * cierra en un `finally`), salga esta por donde salga. Si el player ya está sonando gana él,
+     * así que pulsar la canción que ya suena no parpadea a "cargando".
+     */
+    val playbackState: StateFlow<PlaybackState> =
+        combine(_playerState, _pendingPlayRequests) { state, pending ->
+            if (pending > 0 && state != PlaybackState.PLAYING) PlaybackState.BUFFERING else state
+        }.stateIn(scope, SharingStarted.Eagerly, PlaybackState.IDLE)
+
+    private val _playbackError = MutableSharedFlow<PlaybackErrorInfo>(
+        extraBufferCapacity = PLAYBACK_ERROR_BUFFER
+    )
     val playbackError = _playbackError.asSharedFlow()
 
     private val _currentPosition = MutableStateFlow(0L)
@@ -119,8 +194,35 @@ class MusicController @Inject constructor(
     // Jobs para manejar carga y callbacks
     private var loadJob: Job? = null
     private var listenerJob: Job? = null
+
+    /**
+     * Reintentos de red consumidos, y la canción a la que pertenecen. El presupuesto es POR
+     * CANCIÓN: el contador se reinicia al fallar una distinta ([nextNetworkRetryDelayMs]) y al
+     * empezar a sonar ([resetNetworkRetries]).
+     *
+     * Antes era un contador global reseteado ÚNICAMENTE en `playAt`, y el auto-avance no pasa
+     * por ahí (va por `seekToNextMediaItem`, ver [next]): un bache de red que agotara los 5
+     * reintentos lo dejaba saturado, así que el resto de la cola se saltaba al primer error sin
+     * reintentar ni una vez —recorriendo la lista entera en segundos— hasta que el usuario
+     * tocara una canción a mano. Atarlo a la canción y al éxito real lo cierra por construcción.
+     */
+    private var networkRetrySongId: String? = null
     private var networkRetryCount = 0
-    private val maxNetworkRetries = 5
+
+    /**
+     * Canción cuya escucha YA se contó en la pasada actual, para que no se cuente dos veces.
+     *
+     * El último tema de la cola llega a contarse por DOS caminos que describen el mismo final:
+     * `STATE_ENDED` (que existe porque ahí no hay item siguiente y por tanto no hay
+     * discontinuidad) y, si después el usuario elige otra canción, la discontinuidad SEEK que
+     * sale de él con `oldPosition.positionMs` = duración. Sin esta marca, cada fin de cola
+     * seguido de una selección manual inflaba `playCount` en +1, que es justo lo que alimenta el
+     * orden "Más escuchadas".
+     *
+     * Se limpia cuando el item EMPIEZA de nuevo (transición, o aterrizar dentro de
+     * [PLAY_RESTART_POSITION_MS]), así que dos escuchas de verdad siguen contando dos veces.
+     */
+    private var playRecordedForSongId: String? = null
 
     // === Sleep timer ===
 
@@ -158,6 +260,12 @@ class MusicController @Inject constructor(
         // pantalla es lo que empuja a reintentar acciones que ya no hacen falta.
         scope.launch {
             syncManager.downloadedSongs.collect { song -> onSongDownloaded(song) }
+        }
+        // Canciones que salen de la biblioteca: fuera de la cola también. La cola guarda los
+        // `Song` capturados al armarla, así que sin esto una canción borrada seguía sonando —y
+        // en local ni siquiera falla, porque el archivo sigue en el dispositivo.
+        scope.launch {
+            musicRepository.songsDeleted.collect { ids -> purgeSongs(ids) }
         }
     }
 
@@ -234,11 +342,52 @@ class MusicController @Inject constructor(
         }, MoreExecutors.directExecutor())
     }
 
+    /**
+     * La sesión se cayó: el servicio murió (`onTaskRemoved`, o el sistema lo mató por memoria)
+     * mientras el proceso de la UI sigue vivo.
+     *
+     * Sin esto la conexión quedaba muerta PARA SIEMPRE: `controllerFuture` no volvía a `null` en
+     * el camino de éxito, así que [initialize] se salía por "conexión ya en curso" y
+     * `connectionState` seguía diciendo `true` — el player no volvía a sonar (y los widgets, que
+     * esperan esa señal, pasaban la barrera con un controller muerto) hasta matar el proceso.
+     */
+    private val controllerListener = object : MediaController.Listener {
+        override fun onDisconnected(controller: MediaController) {
+            appLogger.controller("MediaController DESCONECTADO: la sesión se cayó")
+            synchronized(initLock) {
+                // Solo si es el vigente: una desconexión tardía del anterior no puede tirar la
+                // conexión nueva que ya se levantó en su lugar.
+                if (mediaController !== controller) return
+                discardControllerLocked()
+            }
+        }
+    }
+
+    /**
+     * Suelta el `MediaController` actual y deja el estado listo para reconectar. Debe llamarse
+     * con [initLock] tomado.
+     */
+    private fun discardControllerLocked() {
+        mediaController?.removeListener(playerListener)
+        mediaController = null
+        controllerFuture?.let {
+            try { MediaController.releaseFuture(it) } catch (_: Exception) {}
+        }
+        controllerFuture = null
+        _connectionState.value = false
+    }
+
     fun initialize() {
         synchronized(initLock) {
-            if (mediaController != null && mediaController?.isConnected == true) {
-                appLogger.controller("initialize() skipped: MediaController already connected")
-                return
+            val existing = mediaController
+            if (existing != null) {
+                if (existing.isConnected) {
+                    appLogger.controller("initialize() skipped: MediaController already connected")
+                    return
+                }
+                // Controller presente pero muerto: se descarta para poder reconstruirlo. La
+                // guarda de abajo daría por buena una conexión que ya no existe.
+                discardControllerLocked()
             }
 
             if (controllerFuture != null) {
@@ -257,12 +406,16 @@ class MusicController @Inject constructor(
 
             val sessionToken = SessionToken(context, ComponentName(context, MusicPlaybackService::class.java))
             val future = MediaController.Builder(context, sessionToken)
+                .setListener(controllerListener)
                 .buildAsync()
             controllerFuture = future
 
             future.addListener({
                 try {
-                    val controller = future.get(30, java.util.concurrent.TimeUnit.SECONDS)
+                    val controller = future.get(
+                        CONTROLLER_CONNECT_TIMEOUT_SECONDS,
+                        java.util.concurrent.TimeUnit.SECONDS
+                    )
                     synchronized(initLock) {
                         mediaController = controller
                     }
@@ -327,7 +480,7 @@ class MusicController @Inject constructor(
                     toggleShuffle()
                 }
 
-                _playbackState.value = if (controller.isPlaying) PlaybackState.PLAYING else PlaybackState.PAUSED
+                updatePlaybackState()
                 _currentPosition.value = controller.currentPosition
                 updateDurationSafe(controller.duration)
             } else {
@@ -358,17 +511,57 @@ class MusicController @Inject constructor(
         // mantiene sincronizado en toggleRepeatMode y se reconcilia en syncCurrentState.
         if (controller.hasNextMediaItem()) {
             controller.seekToNextMediaItem()
+            resumeIfIdle(controller)
         }
     }
 
     fun previous() {
         val controller = mediaController ?: return
         val pos = controller.currentPosition
-        if (pos > 3000L) {
+        if (pos > PREVIOUS_RESTARTS_AFTER_MS) {
             controller.seekTo(0L)
         } else if (controller.hasPreviousMediaItem()) {
             controller.seekToPreviousMediaItem()
         }
+        resumeIfIdle(controller)
+    }
+
+    /**
+     * Devuelve el player a la vida si un error lo dejó en `STATE_IDLE`.
+     *
+     * `onPlayerError` deja al player IDLE pero CONSERVANDO la cola, y en ese estado un seek solo
+     * mueve el índice: no se prepara ni suena nada. Sin esto, el salto del recovery (y el botón
+     * "siguiente" de la notificación tras un fallo) cambiaba de canción en la pantalla y dejaba
+     * silencio, porque la única rama del reproductor que preparaba era la de [playPause].
+     *
+     * IDLE con cola solo se da tras un error o antes del primer `prepare()`: un player pausado
+     * está en READY, así que esto no arranca música que el usuario hubiera parado.
+     */
+    private fun resumeIfIdle(controller: MediaController) {
+        if (controller.playbackState != Player.STATE_IDLE) return
+        if (controller.mediaItemCount == 0) return
+        controller.prepare()
+        controller.play()
+        updatePlaybackState()
+    }
+
+    /**
+     * UI optimista del TAP: publica la canción elegida en el MISMO frame del gesto, ANTES de la
+     * preparación asíncrona (caché → URL → cola) que corre el use case. Es el mismo "UI optimista"
+     * que ya hace [playAt], adelantado al único instante que el usuario ve.
+     *
+     * Sin esto, tocar una canción en una lista abría el reproductor (el caller expande en ese
+     * mismo frame) con la canción ANTERIOR, y el cambio llegaba a mitad del slide cuando la
+     * preparación terminaba: la key del shared element de la carátula lleva el id, así que el
+     * morph abortaba su match en pleno vuelo y la portada nueva aparecía como un flash.
+     *
+     * Como los colectores del uiState corren con `Main.immediate`, el estado del NowPlaying queda
+     * sembrado de forma síncrona antes de que el caller llegue a expandir el reproductor. Escribir
+     * aquí no rompe el principio de un solo escritor: `_currentSong` es del controller y todos los
+     * caminos de reproducción ([playAt] incluido) convergen después en el mismo valor.
+     */
+    fun announceSelection(song: Song) {
+        _currentSong.value = song
     }
 
     /**
@@ -393,9 +586,13 @@ class MusicController @Inject constructor(
         playlistManager.setCurrentIndex(index)
 
         loadJob?.cancel()
-        loadJob = scope.launch(Dispatchers.Main) {
-            val controller = mediaController ?: return@launch
-            if (!controller.isConnected) {
+        // `immediate`: llamado desde el hilo principal —que es de donde viene siempre, ver los
+        // `withContext(Main)` del UseCase— el cuerpo corre YA, no en el siguiente mensaje del
+        // looper. Así, cuando el llamador recupera el control, el player tiene la orden dada y
+        // el estado ya está reconciliado; posponerlo dejaba una ventana en la que el estado
+        // "real" todavía era el de la canción anterior.
+        loadJob = scope.launch(Dispatchers.Main.immediate) {
+            val controller = mediaController?.takeIf { it.isConnected } ?: run {
                 Log.w(TAG, "playAt: mediaController no conectado, abortando")
                 return@launch
             }
@@ -411,13 +608,12 @@ class MusicController @Inject constructor(
                     controller.getMediaItemAt(index).mediaId == song.id
 
                 // Ya estamos exactamente aquí (pulsar en la cola la canción que suena). Se sale
-                // ANTES de tocar `_playbackState` y `_currentPosition`: ninguna de las ramas de
-                // abajo movería el audio —no hay seek que hacer— pero el estado optimista del
-                // final sí ponía BUFFERING y la posición a 0, así que la barra saltaba al inicio
-                // y aparecía un "cargando" mientras la canción seguía sonando tan tranquila.
-                // Nadie corregía esa mentira hasta el siguiente evento del player.
+                // ANTES de tocar `_currentPosition`: ninguna de las ramas de abajo movería el
+                // audio —no hay seek que hacer— pero la posición se reseteaba a 0 igual, así que
+                // la barra saltaba al inicio mientras la canción seguía sonando tan tranquila.
                 if (queueInSync && controller.currentMediaItemIndex == index && startPosition == 0L) {
                     if (autoPlay && !controller.isPlaying) controller.play()
+                    updatePlaybackState()
                     syncManager.prioritizeSong(song.id)
                     return@launch
                 }
@@ -441,15 +637,11 @@ class MusicController @Inject constructor(
                 applyReplayGain(song)
 
                 syncManager.prioritizeSong(song.id)
-                networkRetryCount = 0
+                resetNetworkRetries()
 
-                if (autoPlay) {
-                    controller.play()
-                    _playbackState.value = PlaybackState.BUFFERING
-                } else {
-                    controller.pause()
-                    _playbackState.value = PlaybackState.PAUSED
-                }
+                if (autoPlay) controller.play() else controller.pause()
+                // Se LEE lo que quedó, no se dicta (ver [_playerState]).
+                updatePlaybackState()
 
                 _currentPosition.value = startPosition
                 // Sin este reset, la barra de la canción nueva arranca enseñando el búfer de la
@@ -462,8 +654,10 @@ class MusicController @Inject constructor(
                 // Un solo camino de recuperación: PlaybackErrorRecoveryUseCase (vía
                 // PlaybackViewModel) decide retry/skip. Saltar de canción aquí además
                 // competía con esa decisión (doble skip / skip durante un retry).
-                _playbackState.value = PlaybackState.PAUSED
-                _playbackError.tryEmit(PlaybackErrorInfo(-1, e.message ?: context.getString(R.string.error_playback_load)))
+                updatePlaybackState()
+                _playbackError.tryEmit(
+                    PlaybackErrorInfo(-1, e.message ?: context.getString(R.string.error_playback_load), song.id)
+                )
             }
         }
     }
@@ -518,13 +712,21 @@ class MusicController @Inject constructor(
      * No toca la cola de ExoPlayer: quien necesite eso debe replicarlo explícitamente, porque
      * cambiar el URI del item en curso reinicia la reproducción.
      *
+     * [locationChanged] lo pone quien SABE que el archivo local dejó de existir (re-descarga
+     * forzada, reparación de un error): sin él, el caché conserva el `file://` que ya conocía y
+     * resucita el path de un archivo borrado. Ver [SongCacheManager.cacheSongLocation].
+     *
      * @return su posición en la cola, o -1 si no está.
      */
-    fun updateSong(newSong: Song): Int {
+    fun updateSong(newSong: Song, locationChanged: Boolean = false): Int {
         val index = playlistManager.updateSong(newSong)
         if (index < 0) return -1
 
-        songCacheManager.cacheSong(newSong)
+        if (locationChanged) {
+            songCacheManager.cacheSongLocation(newSong)
+        } else {
+            songCacheManager.cacheSong(newSong)
+        }
         if (newSong.id == _currentSong.value?.id) _currentSong.value = newSong
         return index
     }
@@ -556,7 +758,9 @@ class MusicController @Inject constructor(
 
         return try {
             controller.replaceMediaItem(index, streamingSong.toMediaItem())
-            updateSong(streamingSong)
+            // El archivo local está a punto de borrarlo la re-descarga: el caché NO debe
+            // conservar su `file://`.
+            updateSong(streamingSong, locationChanged = true)
             true
         } catch (e: Exception) {
             appLogger.error("switchCurrentToStreaming falló: ${e.message}")
@@ -600,7 +804,7 @@ class MusicController @Inject constructor(
         mediaController?.stop()
         mediaController?.clearMediaItems()
         _currentSong.value = null
-        _playbackState.value = PlaybackState.IDLE
+        _playerState.value = PlaybackState.IDLE
         _currentPosition.value = 0L
         _duration.value = 0L
         _bufferedPosition.value = 0L
@@ -617,20 +821,38 @@ class MusicController @Inject constructor(
      * siguiente superviviente (no se arranca otra música sin que el usuario lo pida). Sin
      * supervivientes equivale a [stop].
      */
-    fun purgeSource(sourceType: SourceType) {
+    fun purgeSource(sourceType: SourceType) = purgeWhere { it.sourceType == sourceType }
+
+    /**
+     * Saca de la cola las canciones [ids] que acaban de borrarse de la biblioteca.
+     *
+     * Lo dispara el aviso de borrado del repositorio ([ISongRepository.songsDeleted]), así que
+     * cubre por igual quitar una carpeta local, apagar el escaneo del dispositivo, la
+     * reconciliación de un scan o desconectar la nube. Hace falta especialmente en LOCAL: ahí
+     * los archivos no se borran (son `content://` del dispositivo), así que una canción retirada
+     * de la biblioteca seguía sonando tan tranquila desde la cola —y el MiniPlayer dejaba
+     * escucharla entera— en vez de fallar como haría una de la nube.
+     */
+    fun purgeSongs(ids: Collection<String>) {
+        if (ids.isEmpty()) return
+        val doomed = ids.toHashSet()
+        purgeWhere { it.id in doomed }
+    }
+
+    private fun purgeWhere(shouldPurge: (Song) -> Boolean) {
         val queue = playlistManager.getCurrentPlaylist()
-        if (queue.none { it.sourceType == sourceType }) return
-        if (queue.all { it.sourceType == sourceType }) {
+        if (queue.none(shouldPurge)) return
+        if (queue.all(shouldPurge)) {
             stop()
             return
         }
 
-        val currentWasPurged = _currentSong.value?.sourceType == sourceType
-        val removeIndices = queue.indices.filter { queue[it].sourceType == sourceType }
+        val currentWasPurged = _currentSong.value?.let(shouldPurge) == true
+        val removeIndices = queue.indices.filter { shouldPurge(queue[it]) }
 
         // Primero la lista lógica (fuente de verdad): el listener de transición de ExoPlayer
         // resolverá los índices nuevos contra la lista ya purgada.
-        playlistManager.removeSongs { it.sourceType == sourceType }
+        playlistManager.removeSongs(shouldPurge)
 
         val controller = mediaController
         if (controller != null && controller.isConnected && controller.mediaItemCount == queue.size) {
@@ -641,13 +863,22 @@ class MusicController @Inject constructor(
             // PlaylistManager se replica en ExoPlayer), de mayor a menor índice.
             removeIndices.asReversed().forEach { controller.removeMediaItem(it) }
         } else if (controller != null && controller.isConnected) {
-            // Cola nativa desincronizada con la lógica: recargarla entera ya purgada.
-            playAt(playlistManager.currentIndex.value, autoPlay = false)
+            // Cola nativa desincronizada con la lógica: recargarla entera ya purgada. Si lo que
+            // suena NO se purgó, la recarga debe ser transparente —misma posición y sin cortar el
+            // audio—, como hace la rama equivalente de [toggleShuffle]; forzar pausa y volver al
+            // segundo 0 detenía la música por un borrado que no le incumbía.
+            val resumePosition = if (currentWasPurged) 0L else controller.currentPosition
+            val wasPlaying = !currentWasPurged && controller.isPlaying
+            playAt(
+                playlistManager.currentIndex.value,
+                startPosition = resumePosition,
+                autoPlay = wasPlaying
+            )
         }
 
         if (currentWasPurged) {
             _currentSong.value = playlistManager.getSongAt(playlistManager.currentIndex.value)
-            _playbackState.value = PlaybackState.PAUSED
+            updatePlaybackState()
         }
         saveSessionState()
     }
@@ -723,6 +954,17 @@ class MusicController @Inject constructor(
     fun removeFromQueue(index: Int) {
         val queue = playlistManager.getCurrentPlaylist()
         if (index !in queue.indices) return
+
+        // Quitar el ÚLTIMO item deja la cola vacía, que es exactamente lo que significa [stop]
+        // (mismo desenlace que purgar la cola entera). Antes se seguía por el camino normal y
+        // `saveSessionState` se saltaba la escritura por lista vacía, así que en disco quedaba la
+        // sesión ANTERIOR: al reiniciar el proceso resucitaba una cola que el usuario había
+        // vaciado, con `currentSong` señalando una canción que ya no estaba.
+        if (queue.size == 1) {
+            stop()
+            return
+        }
+
         playlistManager.removeAt(index)
         mediaController?.let { controller ->
             if (index in 0 until controller.mediaItemCount) {
@@ -808,6 +1050,32 @@ class MusicController @Inject constructor(
 
     // === Listeners & Internals ===
 
+    /**
+     * Espera del siguiente reintento de red para [songId], o `null` si esa canción ya agotó su
+     * presupuesto. Cambiar de canción reinicia el presupuesto: un tema no hereda los fallos del
+     * anterior. Backoff exponencial desde [NETWORK_RETRY_BASE_MS] con tope [NETWORK_RETRY_MAX_SHIFT].
+     */
+    private fun nextNetworkRetryDelayMs(songId: String?): Long? {
+        if (songId != networkRetrySongId) {
+            networkRetrySongId = songId
+            networkRetryCount = 0
+        }
+        if (networkRetryCount >= MAX_NETWORK_RETRIES) return null
+        val delayMs = NETWORK_RETRY_BASE_MS * (1L shl networkRetryCount.coerceAtMost(NETWORK_RETRY_MAX_SHIFT))
+        networkRetryCount++
+        return delayMs
+    }
+
+    /**
+     * Devuelve el presupuesto de reintentos a cero. Se llama ante ÉXITO REAL (el player llegó a
+     * STATE_READY) y al cargar por [playAt]: un contador que solo baja cuando el usuario toca
+     * algo acaba saturado y deja de proteger.
+     */
+    private fun resetNetworkRetries() {
+        networkRetrySongId = null
+        networkRetryCount = 0
+    }
+
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             updatePlaybackState()
@@ -837,6 +1105,10 @@ class MusicController @Inject constructor(
             }
             updatePlaybackState()
             if (playbackState == Player.STATE_READY) {
+                // El player tiene audio listo: esto es el ÉXITO que devuelve el presupuesto de
+                // reintentos a cero. Sin un reset atado al éxito, el contador solo bajaba con
+                // una acción explícita del usuario y quedaba saturado indefinidamente.
+                resetNetworkRetries()
                 mediaController?.let {
                     updateDurationSafe(it.duration)
                     _currentPosition.value = it.currentPosition
@@ -860,6 +1132,10 @@ class MusicController @Inject constructor(
             // El búfer del tema anterior no dice nada del nuevo: se pone a cero y el primer
             // tick lo vuelve a llenar (ver [bufferedPosition]).
             _bufferedPosition.value = 0L
+
+            // Empieza un item (otro, o el mismo con repeat-one): su escucha vuelve a estar por
+            // contar. Ver [playRecordedForSongId].
+            playRecordedForSongId = null
 
             playlistManager.setCurrentIndex(newIndex)
 
@@ -895,9 +1171,13 @@ class MusicController @Inject constructor(
             val leftItem = reason == Player.DISCONTINUITY_REASON_AUTO_TRANSITION ||
                 (reason == Player.DISCONTINUITY_REASON_SEEK &&
                     oldPosition.mediaItemIndex != newPosition.mediaItemIndex)
-            if (!leftItem) return
-            val songId = oldPosition.mediaItem?.mediaId ?: return
-            maybeRecordPlay(songId, oldPosition.positionMs)
+            if (leftItem) {
+                oldPosition.mediaItem?.mediaId?.let { maybeRecordPlay(it, oldPosition.positionMs) }
+            }
+            // Aterrizar al principio de un item = ese item empieza de nuevo, así que su escucha
+            // vuelve a estar por contar. Cubre el caso que `onMediaItemTransition` no ve: volver a
+            // dar play sobre la MISMA canción que acaba de terminar (o rebobinarla al inicio).
+            if (newPosition.positionMs < PLAY_RESTART_POSITION_MS) playRecordedForSongId = null
         }
 
         override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
@@ -914,39 +1194,70 @@ class MusicController @Inject constructor(
         override fun onPlayerError(error: PlaybackException) {
             appLogger.error("Player Error: code=${error.errorCode}, msg=${error.message}")
 
+            // La canción que falló se captura AHORA, con el error en la mano: para cuando el
+            // colector procese el evento, el item en curso puede ser otro.
+            val failedSongId = mediaController?.currentMediaItem?.mediaId ?: _currentSong.value?.id
+
             listenerJob?.cancel()
             listenerJob = scope.launch(Dispatchers.Main) {
                 when (error.errorCode) {
                     // Errores de red - reintentar con backoff exponencial
                     PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
                     PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> {
-                        if (networkRetryCount < maxNetworkRetries) {
-                            val delayMs = 2000L * (1L shl networkRetryCount.coerceAtMost(4))
-                            Log.w(TAG, "Network error, retry ${networkRetryCount + 1}/$maxNetworkRetries in ${delayMs}ms")
-                            networkRetryCount++
+                        val delayMs = nextNetworkRetryDelayMs(failedSongId)
+                        if (delayMs != null) {
+                            Log.w(TAG, "Network error, retry $networkRetryCount/$MAX_NETWORK_RETRIES in ${delayMs}ms")
                             delay(delayMs)
                             retry()
                         } else {
-                            Log.e(TAG, "Max network retries reached, skipping")
-                            _playbackError.tryEmit(PlaybackErrorInfo(error.errorCode, "Error de red persistente"))
-                            next()
+                            // Solo se EMITE: quien salta es el recovery (vía PlaybackViewModel),
+                            // que además decide si antes toca sanar. Llamar aquí a next() sumaba
+                            // un segundo salto al del recovery —se perdían dos canciones— y
+                            // movía el item en curso antes de que el colector leyera el evento,
+                            // así que la reparación caía sobre la canción siguiente.
+                            Log.e(TAG, "Max network retries reached for $failedSongId")
+                            _playbackError.tryEmit(
+                                PlaybackErrorInfo(
+                                    error.errorCode,
+                                    context.getString(R.string.error_playback_network_persistent),
+                                    failedSongId
+                                )
+                            )
                         }
                     }
 
                     // Archivo no encontrado - emite con código para que ErrorRecovery decida
                     PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> {
-                        _playbackError.tryEmit(PlaybackErrorInfo(error.errorCode, "Archivo no encontrado"))
+                        _playbackError.tryEmit(
+                            PlaybackErrorInfo(
+                                error.errorCode,
+                                context.getString(R.string.error_playback_file_not_found),
+                                failedSongId
+                            )
+                        )
                     }
 
                     // Decoder error - emite con código para que ErrorRecovery marque corrupto
                     PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
                     PlaybackException.ERROR_CODE_DECODING_FAILED -> {
-                        _playbackError.tryEmit(PlaybackErrorInfo(error.errorCode, "No se puede reproducir este formato"))
+                        _playbackError.tryEmit(
+                            PlaybackErrorInfo(
+                                error.errorCode,
+                                context.getString(R.string.error_playback_format_unsupported),
+                                failedSongId
+                            )
+                        )
                     }
 
                     // Otros errores - emite y deja decidir al recovery
                     else -> {
-                        _playbackError.tryEmit(PlaybackErrorInfo(error.errorCode, error.message ?: context.getString(R.string.error_playback_generic)))
+                        _playbackError.tryEmit(
+                            PlaybackErrorInfo(
+                                error.errorCode,
+                                error.message ?: context.getString(R.string.error_playback_generic),
+                                failedSongId
+                            )
+                        )
                     }
                 }
             }
@@ -959,6 +1270,7 @@ class MusicController @Inject constructor(
      * Con duración desconocida, [PLAY_UNKNOWN_DURATION_THRESHOLD_MS].
      */
     private fun maybeRecordPlay(songId: String, playedMs: Long) {
+        if (playRecordedForSongId == songId) return // ya contada en esta pasada
         val durationMs = songCacheManager.getSongSync(songId)?.duration ?: 0L
         val threshold = if (durationMs > 0) {
             minOf(durationMs / PLAY_HALF_DIVISOR, PLAY_ABSOLUTE_THRESHOLD_MS)
@@ -966,6 +1278,7 @@ class MusicController @Inject constructor(
             PLAY_UNKNOWN_DURATION_THRESHOLD_MS
         }
         if (playedMs < threshold) return
+        playRecordedForSongId = songId
         scope.launch(Dispatchers.IO) {
             runCatching { musicRepository.recordPlay(songId, System.currentTimeMillis()) }
                 .onFailure { appLogger.error("recordPlay falló: ${it.message}") }
@@ -979,13 +1292,14 @@ class MusicController @Inject constructor(
         }
     }
 
+    /** Único escritor de [_playerState]: lo LEE del player. Ver el KDoc de [_playerState]. */
     private fun updatePlaybackState() {
         val controller = mediaController ?: return
         if (controller.isPlaying) {
-            _playbackState.value = PlaybackState.PLAYING
+            _playerState.value = PlaybackState.PLAYING
             return
         }
-        _playbackState.value = when (controller.playbackState) {
+        _playerState.value = when (controller.playbackState) {
             Player.STATE_BUFFERING -> if (controller.playWhenReady) PlaybackState.BUFFERING else PlaybackState.PAUSED
             Player.STATE_IDLE -> PlaybackState.IDLE
             else -> PlaybackState.PAUSED
@@ -1072,20 +1386,73 @@ class MusicController @Inject constructor(
                 originalPlaylist = playlistManager.getOriginalPlaylist()
             )
 
-            controllerFuture?.let {
-                try { MediaController.releaseFuture(it) } catch (_: Exception) {}
-            }
-            mediaController = null
-            controllerFuture = null
-            _connectionState.value = false
+            discardControllerLocked()
         }
         // Cancelar scope al final; cualquier cosa pendiente fue cancelada arriba.
         scope.cancel()
     }
 
     fun getAudioSessionId(): Int = audioSessionId
-    fun retryCurrentWithFreshUrl(updatedSong: Song) { updateSong(updatedSong) }
-    fun setBuffering() { _playbackState.value = PlaybackState.BUFFERING }
+
+    /**
+     * Reintenta [updatedSong] después de un fallo de reproducción, con su origen ya refrescado
+     * (URL firmada nueva, o `file://` que pasó a streaming porque el archivo no estaba).
+     *
+     * Hace las TRES cosas que hacen falta, y antes solo hacía la primera:
+     *
+     * 1. Estado lógico ([updateSong]), para que la cola y el NowPlaying vean el origen nuevo.
+     * 2. Reconstruir el `MediaItem`. El `mediaId` es el id de la canción y NO cambia al cambiar
+     *    el origen, así que el item de la cola sigue apuntando al URI muerto y [playAt] lo daría
+     *    por sincronizado: hay que reemplazarlo a mano.
+     * 3. `prepare()`. Tras `onPlayerError` el player queda en `STATE_IDLE` CONSERVANDO la cola, y
+     *    en ese estado no hay seek ni transición que lo despierte. Sin esto el "reintento" se
+     *    quedaba en cambiar el estado lógico: la pantalla decía otra cosa y el audio seguía mudo
+     *    hasta que el usuario pulsaba play (la única rama que preparaba).
+     */
+    fun retryCurrentWithFreshUrl(updatedSong: Song) {
+        // `locationChanged`: la reparación pudo BORRAR el archivo local (`cleanupLocalFile`), así
+        // que el path que llega es la verdad y no se puede fusionar con el `file://` viejo.
+        val index = updateSong(updatedSong, locationChanged = true)
+        if (index < 0) return
+
+        val controller = mediaController?.takeIf { it.isConnected } ?: return
+        if (index >= controller.mediaItemCount) return
+        if (controller.getMediaItemAt(index).mediaId != updatedSong.id) return
+
+        try {
+            controller.replaceMediaItem(index, updatedSong.toMediaItem())
+
+            // Solo se reanuda si lo que falló SIGUE siendo el item en curso: si el usuario ya se
+            // movió a otra canción, la cola queda con el origen fresco para cuando le toque, pero
+            // arrancar audio aquí le arrebataría la que acaba de elegir.
+            if (controller.currentMediaItemIndex != index) return
+
+            controller.prepare()
+            controller.play()
+            updatePlaybackState()
+        } catch (e: Exception) {
+            appLogger.error("retryCurrentWithFreshUrl falló para ${updatedSong.id}: ${e.message}")
+        }
+    }
+    /**
+     * Ejecuta [block] como una PETICIÓN DE REPRODUCCIÓN: mientras dura, la UI ve "cargando"
+     * (salvo que el player ya esté sonando). Cubre el trabajo previo a la orden —resolver la URL
+     * firmada, leer la cola de la BD—, que con streaming son segundos de pantalla muerta.
+     *
+     * Sustituye a un `setBuffering()` suelto que había que acordarse de cerrar en cada salida.
+     * No se cerraba: bastaba con pulsar la canción que ya sonaba —donde no hay nada que ordenarle
+     * al player, así que este no emite NADA— para dejar el "cargando" clavado hasta que el
+     * usuario tocara pausa. Aquí el cierre está en el `finally`, así que vale para toda salida
+     * presente y futura: return temprano, excepción o cancelación.
+     */
+    suspend fun <T> withPlaybackRequest(block: suspend () -> T): T {
+        _pendingPlayRequests.update { it + 1 }
+        try {
+            return block()
+        } finally {
+            _pendingPlayRequests.update { it - 1 }
+        }
+    }
 
     private fun updateDurationSafe(newDuration: Long) {
         if (newDuration > 0) _duration.value = newDuration

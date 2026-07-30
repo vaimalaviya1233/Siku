@@ -3,15 +3,20 @@ package com.qhana.siku.ui.components
 import androidx.compose.foundation.layout.Box
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
-import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuGroup
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DropdownMenuPopup
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorPosition
+import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
@@ -53,13 +58,45 @@ fun <T> SortChip(
             ),
             border = null
         )
-        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-            options.forEach { (labelRes, value) ->
-                DropdownMenuItem(
-                    text = { Text(stringResource(labelRes)) },
-                    onClick = { onChange(value); showMenu = false },
-                    leadingIcon = { if (current == value) MaterialSymbol("check") }
+        // Menú SEGMENTADO de M3 Expressive = `DropdownMenuPopup` + `DropdownMenuGroup`. No basta
+        // con dar forma a los items: `DropdownMenu` es el contenedor CLÁSICO (`MenuTokens`) y
+        // mete los items en una superficie única, así que items con forma dentro de él no son ni
+        // una cosa ni la otra. El grupo es quien aporta el contenedor `SegmentedMenuTokens`.
+        //
+        // Elegir un orden es además una SELECCIÓN EXCLUSIVA, de ahí la sobrecarga `selected`: el
+        // componente marca el activo con contenedor y morph de forma, anima la entrada del check
+        // y declara `Role.RadioButton`. Antes se simulaba pintando un check en `leadingIcon` — el
+        // item no sabía que estaba seleccionado y esa era la única señal.
+        //
+        // ANCLA de tamaño CERO en la esquina del chip: es lo que despliega el menú del lado del
+        // control en vez de dejarlo colgando desde el borde opuesto. `MenuAnchorPosition` no tiene
+        // "debajo del ancla y alineado a su final" —`Below` alinea inicio con inicio y `End` lo
+        // pone AL LADO—, y `Custom` no sirve porque exige `MenuPosition`, que es `internal` en la
+        // librería. Con el ancla reducida a un punto, `Start` sí lo da EXACTO y por su PRIMER
+        // candidato de cada eje (`endToAnchorStart` → el menú termina donde termina el chip;
+        // `topToAnchorTop` → arranca justo debajo), sin depender de que otro no quepa. `Start` y
+        // `BottomEnd` se espejan juntos en RTL, así que el menú sigue saliendo del lado del chip.
+        Box(modifier = Modifier.align(Alignment.BottomEnd)) {
+            DropdownMenuPopup(
+                expanded = showMenu,
+                onDismissRequest = { showMenu = false },
+                popupPositionProvider = MenuDefaults.rememberDropdownMenuPopupPositionProvider(
+                    MenuAnchorPosition.Start
                 )
+            ) {
+                DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
+                    options.forEachIndexed { index, (labelRes, value) ->
+                        DropdownMenuItem(
+                            selected = current == value,
+                            onClick = { onChange(value); showMenu = false },
+                            text = { Text(stringResource(labelRes)) },
+                            // La forma sale de la POSICIÓN dentro del grupo: el primero redondea
+                            // arriba, el último abajo y los de en medio van rectos.
+                            shapes = MenuDefaults.itemShape(index = index, count = options.size),
+                            selectedLeadingIcon = { MenuItemIcon("check") }
+                        )
+                    }
+                }
             }
         }
     }

@@ -3,11 +3,8 @@ package com.qhana.siku.ui.screens
 import java.util.Locale
 import androidx.compose.animation.*
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -42,6 +39,9 @@ import com.qhana.siku.ui.components.*
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.PI
 import kotlin.math.sin
+
+import com.qhana.siku.ui.theme.appSpatialSpec
+import com.qhana.siku.ui.theme.appEffectsSpec
 
 /*
  * Barra de progreso del NowPlaying en sus dos variantes (píldora plana y onda propia, ver
@@ -146,7 +146,9 @@ internal fun ProgressSlider(
                     // al 50% rotado 45° (la esquina viva apunta al palo), texto contra-rotado.
                     val thumbAlpha by animateFloatAsState(
                         targetValue = if (isDragging) 1f else 0f,
-                        animationSpec = tween(durationMillis = 150, easing = FastOutSlowInEasing),
+                        // Effects: es alpha. Además es la garantía de que no rebota, que sobre una
+                        // opacidad significaría pasarse de 1 y volver.
+                        animationSpec = appEffectsSpec(),
                         label = "thumbAlpha"
                     )
                     Box(
@@ -289,7 +291,8 @@ internal fun ProgressSlider(
  * `LinearWavyProgressIndicator` oficial anima el aplanado con `DecreasingAmplitudeAnimationSpec`,
  * una constante INTERNA FIJA (500 ms) que no expone por parámetro — al pausar terminaba
  * siempre después que el resto de las animaciones del reproductor y el desfase se notaba.
- * Aquí la amplitud usa el MISMO spring que el morph del botón play, así todo cierra a la vez.
+ * Aquí la amplitud usa el MISMO token del MotionScheme que el morph del botón play
+ * (`defaultSpatial`), así todo cierra a la vez.
  *
  * La FASE avanza solo mientras suena y se congela al pausar (un `Animatable` cancelado
  * conserva su valor): sin salto al reanudar y sin gastar frames con el audio detenido.
@@ -308,16 +311,19 @@ private fun WavyTrack(
     activeColor: Color,
     inactiveColor: Color
 ) {
-    val amplitudeFraction by animateFloatAsState(
+    // MISMO token que el morph del botón play y que las dimensiones del transporte
+    // (`defaultSpatial`, ver rememberPlayButtonSpin) para que todos cierren a la vez. Antes eran
+    // dos `spring(...)` con los mismos números escritos en dos archivos, que es la forma más fácil
+    // de que dejen de coincidir.
+    //
+    // El RECORTE es obligatorio aquí y no es cosmético: los springs spatial del scheme rebotan, y
+    // una amplitud negativa no atenúa la onda — la INVIERTE.
+    val rawAmplitude by animateFloatAsState(
         targetValue = if (isPlaying) 1f else 0f,
-        // MISMA rigidez que el morph del botón play (ver rememberPlayButtonSpin) para que
-        // ambos cierren a la vez; sin rebote, que en la amplitud invertiría la onda.
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
+        animationSpec = appSpatialSpec(),
         label = "waveAmplitude"
     )
+    val amplitudeFraction = rawAmplitude.coerceIn(0f, 1f)
     // Fase en "número de ondas recorridas"; el LaunchedEffect se cancela al pausar y el
     // Animatable se queda donde estaba.
     val phase = remember { Animatable(0f) }
@@ -348,6 +354,11 @@ private fun WavyTrack(
     // En la píldora plana ese escalón se nota poco, pero aquí estira la onda de golpe y se ve
     // como un tropiezo — más aún porque el ciclo de la onda dura también 1s y el salto caía
     // siempre en la misma fase. Se interpola entre ticks a velocidad constante.
+    //
+    // Este tween y el de la fase son los DOS únicos de la barra que no salen del MotionScheme, por
+    // el mismo motivo: los dos tienen que ser LINEALES y durar exactamente lo que dura otra cosa
+    // (un tick de posición / un ciclo de onda). Un spring aceleraría y frenaría dentro del tramo,
+    // que es justo el tropiezo que se está corrigiendo.
     val smoothFraction = remember { Animatable(fraction) }
     LaunchedEffect(fraction, isPlaying, isDragging) {
         val jump = kotlin.math.abs(fraction - smoothFraction.value)
@@ -539,7 +550,12 @@ private fun FormatChip(
         // vuelve la Surface informativa de siempre.
         onClick = onToggleDetailed,
         enabled = toggleable,
-        modifier = modifier.semantics { contentDescription = desc }
+        // El chip cambia de ANCHO al tocarlo ("FLAC" → "FLAC · 16 bit · 44.1 kHz") y hasta ahora
+        // ese cambio era un salto seco en medio de la barra de progreso. `animateContentSize` es
+        // justo para esto: mide el contenido nuevo y anima el contenedor hasta él.
+        modifier = modifier
+            .animateContentSize(appSpatialSpec())
+            .semantics { contentDescription = desc }
     ) {
         Text(
             text = label,

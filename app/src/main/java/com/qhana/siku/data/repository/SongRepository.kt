@@ -21,6 +21,8 @@ import com.qhana.siku.data.model.runCatchingAsAppResult
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
@@ -39,10 +41,22 @@ class SongRepository @Inject constructor(
     @Volatile private var cachedSnapshotKey: Triple<String, SortOrder, Set<SongSourceFilter>>? = null
     @Volatile private var cachedSnapshot: List<Song>? = null
 
+    /**
+     * Sube con cada invalidación de `songs`. Sirve para saber si la tabla cambió MIENTRAS corría
+     * una query: limpiar el caché no basta cuando el que va a escribirlo ya leyó datos viejos.
+     */
+    @Volatile private var invalidationGeneration = 0L
+
+    // Aviso de borrado (ver [ISongRepository.songsDeleted]). `tryEmit` para no suspender dentro
+    // de deleteSongs; el búfer cubre de sobra los borrados en ráfaga de una reconciliación.
+    private val _songsDeleted = MutableSharedFlow<List<String>>(extraBufferCapacity = 16)
+    override val songsDeleted: Flow<List<String>> = _songsDeleted.asSharedFlow()
+
     init {
         database.invalidationTracker.addObserver(object : InvalidationTracker.Observer("songs") {
             override fun onInvalidated(tables: Set<String>) {
                 synchronized(snapshotLock) {
+                    invalidationGeneration++
                     cachedSnapshotKey = null
                     cachedSnapshot = null
                 }
@@ -73,14 +87,23 @@ class SongRepository @Inject constructor(
     ): List<Song> =
         withContext(Dispatchers.IO) {
             val key = Triple(query, sortOrder, sourceFilters)
-            synchronized(snapshotLock) {
+            val generationAtRead = synchronized(snapshotLock) {
                 if (cachedSnapshotKey == key) cachedSnapshot?.let { return@withContext it }
+                invalidationGeneration
             }
             val (sortColumn, sortAsc) = sortColumnFor(sortOrder)
             val result = songDao.getSongsList(SongDao.buildPagingQuery(query, sortColumn, sortAsc, sourceFilters)).map { it.toSong() }
             synchronized(snapshotLock) {
-                cachedSnapshotKey = key
-                cachedSnapshot = result
+                // Solo se cachea si nadie tocó `songs` mientras corría la query. Si alguien lo
+                // hizo, el observer ya limpió el caché pero esta lectura es ANTERIOR a ese cambio,
+                // y guardarla lo resucitaría: la siguiente llamada serviría una lista con canciones
+                // ya borradas (y con ellas se construyen colas de reproducción). Este resultado se
+                // devuelve igual —el caller lo pidió y ya no hay nada mejor que darle—, pero no se
+                // convierte en la respuesta de todos los que vengan detrás.
+                if (invalidationGeneration == generationAtRead) {
+                    cachedSnapshotKey = key
+                    cachedSnapshot = result
+                }
             }
             result
         }
@@ -323,6 +346,10 @@ class SongRepository @Inject constructor(
                 Log.w("SongRepository", "Error deleting cover for song ${song.id}", e)
             }
         }
+
+        // Se avisa al FINAL: quien escucha (el reproductor, para sacarlas de la cola) debe verlo
+        // cuando las filas ya no están, no a mitad del borrado.
+        _songsDeleted.tryEmit(idsToDelete)
     }
 
     /**
@@ -354,17 +381,37 @@ class SongRepository @Inject constructor(
     }
 
     override suspend fun updateSongMetadata(song: Song) = withContext(Dispatchers.IO) {
-        songDao.updateSongMetadata(song.id, song.title, song.artist, song.album, song.duration, song.albumArtUri?.toString())
+        songDao.updateSongMetadata(
+            songId = song.id,
+            title = song.title,
+            artist = song.artist,
+            album = song.album,
+            duration = song.duration,
+            albumArtUri = song.albumArtUri?.toString(),
+            trackNumber = song.trackNumber,
+            year = song.year
+        )
     }
+
+    override suspend fun getSongsNeedingTrackInfo(localOnly: Boolean): List<Song> =
+        withContext(Dispatchers.IO) {
+            songDao.getSongsNeedingTrackInfo(localOnly).map { it.toSong() }
+        }
+
+    override suspend fun updateTrackInfo(songId: String, trackNumber: Int, year: Int) =
+        withContext(Dispatchers.IO) {
+            songDao.updateTrackInfo(songId, trackNumber, year)
+        }
 
     override suspend fun getSongsNeedingLightMetadata(): List<Song> = withContext(Dispatchers.IO) {
         songDao.getSongsNeedingLightMetadata(AppConfig.UNKNOWN_ARTIST).map { it.toSong() }
     }
 
     override suspend fun updateLightMetadata(
-        songId: String, title: String, artist: String, album: String, genre: String?, durationMs: Long
+        songId: String, title: String, artist: String, album: String, genre: String?,
+        trackNumber: Int, year: Int, durationMs: Long
     ) = withContext(Dispatchers.IO) {
-        songDao.updateLightMetadata(songId, title, artist, album, genre, durationMs)
+        songDao.updateLightMetadata(songId, title, artist, album, genre, trackNumber, year, durationMs)
     }
 
     override suspend fun getAlbumArtUri(album: String): String? = withContext(Dispatchers.IO) {

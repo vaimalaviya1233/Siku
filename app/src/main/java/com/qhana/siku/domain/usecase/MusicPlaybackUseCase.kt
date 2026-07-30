@@ -25,23 +25,27 @@ class MusicPlaybackUseCase @Inject constructor(
         val safeIndex = index.coerceIn(0, songs.lastIndex)
         val targetSong = songs[safeIndex]
 
-        musicController.setBuffering()
-        val result = playbackCoordinator.prepareSongForPlayback(targetSong)
-        return when (result) {
-            is PlaybackCoordinator.PrepareResult.Success -> {
-                val updatedSongs = songs.toMutableList().also { it[safeIndex] = result.song }
-                // Pre-cachear la canción preparada para evitar que playAt vuelva a fetchear la DB.
-                musicController.cacheSongs(listOf(result.song))
-                withContext(Dispatchers.Main) {
-                    musicController.setPlaylistAndPlay(updatedSongs, safeIndex)
+        // ANTES de `withPlaybackRequest` (que puede suspender esperando el turno): el caller
+        // expande el reproductor en el frame del tap y el NowPlaying tiene que nacer ya con esta
+        // canción — ver el kdoc de announceSelection.
+        musicController.announceSelection(targetSong)
+        return musicController.withPlaybackRequest {
+            when (val result = playbackCoordinator.prepareSongForPlayback(targetSong)) {
+                is PlaybackCoordinator.PrepareResult.Success -> {
+                    val updatedSongs = songs.toMutableList().also { it[safeIndex] = result.song }
+                    // Pre-cachear la canción preparada para evitar que playAt vuelva a fetchear la DB.
+                    musicController.cacheSongs(listOf(result.song))
+                    withContext(Dispatchers.Main) {
+                        musicController.setPlaylistAndPlay(updatedSongs, safeIndex)
+                    }
+                    null
                 }
-                null
-            }
-            is PlaybackCoordinator.PrepareResult.Error -> {
-                withContext(Dispatchers.Main) {
-                    musicController.setPlaylistAndPlay(songs, safeIndex)
+                is PlaybackCoordinator.PrepareResult.Error -> {
+                    withContext(Dispatchers.Main) {
+                        musicController.setPlaylistAndPlay(songs, safeIndex)
+                    }
+                    result.message
                 }
-                result.message
             }
         }
     }
@@ -59,41 +63,51 @@ class MusicPlaybackUseCase @Inject constructor(
         sortOrder: SortOrder,
         sourceFilters: Set<SongSourceFilter> = emptySet()
     ): PlayResult {
-        musicController.setBuffering()
-        val allSongs = when (filter) {
-            SongFilter.FAVORITES -> repository.getFavoritesSnapshot(query)
-            else -> repository.getSongsSnapshot(query, sortOrder, sourceFilters)
-        }
-        if (allSongs.isEmpty()) return PlayResult.Error(context.getString(R.string.songs_empty_title))
-
-        val targetIndex = allSongs.indexOfFirst { it.id == clickedSong.id }
-        if (targetIndex == -1) return PlayResult.RetryWithSingle(clickedSong)
-
-        val songResult = repository.getSongById(clickedSong.id)
-        val targetSong = songResult.getOrNull() ?: clickedSong
-
-        val result = playbackCoordinator.prepareSongForPlayback(targetSong)
-        return when (result) {
-            is PlaybackCoordinator.PrepareResult.Success -> {
-                // Pre-cachear para evitar que playAt vuelva a fetchear la DB para esta canción.
-                musicController.cacheSongs(listOf(result.song))
-                withContext(Dispatchers.Main) {
-                    musicController.setPlaylist(allSongs, result.song, targetIndex)
-                }
-                PlayResult.Success(result.song, result.willStream)
+        // UI optimista en el frame del tap, antes de la consulta (lenta a propósito, ver abajo) y
+        // de la preparación. `clickedSong` puede ser un snapshot algo viejo de la fila de paging,
+        // pero para pintar carátula/título del NowPlaying naciente es exactamente lo que se tocó;
+        // la verdad de la BD lo refina enseguida (dominio 2 del uiState).
+        musicController.announceSelection(clickedSong)
+        return musicController.withPlaybackRequest {
+            val allSongs = when (filter) {
+                SongFilter.FAVORITES -> repository.getFavoritesSnapshot(query)
+                else -> repository.getSongsSnapshot(query, sortOrder, sourceFilters)
             }
-            is PlaybackCoordinator.PrepareResult.Error -> {
-                withContext(Dispatchers.Main) {
-                    musicController.setPlaylist(allSongs, targetSong, targetIndex)
+            if (allSongs.isEmpty()) {
+                return@withPlaybackRequest PlayResult.Error(context.getString(R.string.songs_empty_title))
+            }
+
+            val targetIndex = allSongs.indexOfFirst { it.id == clickedSong.id }
+            if (targetIndex == -1) return@withPlaybackRequest PlayResult.RetryWithSingle(clickedSong)
+
+            val songResult = repository.getSongById(clickedSong.id)
+            val targetSong = songResult.getOrNull() ?: clickedSong
+
+            when (val result = playbackCoordinator.prepareSongForPlayback(targetSong)) {
+                is PlaybackCoordinator.PrepareResult.Success -> {
+                    // Pre-cachear para evitar que playAt vuelva a fetchear la DB para esta canción.
+                    musicController.cacheSongs(listOf(result.song))
+                    withContext(Dispatchers.Main) {
+                        musicController.setPlaylist(allSongs, result.song, targetIndex)
+                    }
+                    PlayResult.Success(result.song, result.willStream)
                 }
-                PlayResult.Error(result.message)
+                is PlaybackCoordinator.PrepareResult.Error -> {
+                    withContext(Dispatchers.Main) {
+                        musicController.setPlaylist(allSongs, targetSong, targetIndex)
+                    }
+                    PlayResult.Error(result.message)
+                }
             }
         }
     }
 
-    suspend fun shuffleAllFromLibrary(): PlayResult {
-        val allSongs = repository.getAllSongs()
-        return playShuffled(allSongs)
+    /**
+     * El snapshot de la biblioteca entra DENTRO de la petición: en una biblioteca grande la
+     * consulta tarda, y es tiempo en el que el usuario ya pulsó y no ve reacción.
+     */
+    suspend fun shuffleAllFromLibrary(): PlayResult = musicController.withPlaybackRequest {
+        playShuffled(repository.getAllSongs())
     }
 
     /**
@@ -104,26 +118,30 @@ class MusicPlaybackUseCase @Inject constructor(
      */
     suspend fun playShuffled(songs: List<Song>): PlayResult {
         if (songs.isEmpty()) return PlayResult.Error(context.getString(R.string.songs_empty_title))
-        musicController.setBuffering()
 
+        // El primer tema se elige AQUÍ (y no dentro de la petición) para poder anunciarlo en el
+        // frame del tap: los chips del inicio y los botones de aleatorio expanden el reproductor
+        // en ese mismo frame — ver el kdoc de announceSelection.
         val startIndex = songs.indices.random()
         val chosen = songs[startIndex]
-        val result = playbackCoordinator.prepareSongForPlayback(chosen)
+        musicController.announceSelection(chosen)
 
-        return when (result) {
-            is PlaybackCoordinator.PrepareResult.Success -> {
-                val prepared = songs.toMutableList().also { it[startIndex] = result.song }
-                musicController.cacheSongs(prepared)
-                withContext(Dispatchers.Main) {
-                    musicController.setPlaylistAndPlayShuffled(prepared, startIndex)
+        return musicController.withPlaybackRequest {
+            when (val result = playbackCoordinator.prepareSongForPlayback(chosen)) {
+                is PlaybackCoordinator.PrepareResult.Success -> {
+                    val prepared = songs.toMutableList().also { it[startIndex] = result.song }
+                    musicController.cacheSongs(prepared)
+                    withContext(Dispatchers.Main) {
+                        musicController.setPlaylistAndPlayShuffled(prepared, startIndex)
+                    }
+                    PlayResult.Success(result.song, result.willStream)
                 }
-                PlayResult.Success(result.song, result.willStream)
-            }
-            is PlaybackCoordinator.PrepareResult.Error -> {
-                withContext(Dispatchers.Main) {
-                    musicController.setPlaylistAndPlayShuffled(songs, startIndex)
+                is PlaybackCoordinator.PrepareResult.Error -> {
+                    withContext(Dispatchers.Main) {
+                        musicController.setPlaylistAndPlayShuffled(songs, startIndex)
+                    }
+                    PlayResult.Error(result.message)
                 }
-                PlayResult.Error(result.message)
             }
         }
     }

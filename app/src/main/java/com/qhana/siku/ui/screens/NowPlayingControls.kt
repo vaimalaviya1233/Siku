@@ -2,16 +2,12 @@ package com.qhana.siku.ui.screens
 
 import androidx.compose.animation.*
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutLinearInEasing
-import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -35,7 +31,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.toArgb
+import com.materialkolor.contrast.Contrast
+import com.materialkolor.hct.Hct
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.graphics.shapes.CornerRounding
 import androidx.graphics.shapes.Morph
@@ -58,6 +58,13 @@ import com.qhana.siku.data.model.RepeatMode
 import com.qhana.siku.data.model.ToolbarActionState
 import com.qhana.siku.ui.components.*
 
+import com.qhana.siku.ui.theme.appSpatialSpec
+import com.qhana.siku.ui.theme.appFastSpatialSpec
+import com.qhana.siku.ui.theme.appEffectsSpec
+import com.qhana.siku.ui.theme.appShrinkWidthFadeOut
+import com.qhana.siku.ui.theme.appExpandWidthFadeIn
+import com.qhana.siku.ui.theme.AppRevealSpec
+
 /*
  * TRANSPORTE y BARRA DE ACCIONES del NowPlaying: el grupo prev/play/next con sus formas
  * animadas, el reveal de acento que comparten con el toolbar, y la barra flotante configurable.
@@ -70,10 +77,19 @@ import com.qhana.siku.ui.components.*
  * Shape del botón de play: morph continuo píldora ↔ [MaterialShapes.Cookie9Sided].
  * A progress 0 delega en la píldora exacta (percent 50, idéntica al estado en pausa
  * original); con progress > 0 interpola con [Morph] entre una píldora real construida
- * al aspect actual del botón y la cookie escalada a los bounds. Se reconstruye por
- * frame porque el tamaño anima a la vez que la forma — el costo del matching de
+ * al aspect actual del botón y la cookie escalada a los bounds. Durante el morph se reconstruye
+ * por frame porque el tamaño anima a la vez que la forma — el costo del matching de
  * features de Morph es despreciable para un botón.
+ *
+ * La igualdad por valor no es opcional: los controles recomponen con cada tick de posición y con
+ * cada frame de la animación de colores del tema, y sin [equals] cada recomposición creaba una
+ * instancia "distinta" que invalidaba el outline — o sea un Morph completo reconstruido por frame
+ * con el botón QUIETO en cookie. Con equals, el outline solo se recalcula cuando el progreso o el
+ * tamaño cambian de verdad (mismo criterio que `AlbumArtMorphShape`).
  */
+// `MaterialShapes` pasó a exigir opt-in explícito en material3 1.5.0-alpha24. Va en la CLASE (no
+// en un @Composable): esto es un `Shape`, se resuelve en el hilo de dibujo.
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 internal class PlayButtonMorphShape(private val progress: Float) : Shape {
     override fun createOutline(size: Size, layoutDirection: LayoutDirection, density: Density): Outline {
         // El spring rebota fuera de [0,1]; Morph solo acepta ese rango.
@@ -95,6 +111,11 @@ internal class PlayButtonMorphShape(private val progress: Float) : Shape {
         }
         return Outline.Generic(Morph(pill, cookie).toPath(p))
     }
+
+    override fun equals(other: Any?): Boolean =
+        other is PlayButtonMorphShape && other.progress == progress
+
+    override fun hashCode(): Int = progress.hashCode()
 }
 
 /**
@@ -122,6 +143,14 @@ internal fun AccentRevealGroup(
     songId: String,
     accent: Color,
     accentContent: Color,
+    /**
+     * `false` mientras el reproductor SUBE desde la píldora. Ahí el reveal se salta y el acento se
+     * aplica directo: correr el reveal (que compone el bloque de controles DOS veces, con todos sus
+     * componentes Expressive) encima del slide de apertura es lo que apilaba dos animaciones caras
+     * y se veía como tartamudeo. El reveal solo tiene sentido con el player ya abierto — cambio de
+     * canción por siguiente/anterior/notificación. Ver el mismo gateo en `AlbumArtSection`.
+     */
+    revealEnabled: Boolean = true,
     modifier: Modifier = Modifier,
     content: @Composable (accent: Color, accentContent: Color) -> Unit
 ) {
@@ -139,14 +168,20 @@ internal fun AccentRevealGroup(
         }
     }
 
+    // Izado: `LaunchedEffect` no es composable, así que el token se resuelve aquí fuera.
+    //
+    // Spec propio y no un token del scheme: ver el kdoc de [AppRevealSpec].
+    val revealSpec = AppRevealSpec
     LaunchedEffect(songId) {
         if (displayed.first == songId) return@LaunchedEffect
+        // Player abriéndose: sin reveal, se adopta el acento destino de una (ver [revealEnabled]).
+        if (!revealEnabled) {
+            displayed = Triple(songId, currentAccent, currentAccentContent)
+            return@LaunchedEffect
+        }
         revealing = true
         reveal.snapTo(0f)
-        reveal.animateTo(
-            1f,
-            spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)
-        )
+        reveal.animateTo(1f, revealSpec)
         displayed = Triple(songId, currentAccent, currentAccentContent)
         revealing = false
     }
@@ -201,16 +236,22 @@ internal class PlayButtonSpinState(
     val angle: State<Float>
 )
 
+/**
+ * Periodo de una vuelta completa de la cookie del play. Lento a propósito: es un latido de fondo
+ * que acompaña la reproducción, no una animación que reclame atención.
+ */
+private const val COOKIE_SPIN_PERIOD_MS = 18_000
+
 @Composable
 internal fun rememberPlayButtonSpin(isPlayingOrBuffering: Boolean): PlayButtonSpinState {
-    // Morph continuo píldora (pausa) ↔ Cookie9Sided (reproduciendo); mismo spring que
-    // las dimensiones del botón en PlaybackControls.
+    // Morph continuo píldora (pausa) ↔ Cookie9Sided (reproduciendo); mismo token que las dimensiones
+    // del botón en PlaybackControls, que es lo que hace que forma y tamaño cierren juntos.
+    // `defaultSpatial` del scheme expressive rebota (dampingRatio 0.8), igual que el
+    // `DampingRatioLowBouncy` escrito a mano que había aquí, y por eso `AlbumArtMorphShape` recorta
+    // el progreso a [0,1] antes de pasárselo a `Morph`.
     val morphProgress = animateFloatAsState(
         targetValue = if (isPlayingOrBuffering) 1f else 0f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioLowBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
+        animationSpec = appSpatialSpec(),
         label = "playShapeMorph"
     )
     // La transición infinita solo existe mientras el botón no es píldora pura en reposo.
@@ -221,10 +262,13 @@ internal fun rememberPlayButtonSpin(isPlayingOrBuffering: Boolean): PlayButtonSp
         derivedStateOf { playing.value || morphProgress.value > 0f }
     }
     val angle: State<Float> = if (spinning) {
+        // El ÚNICO tween que queda en el reproductor, y no puede salir del MotionScheme: todos sus
+        // tokens son `FiniteAnimationSpec` (springs que se asientan en un objetivo) y esto es una
+        // rotación INFINITA a velocidad constante. Un spring aquí no significaría nada.
         rememberInfiniteTransition(label = "cookieSpin").animateFloat(
             initialValue = 0f,
             targetValue = 360f,
-            animationSpec = infiniteRepeatable(tween(18000, easing = LinearEasing)),
+            animationSpec = infiniteRepeatable(tween(COOKIE_SPIN_PERIOD_MS, easing = LinearEasing)),
             label = "cookieAngle"
         )
     } else {
@@ -274,11 +318,16 @@ private fun ToolbarToggle(
     isLoading: Boolean = false
 ) {
     val haptic = LocalHapticFeedback.current
-    val fraction by animateFloatAsState(
+    // Spatial (crece un radio y un clip, no es un color), pero RECORTADO a [0,1]: los springs
+    // spatial del scheme expressive sobrepasan el objetivo, y aquí el valor se usa como fracción
+    // geométrica — un 1.05 pintaría el círculo del contenedor fuera del botón y el clip del glifo
+    // más allá del propio icono. Es el mismo cuidado que ya toma `AlbumArtMorphShape`.
+    val rawFraction by animateFloatAsState(
         targetValue = if (checked) 1f else 0f,
-        animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow),
+        animationSpec = appSpatialSpec(),
         label = "toolbarToggleReveal"
     )
+    val fraction = rawFraction.coerceIn(0f, 1f)
     val revealPath = remember { Path() }
     FilledIconToggleButton(
         checked = checked,
@@ -363,7 +412,8 @@ internal fun ExpressiveToggleIcon(
     val activeColor = ensureContrast(accentColor, MaterialTheme.colorScheme.surface, minRatio = 3f)
     val iconColor by animateColorAsState(
         targetValue = if (checked) activeColor else inactiveColor,
-        animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow),
+        // Effects: es un color, y los tokens effects son los únicos sin rebote.
+        animationSpec = appEffectsSpec(),
         label = "toggleIconColor"
     )
     IconToggleButton(
@@ -383,9 +433,13 @@ internal fun ExpressiveToggleIcon(
         // Punto indicador de "activo" (estilo nav/Spotify): deja claro cuál está activo sin un
         // contenedor pesado — el color solo era muy sutil (sobre todo en grises). Aparece con un
         // pequeño rebote; su espacio (4dp) se reserva siempre para no desplazar el icono.
+        // `fastSpatial` y no `defaultSpatial`: es el token con más rebote del scheme
+        // (dampingRatio 0.6) y el más rígido, que es exactamente el "pequeño rebote" que pedía este
+        // punto de 4dp. Aquí el overshoot SÍ se quiere y no molesta — escala un círculo suelto, no
+        // recorta nada.
         val dotScale by animateFloatAsState(
             targetValue = if (checked) 1f else 0f,
-            animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
+            animationSpec = appFastSpatialSpec(),
             label = "toggleDot"
         )
         Column(
@@ -463,6 +517,12 @@ internal fun PlaybackControls(
     // Contenedor de prev/next: FILLED TONAL de M3 (spec para este tipo de botón secundario) =
     // secondaryContainer + onSecondaryContainer. Contraste del icono garantizado por el par M3.
     // Jerarquía: play = Filled/primary (acento pleno) > prev/next = Tonal/secondary.
+    //
+    // El par va CRUDO a propósito. Con el estilo "vibrante" el glifo se va al blanco casi puro (tono
+    // 97.5, saturación 0.05, MEDIDO), y eso NO es un defecto que haya que corregir aquí: el resto de
+    // la pantalla —textos, chips, títulos— también es blanco en ese estilo, así que un icono con más
+    // croma se leería apagado entre ellos. Se probó reencuadrarlo y se revirtió; ver el porqué
+    // completo junto a `ensureContrast` en PlayerWidgets.kt.
     val sideButtonContainer = MaterialTheme.colorScheme.secondaryContainer
     val sideButtonContent = MaterialTheme.colorScheme.onSecondaryContainer
     // Transporte = SOLO prev / play / next, centrado. Shuffle se movió a la cola y repeat al
@@ -490,20 +550,22 @@ internal fun PlaybackControls(
         // vía PlayButtonMorphShape) y los laterales círculos de 64.dp. EN PAUSA: los
         // laterales se estiran a cápsulas verticales (56×80) y el play vuelve a píldora
         // (132×80, solo icono). Forma y dimensiones animan con el mismo spring.
+        // UN solo spec para las cuatro dimensiones y para el morph de la forma
+        // ([rememberPlayButtonSpin] usa el mismo token): es lo que hace que el grupo se mueva como
+        // una pieza en vez de como cuatro animaciones que casualmente duran parecido.
+        val transportSpec = appSpatialSpec<Dp>()
+        // Cruce del glifo play/pause/buffering. Izados porque `transitionSpec` de `AnimatedContent`
+        // no es un lambda composable. El que entra con el token *default*, el que sale con *fast*.
+        val glyphEnterScale = appSpatialSpec<Float>()
+        val glyphExitScale = appFastSpatialSpec<Float>()
         val playWidth by animateDpAsState(
             targetValue = if (isPlayingOrBuffering) 88.dp else 132.dp,
-            animationSpec = spring(
-                dampingRatio = Spring.DampingRatioLowBouncy,
-                stiffness = Spring.StiffnessMediumLow
-            ),
+            animationSpec = transportSpec,
             label = "playButtonWidth"
         )
         val playHeight by animateDpAsState(
             targetValue = if (isPlayingOrBuffering) 88.dp else 80.dp,
-            animationSpec = spring(
-                dampingRatio = Spring.DampingRatioLowBouncy,
-                stiffness = Spring.StiffnessMediumLow
-            ),
+            animationSpec = transportSpec,
             label = "playButtonHeight"
         )
         // Giro continuo de la cookie mientras suena. La rotación se aplica en un
@@ -516,18 +578,12 @@ internal fun PlaybackControls(
         val cookieAngle = spin.angle
         val sideWidth by animateDpAsState(
             targetValue = if (isPlayingOrBuffering) 64.dp else 56.dp,
-            animationSpec = spring(
-                dampingRatio = Spring.DampingRatioLowBouncy,
-                stiffness = Spring.StiffnessMediumLow
-            ),
+            animationSpec = transportSpec,
             label = "sideButtonWidth"
         )
         val sideHeight by animateDpAsState(
             targetValue = if (isPlayingOrBuffering) 64.dp else 80.dp,
-            animationSpec = spring(
-                dampingRatio = Spring.DampingRatioLowBouncy,
-                stiffness = Spring.StiffnessMediumLow
-            ),
+            animationSpec = transportSpec,
             label = "sideButtonHeight"
         )
         val sideShapes = IconButtonShapes(
@@ -598,6 +654,11 @@ internal fun PlaybackControls(
                     }
                 },
                 menuContent = { state ->
+                    // Item CLÁSICO (sin `shape`) a propósito: el contenedor de este overflow lo
+                    // pone `ButtonGroup`, que usa un `DropdownMenu` normal, y los items que él
+                    // mismo genera para `clickableItem`/`toggleableItem` también son clásicos.
+                    // Darle forma sólo a los nuestros metería pastillas sueltas en una superficie
+                    // que no es un grupo segmentado.
                     DropdownMenuItem(
                         text = { Text(stringResource(R.string.np_previous)) },
                         leadingIcon = { MaterialSymbol("skip_previous", fill = true) },
@@ -651,11 +712,7 @@ internal fun PlaybackControls(
                             AnimatedContent(
                                 targetState = playbackState,
                                 transitionSpec = {
-                                    scaleIn(
-                                        animationSpec = tween(200, easing = FastOutSlowInEasing)
-                                    ) togetherWith scaleOut(
-                                        animationSpec = tween(150, easing = FastOutLinearInEasing)
-                                    )
+                                    scaleIn(glyphEnterScale) togetherWith scaleOut(glyphExitScale)
                                 },
                                 label = "playPause"
                             ) { state ->
@@ -757,14 +814,119 @@ internal fun BottomActionBar(
     // vibrantFloatingToolbarColors). Se eligió vibrant porque la standard (surfaceContainer) se
     // perdía contra el fondo del NowPlaying.
     val toolbarContentColor = MaterialTheme.colorScheme.onPrimaryContainer
-    // Activo = el PAR PROPIO de la barra INVERTIDO: contenedor `onPrimaryContainer`, icono
-    // `primaryContainer`. Antes se usaba `inverseSurface`/`inverseOnSurface`, pero con carátulas
-    // monocromas (esquema del álbum casi sin croma) inverseSurface cae del MISMO lado tonal que
-    // el primaryContainer de la barra → el toggle activo quedaba gris sobre gris, casi invisible
-    // en ambos temas. El par container/onContainer tiene contraste garantizado POR CONSTRUCCIÓN
-    // (M3 los genera a ≥4.5:1) sea cual sea el seed, así el relleno activo siempre se ve.
-    val checkedBg = MaterialTheme.colorScheme.onPrimaryContainer
-    val activeContent = MaterialTheme.colorScheme.primaryContainer
+    // Relleno del toggle ACTIVO: el color DE LA BARRA movido solo en el eje del TONO, lo bastante
+    // lejos de ella para VERSE y sin llegar a disputarle el énfasis al play.
+    //
+    // El porqué, MEDIDO sobre capturas del dispositivo. Con `onPrimaryContainer` (lo que había) el
+    // relleno salía a tono 90.2 contra el 80.1 del play en tema oscuro: el elemento más claro —y
+    // por tanto más enfático— de todo el reproductor era un toggle encendido, por duplicado. Con
+    // `secondary` tampoco basta: en oscuro ese rol vale 80 con TonalSpot, o sea EMPATA con el play;
+    // y en claro su croma de 19.1 dentro de una barra de 39.8 convertía el círculo en una mancha
+    // gris. El fondo de la barra (tono 34.9 en oscuro) nunca fue el problema.
+    //
+    // La regla tiene DOS mitades y las dos son necesarias:
+    //
+    //  1. Cuando hay recorrido hacia el play, el activo se coloca a [ACTIVE_TONE_FRACTION_UP] /
+    //     [_DOWN] del camino de la barra al acento: queda visible y por debajo de él en énfasis
+    //     sin depender de qué tono devuelva cada rol.
+    //  2. Un PISO de contraste contra la propia barra ([ACTIVE_MIN_CONTRAST_VS_BAR]) que el
+    //     resultado nunca puede incumplir. Esto es lo que faltaba: la interpolación garantiza
+    //     jerarquía, no visibilidad, y con un acento vivo puede no haber camino ninguno. MEDIDO en
+    //     el device con un tema fiel a la carátula (Dream Theater, seed naranja de croma alto): la
+    //     barra sale a tono 60.0 y el play a 63.9 — 3.99 tonos de recorrido —, y el fallback que
+    //     había ahí (llevar el activo AL tono del play) dejaba el disco a 1.14:1 contra su propio
+    //     fondo, o sea literalmente invisible. El caso no era exótico: desde que el seed se
+    //     persiste crudo, `primary` vive donde el croma es máximo y eso lo pega a
+    //     `primaryContainer`. Que el degenerado copiara al play era la causa raíz — play ≈ barra
+    //     ES la definición de ese caso.
+    //
+    // El resultado tiene que cumplir DOS cosas, y el disco se corrige solo si falla alguna:
+    //
+    //  A. Separarse de la BARRA al menos [ACTIVE_MIN_CONTRAST_VS_BAR], o el disco no se ve.
+    //  B. Dejar en pie el GLIFO, o sea que `ensureContrast` no tenga que cambiarlo de lado — porque
+    //     el glifo activo debe ser el MISMO color que los inactivos (ver [keepsGlyph]).
+    //
+    // Las dos son necesarias y cada una la descubrió una captura del device, cada una con un estilo
+    // de paleta distinto (Ajustes → Apariencia), que es lo que mueve estos tonos:
+    //
+    //  - Fiel a la carátula, tema oscuro: barra 60.0, play 63.9, glifo 14.9. Falla A (el candidato
+    //    sale a 62.4, o sea 1.09:1 contra su propio fondo: invisible).
+    //  - Equilibrado, tema oscuro: barra 35.0, play 63.9, glifo 90.2. Cumple A de sobra (candidato
+    //    52.5, 1.90:1) y falla B: el glifo claro no aguanta sobre un disco medio, así que
+    //    `ensureContrast` lo mandó a tono 4.6 — casi negro, el único icono NEGRO de una barra de
+    //    iconos claros.
+    //
+    // Mirar solo A arreglaba el primero y dejaba el segundo; mirar solo B, al revés. Y el tema
+    // claro/oscuro sale gratis de B: de qué lado cae el glifo ES la firma del tema y del estilo
+    // juntos, así que en Equilibrado oscuro la corrección BAJA el disco y en fiel a la carátula lo
+    // SUBE, sin una sola rama que pregunte por el tema.
+    //
+    // Cuando ninguna falla, el resultado es el de siempre TONO A TONO. Esto es load-bearing: una
+    // regla que decida la dirección por su cuenta arregla el estilo que se está mirando y estropea
+    // otro (con la barra a 70 y el play a 20 la interpolación da 50 con 1.95:1 —correcto— y una
+    // dirección impuesta "hacia arriba" lo mandaba a 86). La pregunta correcta no es "¿hacia dónde
+    // va el activo?" sino "¿el de siempre cumple? si no, corrígelo".
+    //
+    // La CORRECCIÓN va siempre alejándose del glifo, que es la única dirección que puede cumplir A y
+    // B a la vez: aleja el disco de la barra y se lo acerca al glifo en contraste. Si por ese lado no
+    // cabe el piso (barra ya casi blanca), se usa el otro.
+    //
+    // CONTRAPARTIDA ASUMIDA, y solo dentro de la corrección: ahí el disco puede acabar más claro que
+    // el play (75.2 contra 63.9 en el estilo fiel a la carátula) y deja de cumplirse "el activo
+    // nunca por encima del acento". Se acepta porque ese caso es exactamente el que se está
+    // corrigiendo —play y barra son el mismo color, así que esa jerarquía ya no existía— y porque el
+    // disco se mueve SOLO lo justo para el piso.
+    //
+    // Comprobado contra el estilo que ya estaba aprobado a la vista en tema claro (barra 90.1, play
+    // 42.4, glifo 30.0): cumple las dos y sigue dando 71.0, idéntico.
+    val toolbarContainerColor = MaterialTheme.colorScheme.primaryContainer
+    val checkedBg = remember(playButtonColor, toolbarContainerColor, toolbarContentColor) {
+        val bar = Hct.fromInt(toolbarContainerColor.toArgb())
+        val playTone = Hct.fromInt(playButtonColor.toArgb()).tone
+        val glyphTone = Hct.fromInt(toolbarContentColor.toArgb()).tone
+        // Diseño de siempre: una fracción del camino tonal de la barra al play, con su fracción por
+        // sentido. Sin fallback: el que había (llevar el activo AL tono del play cuando el recorrido
+        // era corto) era la causa raíz, porque play ≈ barra ES ese caso.
+        val span = playTone - bar.tone
+        val candidate =
+            bar.tone + span * (if (span > 0) ACTIVE_TONE_FRACTION_UP else ACTIVE_TONE_FRACTION_DOWN)
+        val activeTone = if (
+            Contrast.ratioOfTones(candidate, bar.tone) >= ACTIVE_MIN_CONTRAST_VS_BAR &&
+            keepsGlyph(discTone = candidate, glyphTone = glyphTone)
+        ) {
+            candidate
+        } else {
+            // Alejarse del glifo, con el otro lado como reserva. Los `*Unsafe` CLAMPEAN a 100 y a 0
+            // cuando el piso no es alcanzable, así que la pregunta se le hace al contraste que el
+            // tono da de verdad y no a si la función devolvió algo.
+            val glyphAbove = glyphTone > bar.tone
+            val away =
+                if (glyphAbove) Contrast.darkerUnsafe(bar.tone, ACTIVE_MIN_CONTRAST_VS_BAR)
+                else Contrast.lighterUnsafe(bar.tone, ACTIVE_MIN_CONTRAST_VS_BAR)
+            if (Contrast.ratioOfTones(away, bar.tone) >= ACTIVE_MIN_CONTRAST_VS_BAR) away
+            else if (glyphAbove) Contrast.lighterUnsafe(bar.tone, ACTIVE_MIN_CONTRAST_VS_BAR)
+            else Contrast.darkerUnsafe(bar.tone, ACTIVE_MIN_CONTRAST_VS_BAR)
+        }
+        // Matiz y croma DE LA PROPIA BARRA: el activo es "la barra, destacada", así que solo debe
+        // moverse en el eje del tono. Antes salían de `secondary` y el resultado, MEDIDO en tema
+        // claro, era un croma de 19.1 dentro de una barra de 39.8: a media saturación el círculo
+        // se leía como una mancha gris sobre un fondo amarillo. El hue ya coincidía (106° en toda
+        // la pantalla), así que lo único que desentonaba era eso.
+        //
+        // Que use la paleta primaria NO reabre lo de "la primaria es del play": la barra entera ya
+        // es `primaryContainer`. Lo que sigue siendo exclusivo del play es el ROL `primary`, y el
+        // reparto de énfasis lo hace el tono, no la familia.
+        bar.withTone(activeTone.coerceIn(0.0, 100.0)).let { Color(it.toInt()) }
+    }
+    // Glifo activo: parte del MISMO color que los iconos inactivos de la barra, para que lo único
+    // que cambie al encender sea el disco de detrás. `ensureContrast` lo corrige si el relleno se
+    // le acerca demasiado — hace falta porque al construir el color a mano se pierde la garantía
+    // del par `on*` de M3, y es el mismo mecanismo del toggle de acento del transporte.
+    val activeContent = ensureContrast(
+        content = toolbarContentColor,
+        container = checkedBg,
+        minRatio = ACTIVE_GLYPH_MIN_CONTRAST
+    )
     Box(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         HorizontalFloatingToolbar(
             expanded = true,
@@ -883,7 +1045,13 @@ internal fun BottomActionBar(
 
             // Descarga EN CURSO: anillo determinado (o indeterminado mientras se resuelve la URL).
             // Independiente de la config: es ESTADO, no una acción reordenable.
-            AnimatedVisibility(visible = isDownloading) {
+            AnimatedVisibility(
+                visible = isDownloading,
+                // Eje HORIZONTAL: esto entra en una fila y corre a sus vecinos de lado. Con el
+                // default (que crece en las dos direcciones) el toolbar daba un tirón vertical.
+                enter = appExpandWidthFadeIn(),
+                exit = appShrinkWidthFadeOut()
+            ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Spacer(modifier = Modifier.width(ComponentConfig.FloatingBarItemGap))
                     val downloadingDesc = downloadProgress?.let {
@@ -950,13 +1118,30 @@ internal fun BottomActionBar(
                         contentColor = toolbarContentColor,
                         morph = false
                     )
-                    DropdownMenu(
+                    // Menú SEGMENTADO (popup + grupo), no el `DropdownMenu` clásico: ver la nota
+                    // en SortChip.
+                    DropdownMenuPopup(
                         expanded = showMenu,
                         onDismissRequest = { showMenu = false }
                     ) {
-                        overflowActions.forEach { action ->
+                    DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
+                        // Qué acciones caen aquí lo decide la config del toolbar, así que la forma
+                        // de cada item sale de su POSICIÓN en la lista real: el bloque cierra
+                        // arriba y abajo aunque el usuario deje una sola acción en el overflow.
+                        //
+                        // Letras y "mantener pantalla encendida" son TOGGLES y van con la
+                        // sobrecarga `checked` (contenedor marcado, morph de forma,
+                        // `Role.Checkbox`); antes su estado solo se veía en el relleno del icono,
+                        // que un lector de pantalla no anuncia. Repetición NO: cicla entre tres
+                        // valores y un checkbox mentiría sobre lo que hace.
+                        overflowActions.forEachIndexed { index, action ->
+                            val itemShapes = MenuDefaults.itemShape(
+                                index = index,
+                                count = overflowActions.size
+                            )
                             when (action) {
                                 PlayerToolbarAction.REPEAT -> DropdownMenuItem(
+                                    onClick = { showMenu = false; onRepeatToggle() },
                                     text = {
                                         Text(when (repeatMode) {
                                             RepeatMode.OFF -> stringResource(R.string.np_repeat_off)
@@ -964,63 +1149,77 @@ internal fun BottomActionBar(
                                             RepeatMode.ALL -> stringResource(R.string.np_repeat_all)
                                         })
                                     },
+                                    shape = itemShapes.shape,
                                     leadingIcon = {
-                                        MaterialSymbol(
+                                        MenuItemIcon(
                                             if (repeatMode == RepeatMode.ONE) "repeat_one" else "repeat",
                                             fill = repeatMode != RepeatMode.OFF
                                         )
-                                    },
-                                    onClick = { showMenu = false; onRepeatToggle() }
+                                    }
                                 )
                                 PlayerToolbarAction.LYRICS -> DropdownMenuItem(
+                                    checked = showLyrics,
+                                    onCheckedChange = { showMenu = false; onLyricsToggle() },
                                     text = { Text(if (showLyrics) stringResource(R.string.np_hide_lyrics) else stringResource(R.string.np_show_lyrics)) },
-                                    leadingIcon = { MaterialSymbol("lyrics", fill = showLyrics) },
-                                    onClick = { showMenu = false; onLyricsToggle() }
+                                    shapes = itemShapes,
+                                    leadingIcon = { MenuItemIcon("lyrics", fill = showLyrics) }
                                 )
                                 PlayerToolbarAction.QUEUE -> DropdownMenuItem(
+                                    onClick = { showMenu = false; onShowQueue() },
                                     text = { Text(stringResource(R.string.np_view_queue)) },
-                                    leadingIcon = { MaterialSymbol("queue_music") },
-                                    onClick = { showMenu = false; onShowQueue() }
+                                    shape = itemShapes.shape,
+                                    leadingIcon = { MenuItemIcon("queue_music") }
                                 )
                                 PlayerToolbarAction.SHARE -> DropdownMenuItem(
+                                    onClick = { showMenu = false; onShareSong() },
                                     text = { Text(stringResource(R.string.np_share)) },
-                                    leadingIcon = { MaterialSymbol("share") },
-                                    onClick = { showMenu = false; onShareSong() }
+                                    shape = itemShapes.shape,
+                                    leadingIcon = { MenuItemIcon("share") }
                                 )
                                 PlayerToolbarAction.KEEP_SCREEN_ON -> DropdownMenuItem(
+                                    checked = keepScreenOn,
+                                    onCheckedChange = { showMenu = false; onToggleKeepScreenOn() },
                                     text = { Text(if (keepScreenOn) stringResource(R.string.np_screen_off) else stringResource(R.string.np_screen_on)) },
-                                    leadingIcon = { MaterialSymbol("wb_sunny", fill = keepScreenOn) },
-                                    onClick = { showMenu = false; onToggleKeepScreenOn() }
+                                    shapes = itemShapes,
+                                    leadingIcon = { MenuItemIcon("wb_sunny", fill = keepScreenOn) }
                                 )
                                 PlayerToolbarAction.EQUALIZER -> DropdownMenuItem(
+                                    onClick = { showMenu = false; onOpenEqualizer() },
                                     text = { Text(stringResource(R.string.np_open_eq)) },
-                                    leadingIcon = { MaterialSymbol("graphic_eq") },
-                                    onClick = { showMenu = false; onOpenEqualizer() }
+                                    shape = itemShapes.shape,
+                                    leadingIcon = { MenuItemIcon("graphic_eq") }
                                 )
                                 PlayerToolbarAction.ADD_TO_PLAYLIST -> DropdownMenuItem(
+                                    onClick = { showMenu = false; onAddToPlaylistClick() },
                                     text = { Text(stringResource(R.string.common_add_to_playlist)) },
-                                    leadingIcon = { MaterialSymbol("playlist_add") },
-                                    onClick = { showMenu = false; onAddToPlaylistClick() }
+                                    shape = itemShapes.shape,
+                                    leadingIcon = { MenuItemIcon("playlist_add") }
                                 )
+                                // Abre la hoja del temporizador (no lo enciende ni lo apaga), así
+                                // que es una ACCIÓN; que haya uno corriendo se sigue contando con
+                                // el acento del icono.
                                 PlayerToolbarAction.SLEEP_TIMER -> DropdownMenuItem(
+                                    onClick = { showMenu = false; onSleepTimerClick() },
                                     text = { Text(stringResource(R.string.sleep_timer_title)) },
+                                    shape = itemShapes.shape,
                                     leadingIcon = {
-                                        MaterialSymbol(
+                                        MenuItemIcon(
                                             "bedtime",
                                             fill = sleepTimerActive,
                                             color = if (sleepTimerActive) playButtonColor else LocalContentColor.current
                                         )
-                                    },
-                                    onClick = { showMenu = false; onSleepTimerClick() }
+                                    }
                                 )
                                 PlayerToolbarAction.DOWNLOAD -> DropdownMenuItem(
+                                    onClick = { showMenu = false; onRedownload() },
                                     text = { Text(if (isDownloaded) stringResource(R.string.common_redownload) else stringResource(R.string.np_download)) },
-                                    leadingIcon = { MaterialSymbol(if (isDownloading) "hourglass_top" else "download") },
-                                    enabled = !isDownloading,
-                                    onClick = { showMenu = false; onRedownload() }
+                                    shape = itemShapes.shape,
+                                    leadingIcon = { MenuItemIcon(if (isDownloading) "hourglass_top" else "download") },
+                                    enabled = !isDownloading
                                 )
                             }
                         }
+                    } // fin DropdownMenuGroup
                     }
                 }
             }
@@ -1055,6 +1254,72 @@ private const val TOOLBAR_DOWNLOAD_TRACK_ALPHA = 0.3f
  * desdibuja sobre el contenedor de la barra.
  */
 private val ToolbarDownloadStrokeWidth = 2.5.dp
+
+/**
+ * Dónde se coloca el relleno del toggle ACTIVO del toolbar, medido como fracción del camino
+ * tonal que va del contenedor de la barra al botón de play (ver [BottomActionBar]).
+ *
+ * 0 sería invisible (el tono de la propia barra) y 1 lo empataría con el play, que es el defecto
+ * que se venía arrastrando.
+ *
+ * Va SEPARADO por dirección porque la misma fracción no pesa igual subiendo que bajando. Subiendo
+ * el recorrido es largo (barra 34.9 → play 80.1, MEDIDO en tema oscuro) y 0.6 deja el activo en
+ * ~62: legible y con un 40% de margen por debajo del acento. Bajando es más corto (barra 90.1 →
+ * play 42.4, tema claro) y ese mismo 0.6 dejaba el círculo en 61.4 con 2.34:1 contra su fondo —
+ * correcto de jerarquía, pero demasiado marcado a la vista. Con 0.4 sube a ~71 y se queda en
+ * ~1.75:1.
+ */
+private const val ACTIVE_TONE_FRACTION_UP = 0.6
+private const val ACTIVE_TONE_FRACTION_DOWN = 0.4
+
+/**
+ * Separación mínima, en contraste, entre el relleno del toggle activo y el contenedor de la barra
+ * que tiene detrás. Es el PISO que la interpolación hacia el play no puede incumplir, y también lo
+ * que decide la dirección (ver [BottomActionBar]).
+ *
+ * Calibrado con los dos extremos que ya se habían juzgado a la vista sobre el dispositivo: 1.75:1
+ * (tema claro, el valor que quedó bien) y 2.34:1 (el que se descartó por "demasiado marcado").
+ * 1.6:1 se queda por debajo del primero —así que no fuerza a nadie— y arregla el caso roto, que
+ * estaba en 1.14:1. No bajarlo a ~1.4: ahí el disco vuelve a fundirse con la barra en cuanto el
+ * acento es cromático.
+ *
+ * Se mide con [Contrast], la misma matemática que usa M3 para su propio sistema de contraste, así
+ * que el paso "contraste objetivo → tono" es exacto y no hay que duplicarlo: el tono HCT y la
+ * luminancia relativa de WCAG salen de la MISMA Y de CIEXYZ.
+ */
+private const val ACTIVE_MIN_CONTRAST_VS_BAR = 1.6
+
+/**
+ * Contraste mínimo del glifo del toggle activo contra su relleno. 4.5:1 = el mínimo AA para texto,
+ * y el mismo listón que M3 garantiza en sus pares `color`/`onColor` — que aquí hay que reponer a
+ * mano porque el relleno se construye con un tono propio.
+ */
+private const val ACTIVE_GLYPH_MIN_CONTRAST = 4.5f
+
+/**
+ * ¿Un disco de tono [discTone] deja en pie un glifo de tono [glyphTone], o `ensureContrast` va a
+ * tener que CAMBIARLO DE LADO?
+ *
+ * Es la condición B de [BottomActionBar], y existe porque el glifo activo tiene que ser el mismo
+ * color que los inactivos de la barra: si el disco lo obliga a invertirse, el toggle encendido pasa
+ * a ser el único icono de otro color y se pierde justo lo que se quería comunicar. MEDIDO en device:
+ * con la barra de Equilibrado en tema oscuro (glifo claro, tono 90.2) sobre un disco a 52.5, el
+ * glifo acabó en 4.6 — negro dentro de una barra de iconos claros.
+ *
+ * Dos formas de estar a salvo, y basta una:
+ *
+ *  - **Contraste suficiente** ([ACTIVE_GLYPH_MIN_CONTRAST]): `ensureContrast` no interviene.
+ *  - **Estar del lado bueno**: si interviene, que sea empujando el glifo MÁS hacia su propio lado en
+ *    vez de cruzarlo. Eso se decide con la misma pregunta que se hace `ensureContrast` —¿contrasta
+ *    más el negro o el blanco contra el disco?— comparada con el lado en el que el glifo ya está.
+ *    Duplicar aquí ese criterio es deliberado: la alternativa es una constante con el tono del cruce
+ *    (~49.4), que es el mismo dato escrito de una forma que no avisa si `ensureContrast` cambia.
+ */
+private fun keepsGlyph(discTone: Double, glyphTone: Double): Boolean {
+    if (Contrast.ratioOfTones(glyphTone, discTone) >= ACTIVE_GLYPH_MIN_CONTRAST) return true
+    val darkWins = Contrast.ratioOfTones(0.0, discTone) >= Contrast.ratioOfTones(100.0, discTone)
+    return darkWins == (glyphTone < discTone)
+}
 
 
 

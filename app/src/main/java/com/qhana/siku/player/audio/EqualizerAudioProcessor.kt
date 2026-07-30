@@ -12,17 +12,23 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.cos
+import kotlin.math.cosh
 import kotlin.math.exp
 import kotlin.math.log10
+import kotlin.math.max
 import kotlin.math.pow
+import kotlin.math.roundToInt
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * Ecualizador gráfico de 5/10 bandas + refuerzo de graves y agudos, como [AudioProcessor] de
  * Media3 y con SALIDA EN FLOAT: acepta PCM de 16 bits (lo que decodifica ExoPlayer para FLAC/MP3
- * 16-bit) o float, procesa los biquads en double y emite `ENCODING_PCM_FLOAT`. Peaking-EQ del
- * cookbook RBJ, uno por banda y canal, en cascada; estado del filtro por canal.
+ * 16-bit) o float, procesa los biquads en double y emite `ENCODING_PCM_FLOAT`. Peaking-EQ
+ * **matched** ([matchedPeakCoeffs]), uno por banda y canal, en cascada; estado del filtro por
+ * canal.
  *
  * La curva plana (bandas Y refuerzos a cero) es bit-perfect.
  *
@@ -60,13 +66,30 @@ import kotlin.math.sin
  * ## Refuerzo de graves y agudos
  *
  * Dos biquads extra al final de la cascada, bajo el MISMO toggle que el EQ (no son un módulo
- * aparte). Son **peakings anchos**, no shelves, y esa es la decisión de diseño importante: medido
- * a +6 dB, un low shelf de 120 Hz mete +5.97 dB de media por debajo de 40 Hz —donde unos ATH-M20x
- * no entregan nada— mientras que un peaking en [BASS_BOOST_FREQ_HZ] con [BOOST_Q] mete solo
- * +1.64 dB ahí y AUN ASÍ da más energía en la banda útil de 40–160 Hz (+4.68 contra +4.46). Lo
- * mismo arriba: el high shelf de 10 kHz realza +5.85 dB por encima de 14 kHz (que es donde vive
- * el hiss del máster), contra +1.57 dB del peaking. Mismo punch y mismo aire, bastante menos
- * headroom tirado en lo que no se oye.
+ * aparte). Son **peakings anchos** ([BOOST_Q]), no shelves, con el centro ELEGIBLE por el usuario
+ * dentro de [BASS_BOOST_FREQ_MIN_HZ]..[BASS_BOOST_FREQ_MAX_HZ] y
+ * [TREBLE_BOOST_FREQ_MIN_HZ]..[TREBLE_BOOST_FREQ_MAX_HZ]; los defaults son los valores que se
+ * midieron abajo. Arriba eso está medido y es claramente lo correcto: un peaking Q 0.7 en 10 kHz ya cubre
+ * de 5 kHz al final del espectro, así que da MÁS brillo que un high shelf de 6 kHz (6–10 kHz:
+ * +4.75 contra +4.47) con casi el mismo aire, y deja quieto el 14–20 kHz (+1.58 contra +5.99),
+ * que es donde vive el hiss del máster.
+ *
+ * Abajo la elección es un COMPROMISO, no un óptimo, y conviene saber por qué (27 jul 2026):
+ *
+ * - En forma pura, un low shelf de 200 Hz cubre mejor el rango de bajo: a igual ganancia nominal
+ *   da +5.83 dB en 40–120 Hz contra +4.95 del peaking y +3.72 en 120–250 contra +2.63. El peaking
+ *   es un montículo centrado en 80 Hz y deja fuera el cuerpo del bombo y del bajo.
+ * - **Pero entrega ~1 dB más de energía total, y eso es lo que decide.** Medido sobre música real
+ *   (687 Days, máster a 0.00 dBFS con 36 400 muestras ya pegadas al tope): con el refuerzo a +6
+ *   el peaking recorta el 4.93 % de las muestras y el shelf el 6.58 %. Se probó por escucha y el
+ *   veredicto fue que el shelf suena PEOR. Con un máster sin headroom, más grave = más clipping,
+ *   y el clipping domina sobre cualquier ventaja de forma.
+ *
+ * Ojo con el error de razonamiento que llevó a probar el shelf: es FALSO que un shelf gaste más
+ * headroom que un peaking (a igual ganancia nominal los dos topan en el mismo pico, +6.00 dB).
+ * Lo que gasta más es la ENERGÍA que entrega, que no es lo mismo y no se ve mirando el pico de la
+ * curva. Si algún día se resuelve el headroom de verdad (limitador con lookahead o atenuación
+ * dentro del processor), el shelf de 200 Hz vuelve a ser la forma preferible — y solo entonces.
  *
  * Los refuerzos **NO entran en la compensación**: son deliberadamente ADITIVOS sobre la curva del
  * EQ, porque eso es lo que un usuario espera de un "booster". Por eso la hoja muestra el headroom
@@ -75,14 +98,76 @@ import kotlin.math.sin
  * forma de los filtros— lo que hizo que los boosts de julio sonaran a ruido: se sumaban al preset
  * hasta +12..14 dB y clipaban.
  *
- * SALIDA SIN LIMITADOR ([LIMITER_ENABLED] = false, veredicto de escucha del usuario,
- * 20 jul 2026): los picos que la curva empuja sobre full scale salen >1.0f y la atenuación
- * DIGITAL del volumen de media (aplicada por pista en el mixer float de AudioFlinger, antes
- * del recorte) los devuelve a rango. El limiter queda como flag por si aparece clipping real.
+ * ## La saga del "suena a ruido": CERRADA (27 jul 2026)
  *
- * NO REINTRODUCIR: el auto-preamp que baja el nivel global (rechazado 2 veces; la vía elegida es
- * MOSTRAR el headroom, no corregirlo por detrás) ni el ruteo de ReplayGain dentro del processor
- * (RG va por `player.volume` en MusicController, como siempre).
+ * Esta clase arrastró durante semanas la pregunta de por qué los refuerzos sonaban a ruido. La
+ * respuesta resultó ser CUATRO cosas distintas, no una, y por eso ningún arreglo suelto convencía:
+ *
+ * 1. **Ruido LITERAL**: `rebuildFilters` asignaba en el hilo de audio en cada frame de arrastre
+ *    del slider → GC → xruns → crackle. Resuelto (regla 1 de arriba).
+ * 2. **Zipper noise**: los coeficientes saltaban de golpe. Resuelto (regla 2).
+ * 3. **Clipping invisible**: los refuerzos se suman al preset hasta +12..14 dB y nada lo decía.
+ *    Resuelto por la compensación (regla 3) más el indicador de headroom de la hoja.
+ * 4. **El MATERIAL**, que no es un defecto de esta clase y no tiene arreglo aquí: un máster
+ *    moderno a 0 dBFS recorta con cualquier refuerzo. Medido, con +6 dB a 110 Hz: `687 Days`
+ *    (RMS −11.6) recorta el 4.93 % de las muestras, mientras que material con margen normal
+ *    —Dream Theater, RMS −16.9— recorta 0.26 % y 0.05 %. El problema era de una canción concreta,
+ *    no del ecualizador.
+ *
+ * Descartado por medición, NO reabrir sin datos nuevos: los coeficientes (se verificaron uno a uno
+ * y estaban CORRECTOS — el 29 jul se cambió el DISEÑO a matched, que es otra cosa: no había un
+ * error de cálculo sino un límite estructural de la transformada bilineal, ver [matchedPeakCoeffs]),
+ * la forma de los filtros (el low shelf se probó y sonó peor,
+ * ver abajo), y el realce psicoacústico tipo "Pure Bass+" de ViPER4Android — se implementó
+ * completo, se validó numéricamente y el usuario lo rechazó por escucha: es un generador de
+ * distorsión armónica, y en música densa ese contenido inventado se oye como suciedad (medido:
+ * ensucia 250–800 Hz entre +1.5 y +2.3 dB más que un peaking). Ojo con el origen de ese intento:
+ * el usuario recordaba usar V4A a 110 Hz / 6–8 dB, pero con **Natural Bass**, o sea el LINEAL.
+ *
+ * Lo que SÍ resolvió el problema de diseño real fue hacer ELEGIBLE el centro de cada refuerzo:
+ * el debate sobre dónde poner la energía no se gana con una constante mejor, se gana dándole el
+ * control a quien escucha.
+ *
+ * ## Protección de nivel: preamp manual + limitador con lookahead (29 jul 2026)
+ *
+ * Hasta esta fecha no había ninguna: los picos que la curva empujaba sobre fondo de escala salían
+ * >1.0f y se confiaba en que la atenuación DIGITAL del volumen de media (mixer float de
+ * AudioFlinger, antes del recorte) los devolviera a rango. Eso es cierto POR CABLE y por debajo
+ * del ~77 % de volumen — la ruta del autor de la app— y **falla en silencio en dos casos que
+ * cubren a buena parte de los usuarios**: volumen al 100 % (no hay atenuación que aplicar) y
+ * Bluetooth con volumen absoluto (AVRCP manda el volumen al auricular y el teléfono transmite a
+ * nivel fijo, así que el mixer no atenúa NADA, esté donde esté el control). Ver
+ * `AudioRouteMonitor`, que es lo que permite al indicador de headroom dejar de mentir ahí.
+ *
+ * Hay DOS mecanismos porque responden a criterios distintos y ninguno domina al otro:
+ *
+ * - **[setPreamp]** — lineal, distorsión cero, sin dinámica. Cuesta volumen SIEMPRE, haga falta
+ *   o no. Es la opción del que quiere la cadena estrictamente transparente.
+ * - **Limitador** — no cuesta absolutamente nada cuando no engancha (y con el umbral en 0 dBFS y
+ *   material normal no engancha nunca), a cambio de meter una no linealidad cuando sí. Reacciona
+ *   a la señal real, así que se adapta al material y al hardware sin saber nada del auricular.
+ *   Con el umbral por debajo de 0 dBFS deja de ser solo una red y pasa a ser un compresor de
+ *   picos, que es otra cosa y se elige a propósito (ver [LIMITER_THRESHOLD_MIN_DB]).
+ *
+ * **Los dos vienen APAGADOS** (preamp a 0, limitador off). Es deliberado y sigue el criterio de
+ * toda la app: informar, no corregir por detrás. El aviso de headroom dice cuándo harían falta y
+ * el medidor de reducción dice cuánto actuaría el limitador ANTES de encenderlo, así que el
+ * usuario decide con el dato delante en vez de recibir una cadena que ya viene tocada.
+ * Consecuencia asumida: quien escuche por Bluetooth y no abra nunca esta pantalla se queda sin
+ * red — el aviso está, pero hay que leerlo.
+ *
+ * El limitador que estuvo APAGADO entre el 20 y el 29 de julio era, de manual, un mal limitador:
+ * ataque instantáneo, sin lookahead, sin rampa y release único de 150 ms. Con un bajo de 80 Hz
+ * (periodo 12.5 ms) los picos llegaban doce veces más rápido de lo que la envolvente se
+ * recuperaba, así que nunca bajaba del umbral y modulaba TODO el espectro al ritmo del bajo. No
+ * era un problema de calibrar la constante: con esa estructura, el release ES una máquina de
+ * agachar los medios y agudos con el bombo. El de ahora corrige los tres fallos (lookahead con
+ * rampa lineal, release en dos etapas, techo a fondo de escala en vez de −0.13 dBFS).
+ *
+ * NO REINTRODUCIR: el auto-preamp que baja el nivel global por su cuenta (rechazado 2 veces; el
+ * preamp de ahora es MANUAL y el valor sugerido se ve antes de aplicarse) ni el ruteo de
+ * ReplayGain dentro del processor (RG va por `player.volume` en MusicController, como siempre —
+ * o sea DESPUÉS de este limitador, lo cual es inocuo porque RG solo atenúa).
  *
  * INTERACCIÓN CON OFFLOAD: en modo offload TODA la cadena de processors se salta, por eso
  * `MusicPlaybackService` desactiva el offload mientras el EQ está activo, y este processor
@@ -116,19 +201,48 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         // Q por modo: con 10 bandas por octava los picos deben ser más angostos para no
         // solaparse (Q≈1.41 es el estándar de EQ gráfico de octava); con 5 bandas, más
         // anchos para cubrir el espectro entre centros.
+        //
+        // Q_5_BANDS SE QUEDA EN 0.9 (revisado el 29 jul y decidido NO cambiarlo). El diagnóstico
+        // de que 0.9 da 1.54 octavas de ancho contra ~1.95 de espaciado entre centros —o sea que
+        // quedan valles que la compensación, que corrige EN los centros, no puede tapar— es
+        // correcto, y el valor que cerraría el hueco sería Q = 2/3 (BW = (2/ln2)·asinh(1/2Q), y
+        // asinh(3/4) = ln 2, o sea 2 octavas exactas). Pero el layout de 5 bandas imita a
+        // propósito el clásico de Android/AudioFx, y tocar el Q cambiaría EN SILENCIO el sonido
+        // de los 10 presets de fábrica y de las curvas que los usuarios de la app publicada ya
+        // tienen guardadas. Cambiar estado ajeno sin avisar no se hace en este proyecto.
         internal const val Q_5_BANDS = 0.9
         internal const val Q_10_BANDS = 1.41
 
         /**
-         * Centros y Q de los refuerzos. Elegidos por medición (ver kdoc de la clase): 80 Hz
-         * concentra el punch donde el auricular sí entrega en vez de gastarlo en subgrave, y
-         * 10 kHz da aire quedándose por debajo de la zona de hiss del máster. Q 0.7 = ancho de
-         * banda de ~2 octavas, que es lo que hace que se perciba como un tono general y no como
-         * una banda del ecualizador.
+         * Centros y Q de los refuerzos. 80 Hz concentra el punch donde el auricular sí entrega en
+         * vez de gastarlo en subgrave, y 10 kHz da aire quedándose por debajo de la zona de hiss
+         * del máster. Q 0.7 = ancho de banda de ~2 octavas, que es lo que hace que se perciba
+         * como un tono general y no como una banda del ecualizador.
+         *
+         * Son los DEFAULT: el centro lo elige el usuario dentro de los rangos de abajo. El de
+         * graves quedó en 80 Hz como compromiso frente al low shelf de 200 Hz, que cubre mejor el
+         * rango pero entrega ~1 dB más de energía y recorta más sobre másters modernos — ver el
+         * kdoc de la clase antes de cambiar el default.
          */
-        internal const val BASS_BOOST_FREQ_HZ = 80.0
-        internal const val TREBLE_BOOST_FREQ_HZ = 10_000.0
+        internal const val BASS_BOOST_FREQ_DEFAULT_HZ = 80.0
+        internal const val TREBLE_BOOST_FREQ_DEFAULT_HZ = 10_000.0
         internal const val BOOST_Q = 0.7
+
+        /**
+         * Rangos del centro de cada refuerzo. El usuario los elige, así que la app ya no tiene que
+         * adivinar DÓNDE poner la energía — que era el fondo de la discusión peaking-vs-shelf.
+         *
+         * Los topes no son arbitrarios: por debajo de 40 Hz el refuerzo solo gasta headroom en
+         * algo que la mayoría de auriculares no entrega, y por encima de 250 Hz deja de ser
+         * "graves" y empieza a embarrar los medios. Arriba, 2 kHz es el límite inferior de lo que
+         * se percibe como brillo, y 16 kHz ya es la zona de hiss del máster (medido: un realce ahí
+         * aporta ruido, no aire).
+         */
+        internal const val BASS_BOOST_FREQ_MIN_HZ = 40.0
+        internal const val BASS_BOOST_FREQ_MAX_HZ = 250.0
+
+        internal const val TREBLE_BOOST_FREQ_MIN_HZ = 2_000.0
+        internal const val TREBLE_BOOST_FREQ_MAX_HZ = 16_000.0
 
         /** Nº de biquads de refuerzo (graves + agudos) al final de la cascada. */
         private const val BOOST_COUNT = 2
@@ -136,11 +250,21 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         /** Ganancias menores a esto son identidad: el filtro ni se calcula. */
         internal const val IDENTITY_EPSILON_DB = 0.05
 
+
         /**
-         * Iteraciones del punto fijo de [recomputeCompensation]. Medido sobre los 10 presets de
-         * fábrica en ambos modos MÁS casos sintéticos duros (todas las bandas a ±12, curva en V,
-         * escalón): 1 iteración deja ≤1.52 dB de error, 2 ≤0.33 y 4 ≤0.04. La convergencia es
-         * MONÓTONA (se verificó hasta 8 iteraciones: no oscila), así que 4 es holgado.
+         * Iteraciones del punto fijo de [recomputeCompensation]. Re-medido con los filtros matched
+         * ([matchedPeakCoeffs]) sobre los 10 presets de fábrica en ambos modos MÁS casos sintéticos
+         * duros (todas las bandas a ±12, curva en V, escalón): 1 iteración deja ≤1.58 dB de error,
+         * 2 ≤0.39 y 4 ≤0.049. Sigue sirviendo 4; el cambio de diseño de los filtros no la degradó
+         * (con RBJ el peor caso a 4 iteraciones era 0.040 dB).
+         *
+         * Matiz honesto sobre "converge": el error no baja monótonamente hasta cero, se ASIENTA en
+         * un suelo de ~0.04 dB en 4 de los 28 casos y ahí puede subir y bajar unas milésimas entre
+         * iteraciones. Ese suelo es [IDENTITY_EPSILON_DB]: una banda cuya ganancia compensada cae
+         * por debajo de 0.05 dB se salta entera, así que la curva no se puede corregir por debajo
+         * de esa cifra. Pasa IGUAL con los coeficientes RBJ (0.040 dB), o sea que no lo trae el
+         * diseño nuevo, y de la 4ª a la 8ª iteración se queda plano: se asienta, no oscila ni
+         * diverge.
          *
          * El barrido va in-place a propósito — Gauss-Seidel, no Jacobi: cada banda ya ve el valor
          * corregido de sus vecinas de índice menor dentro de la misma pasada. Medido, eso es un
@@ -169,36 +293,400 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         /** Diferencia bajo la cual el suavizado hace snap (y la banda puede volver a identidad). */
         private const val GAIN_SNAP_EPSILON_DB = 0.001
 
-        /** Techo del limitador (bajo 1.0 para margen de redondeo) y release de la envolvente. */
-        private const val LIMITER_THRESHOLD = 0.985
-        private const val LIMITER_RELEASE_SECONDS = 0.150
+        /**
+         * Rango del preamp. Solo NEGATIVO, igual que el "precut" de Rockbox: su trabajo es
+         * devolver el headroom que consume la curva, y un preamp positivo no compra nada que no
+         * dé ya el volumen del sistema — solo acerca el recorte. La UI sugiere
+         * −[EqCurve.peakGainDb], que es la convención de los perfiles de AutoEQ.
+         *
+         * Es la alternativa LINEAL al limitador: distorsión exactamente cero y sin ninguna
+         * dinámica de por medio, a cambio de costar volumen siempre, se necesite o no. El
+         * limitador es lo contrario (no cuesta nada cuando no engancha, pero mete una no
+         * linealidad). Están los dos porque sirven a criterios distintos y el usuario elige.
+         */
+        const val PREAMP_MIN_DB = -12f
+        const val PREAMP_MAX_DB = 0f
 
         /**
-         * DECISIÓN por A/B de escucha (20 jul 2026): limitador APAGADO. Su gain riding
-         * (ataque instantáneo + release 150 ms) comprimía audiblemente con cualquier preset
-         * no plano (Jazz: "la canción se sentía rara") y en la ruta real del usuario los
-         * overs >1.0f los absorbe la atenuación digital del volumen de media. Reactivar
-         * (true) SOLO si aparece distorsión áspera real en pasajes fuertes (volumen al
-         * máximo o BT con volumen absoluto); la mejora correcta sería un lookahead.
+         * Umbral del limitador en dBFS, ELEGIBLE por el usuario. Cambia lo que el limitador ES:
+         *
+         * - **0 dB** (default) = fondo de escala. Pura protección: solo toca lo que de verdad
+         *   recortaría, y con material que no llega al tope no hace absolutamente nada.
+         * - **Por debajo** = compresor de picos. Reduce SOLO lo que asoma por encima del umbral y
+         *   deja intacto todo lo que queda debajo, así que no es lo mismo que bajar el nivel con
+         *   [setPreamp] — ese desplaza la señal entera.
+         *
+         * La salvedad honesta: sobre un máster moderno, donde casi todo vive pegado al tope, casi
+         * ninguna muestra queda "por debajo" y la distinción se difumina — ahí un umbral bajo sí
+         * acaba pareciéndose a una atenuación constante, y el preamp hace ese trabajo mejor porque
+         * es lineal. El umbral rinde en material con dinámica de verdad.
+         *
+         * El umbral SÍ es de true-peak desde el 29 jul: el detector sobremuestrea ×4 y ve los picos
+         * ENTRE muestras (ver [TRUE_PEAK_PHASES]), así que 0 dBFS aquí significa 0 dBTP y protege
+         * de verdad contra el remuestreo y la cuantización del códec. Antes no era cierto —el
+         * limitador solo garantizaba el techo EN las muestras— y este kdoc decía justamente que
+         * bajar el umbral "no compra seguridad contra el codec, solo recorta antes". Ya no aplica:
+         * lo que compra seguridad es el detector, y viene de serie con el umbral en 0.
+         *
+         * El AUTOMÁTICO de la hoja es exactamente [LIMITER_THRESHOLD_MAX_DB], o sea 0 dBFS fijo.
+         * Estuvo atado a −pico de la curva hasta el 29 jul y eso lo convertía en un compresor que
+         * engancha siempre que hay curva: el mismo "corregir por detrás" que este proyecto ya
+         * rechazó dos veces en el preamp. NO reintroducirlo.
          */
-        private const val LIMITER_ENABLED = false
+        const val LIMITER_THRESHOLD_MIN_DB = -12f
+        const val LIMITER_THRESHOLD_MAX_DB = 0f
+
+        /**
+         * Lookahead. Es LA diferencia con el limitador que estuvo apagado desde el 20 jul 2026:
+         * la reducción se rampa durante los [LIMITER_LOOKAHEAD_SECONDS] ANTERIORES a que el pico
+         * salga, así que la ganancia ya llegó a su destino cuando el pico aparece y no hace falta
+         * ningún salto instantáneo. Un escalón de ganancia es multiplicar por una función escalón,
+         * o sea distorsión de banda ancha — no un artefacto sutil.
+         *
+         * 2 ms sobran para un pico de audio y son inaudibles como latencia (~88 frames a 44.1 kHz;
+         * no hay vídeo con el que sincronizar). La latencia REAL del processor es un poco mayor,
+         * 95 frames / 2.15 ms, porque la línea de retardo suma el retardo de grupo del detector
+         * true-peak — pero la ventana de RAMPA sigue siendo estos 2 ms, que es lo que fija
+         * `limiterAttackSlew`. Ver [TRUE_PEAK_DELAY_FRAMES].
+         */
+        private const val LIMITER_LOOKAHEAD_SECONDS = 0.002
+
+        /**
+         * Release en DOS etapas, tomando el MÍNIMO de ambas. La rápida devuelve el nivel enseguida
+         * tras un transitorio aislado (para no agachar medio compás por un solo golpe); la lenta
+         * domina en pasajes fuertes sostenidos, donde la reducción queda casi ESTÁTICA y por tanto
+         * inaudible. Como el mínimo manda, el comportamiento sale dependiente del programa sin
+         * detectar nada: si la lenta apenas bajó, la rápida gobierna y se recupera ya.
+         *
+         * El pumping aparece cuando el release es del ORDEN del periodo de la modulación. El
+         * limitador viejo tenía release único de 150 ms contra los 12.5 ms de un bajo de 80 Hz:
+         * la envolvente nunca bajaba del umbral y modulaba TODO el espectro al ritmo del bajo
+         * (medios y agudos agachándose con el bombo). Con 400 ms eso no puede pasar.
+         *
+         * **OJO — hasta el 29 jul (tarde) esto era MENTIRA y la etapa rápida estaba MUERTA.** El
+         * branch de ataque sincronizaba las DOS envolventes (`fast = slow = limiterGain`), así que
+         * el release siempre arrancaba con las dos iguales, la lenta se quedaba por debajo desde el
+         * primer frame y `min(fast, slow)` era SIEMPRE la lenta: 400 ms de recuperación pase lo que
+         * pase, o sea un golpe de caja agachando el espectro casi medio segundo. Medido replicando
+         * el algoritmo: con un transitorio aislado, 401.5 ms al 63 % (y el 90 % no llegaba en
+         * 800 ms) contra los 51.5 ms de ahora.
+         *
+         * Lo que lo arregla es que la LENTA no se sincroniza: recibe su propio ataque one-pole con
+         * [LIMITER_SLOW_ATTACK_SECONDS] hacia [limiterGain]. Un transitorio breve apenas la mueve
+         * → sigue muy por encima → gobierna la rápida → ~50 ms. Limitación sostenida la hace
+         * converger hacia la ganancia aplicada → gobierna la lenta → sin pumping. Medido: tras un
+         * pasaje denso de 1 s a +6 dB sobre el umbral, la lenta gobierna el 79.5 % de los frames
+         * del release y la recuperación al 63 % pasa a 330 ms (con solo la rápida serían 101 ms).
+         * La rápida SÍ se sincroniza, y eso es lo que preserva la continuidad: sale del ataque
+         * valiendo exactamente [limiterGain], así que el mínimo no puede saltar hacia arriba.
+         */
+        private const val LIMITER_RELEASE_FAST_SECONDS = 0.050
+        private const val LIMITER_RELEASE_SLOW_SECONDS = 0.400
+
+        /**
+         * Constante del ataque de la envolvente LENTA (ver [LIMITER_RELEASE_FAST_SECONDS]). Es lo
+         * que decide cuánta limitación seguida hace falta para que el release pase de rápido a
+         * lento, así que es el mando de la dependencia del programa:
+         *
+         * - Mucho más corta (≈ el lookahead) y la lenta seguiría a la rápida → todo release lento,
+         *   que es exactamente el bug que se acaba de corregir.
+         * - Mucho más larga y nunca convergería en pasajes de unos pocos cientos de ms → todo
+         *   release rápido, y con eso vuelve el riesgo de pumping en material comprimido.
+         *
+         * 100 ms = el orden de un tiempo musical corto: un golpe suelto no la mueve, un compás
+         * fuerte sí. Medido con las dos condiciones de arriba.
+         */
+        private const val LIMITER_SLOW_ATTACK_SECONDS = 0.100
+
+        /**
+         * Distancia a 1.0 por debajo de la cual el release se da por terminado y la ganancia
+         * SNAPEA a la unidad.
+         *
+         * Los dos releases son one-pole, o sea asintóticos: sin esto `limiterGain` se queda para
+         * siempre en 0.9999… y la rama de release corre en cada frame durante el resto de la
+         * canción, con el medidor reportando residuos de ~0.0001 dB en vez del 0 exacto que
+         * significa "aquí el limitador no está haciendo nada".
+         *
+         * 1e-5 ≈ 0.00009 dB: cuatro órdenes de magnitud por debajo de la resolución del medidor
+         * (0.1 dB) y muy por debajo del LSB de 24 bits, así que el snap es inaudible por
+         * construcción.
+         */
+        private const val LIMITER_GAIN_SNAP_EPSILON = 1e-5
+
+        /**
+         * Detector de pico TRUE-PEAK (inter-muestra) al estilo ITU-R BS.1770-4: sobremuestreo 4×
+         * SOLO del detector, con un FIR polifásico de [TRUE_PEAK_TAPS] taps repartidos en
+         * [TRUE_PEAK_PHASES] fases de [TRUE_PEAK_TAPS_PER_PHASE]. **La ruta de señal no se toca**:
+         * lo único que cambia es el número que entra en el máximo deslizante.
+         *
+         * ¿Por qué hace falta? Porque una señal digital pasa POR ENCIMA de sus propias muestras
+         * entre ellas, y un limitador que solo mira las muestras deja escapar esos picos, que
+         * recortan aguas abajo — en el remuestreo 44.1→48 kHz del mixer y en la cuantización a
+         * int16/int24 del códec Bluetooth, que es precisamente la ruta donde este limitador más
+         * importa (volumen absoluto = sin atenuación del mixer que absorba nada). Medido: un seno a
+         * 0.24·fs con la fase que pone el pico entre dos muestras marca −0.017 dBFS en las muestras
+         * y 0.00 dBFS de verdad; el detector lo estima con 0.046 dB de error, y el peor caso de un
+         * barrido de 0.05 a 0.45·fs es 0.108 dB.
+         *
+         * 12 taps por fase con ventana de HAMMING: medido contra Hann (0.141 dB) y Blackman
+         * (0.264 dB) sobre ese mismo barrido. Cada fase se normaliza a suma 1 para que una señal
+         * lenta no gane ni pierda nivel al interpolarse. No es un detector de laboratorio: 4× es
+         * el mínimo de la norma y subestima décimas de dB en contenido pegado a Nyquist (medido:
+         * 0.62 dB con ruido blanco a fondo de escala, que no es música). El pico de MUESTRA sigue
+         * entrando en el máximo, así que el techo sobre las muestras se mantiene EXACTO pase lo que
+         * pase con la estimación.
+         *
+         * Coste: 4 fases × 12 taps × 2 canales = 96 MAC por frame (4.2 M MAC/s a 44.1 kHz), del
+         * orden de lo que ya cuesta la cascada de 10 biquads. Corre SIEMPRE, también con el
+         * limitador apagado, porque el medidor de reducción tiene que seguir diciendo la verdad
+         * (ver [gainReductionDb]).
+         */
+        private const val TRUE_PEAK_PHASES = 4
+        private const val TRUE_PEAK_TAPS_PER_PHASE = 12
+        private const val TRUE_PEAK_TAPS = TRUE_PEAK_PHASES * TRUE_PEAK_TAPS_PER_PHASE
+
+        /** Muestras que guarda la historia POR CANAL: la ventana duplicada ([truePeakHistory]). */
+        private const val TRUE_PEAK_SPAN = 2 * TRUE_PEAK_TAPS_PER_PHASE
+
+        /**
+         * CONTABILIDAD DEL RETARDO — es lo que conserva la garantía de la rampa, así que no se
+         * toca sin recalcularla.
+         *
+         * El prototipo del FIR es simétrico alrededor de la muestra sobremuestreada
+         * ([TRUE_PEAK_TAPS] − 1)/2 = 23.5, o sea 23.5/4 = 5.875 muestras de ENTRADA de retardo de
+         * grupo; y las cuatro fases de un mismo frame estiman instantes que abarcan 0.75 muestras.
+         * Consecuencia: un pico que ocurre en el instante τ no acaba de quedar cubierto por el
+         * detector hasta el frame ⌈5.875⌉ + 1 = 7 posiciones después.
+         *
+         * Por eso la línea de retardo pasa a medir `lookahead + 7` frames en vez de `lookahead`,
+         * mientras que `attackSlew` sigue valiendo 1/lookahead: entre el último frame que puede
+         * detectar un pico y el frame en que ese pico SALE quedan exactamente `lookahead` frames de
+         * rampa, que es lo que la pendiente máxima necesita para recorrer todo el rango de la
+         * ganancia. Sin alargar el retardo, el detector avisaría 7 frames tarde y la rampa se
+         * quedaría corta justo en los picos más rápidos. Coste: 2.15 ms de latencia en vez de 2.00.
+         */
+        private val TRUE_PEAK_DELAY_FRAMES =
+            ceil((TRUE_PEAK_TAPS - 1) / (2.0 * TRUE_PEAK_PHASES)).toInt() + 1
+
+        /**
+         * Taps del FIR polifásico, dispuestos como `[m * TRUE_PEAK_PHASES + fase]` para que los
+         * cuatro coeficientes de un mismo retardo `m` queden contiguos: así el detector recorre la
+         * historia UNA vez y acumula las cuatro fases a la vez, que es la disposición amable con la
+         * caché. Se calculan una sola vez al cargar la clase (nunca en el hilo de audio).
+         */
+        private val TRUE_PEAK_COEFFS = buildTruePeakTaps()
+
+        private fun buildTruePeakTaps(): DoubleArray {
+            val center = (TRUE_PEAK_TAPS - 1) / 2.0
+            val proto = DoubleArray(TRUE_PEAK_TAPS)
+            for (k in 0 until TRUE_PEAK_TAPS) {
+                val x = (k - center) / TRUE_PEAK_PHASES
+                val sinc = if (abs(x) < SINC_SINGULARITY) 1.0 else sin(PI * x) / (PI * x)
+                val t = k / (TRUE_PEAK_TAPS - 1.0)
+                val window = HAMMING_A0 - (1.0 - HAMMING_A0) * cos(2.0 * PI * t)
+                proto[k] = sinc * window
+            }
+            // Normalización POR FASE: cada fase es un interpolador por derecho propio y tiene que
+            // dar ganancia 1 en continua. Normalizar el prototipo entero dejaría a cada fase con
+            // un error de unas décimas de por ciento, que se traduce en un rizado del estimador.
+            val out = DoubleArray(TRUE_PEAK_TAPS)
+            for (p in 0 until TRUE_PEAK_PHASES) {
+                var sum = 0.0
+                for (m in 0 until TRUE_PEAK_TAPS_PER_PHASE) sum += proto[m * TRUE_PEAK_PHASES + p]
+                for (m in 0 until TRUE_PEAK_TAPS_PER_PHASE) {
+                    val i = m * TRUE_PEAK_PHASES + p
+                    out[i] = proto[i] / sum
+                }
+            }
+            return out
+        }
+
+        /** Coeficiente de la ventana de Hamming (el clásico 0.54/0.46). */
+        private const val HAMMING_A0 = 0.54
+
+        /** Bajo esto, `sin(πx)/(πx)` se evalúa como su límite 1 en vez de dividir por ~0. */
+        private const val SINC_SINGULARITY = 1e-12
+
+        /**
+         * Diferencia relativa por debajo de la cual el suavizado del CENTRO de un refuerzo hace
+         * snap. Una parte en 10 000 son ~0.00014 octavas: por debajo de eso el filtro es el mismo
+         * a todos los efectos, y seguir iterando solo mantendría vivo el recálculo de coeficientes.
+         */
+        private const val FREQ_SNAP_EPSILON_RATIO = 0.0001
+
+        /** Nº de coeficientes de un biquad (b0,b1,b2,a1,a2), compartido con [EqCurve]. */
+        internal const val COEFFS_PER_FILTER = 5
+
+        /**
+         * Peaking-EQ **matched** en forma cerrada (Martin Vicanek, *Matched Second Order Digital
+         * Filters*, 2016), escrito en [out] desde [offset]. Sustituyó al peaking del cookbook RBJ
+         * el 29 jul 2026. MISMA semántica de parámetros: [gainDb] en el centro, [f0] el centro y
+         * [q] el ancho proporcional, con el mismo prototipo analógico que usa RBJ
+         *
+         *     H(s) = (s² + s·A/Q + 1) / (s² + s/(A·Q) + 1),  A = 10^(gainDb/40), s = j·f/f0
+         *
+         * y eso último es load-bearing: con otro prototipo (por ejemplo con la ganancia entera en
+         * el numerador) la CAMPANA cambiaría de forma a todas las frecuencias y con ella el sonido
+         * de todos los presets. Aquí solo cambia el mapeo analógico→digital.
+         *
+         * ## Qué corrige (y qué NO estaba roto)
+         *
+         * Los coeficientes RBJ eran CORRECTOS: se verificaron uno a uno en su día y esta
+         * sustitución no los desmiente. Lo que se corrige es un límite ESTRUCTURAL de la
+         * transformada bilineal: comprime el eje de frecuencia infinito del prototipo analógico
+         * dentro de (0, fs/2), así que fuerza 0 dB exactos en Nyquist y aplasta las campanas cuyo
+         * centro está cerca. Medido a 44.1 kHz contra el prototipo analógico, en 16–20 kHz:
+         *
+         * | banda            | error RBJ | error matched |
+         * |------------------|-----------|---------------|
+         * | 14 kHz, +6 dB    | 3.73 dB   | 0.50 dB       |
+         * | 14 kHz, +12 dB   | 7.11 dB   | 0.79 dB       |
+         * | 16 kHz, +6 dB    | 3.88 dB   | 0.53 dB       |
+         * | 16 kHz, +12 dB   | 7.35 dB   | 0.84 dB       |
+         *
+         * O sea: la banda de 14 kHz (modo 5) y la de 16 kHz (modo 10) entregaban bastante menos
+         * realce del nominal en la parte alta de su campana. En f0 bajas no cambia NADA (medido:
+         * ≤0.053 dB de desviación contra RBJ para f0 entre 60 y 1000 Hz, y el matched queda incluso
+         * más cerca del analógico: 0.029 dB contra 0.083). Es mejora de fidelidad, no reapertura
+         * del debate de julio sobre la forma de los filtros.
+         *
+         * ## Cómo
+         *
+         * 1. **Polos** casados: mismo decaimiento y misma frecuencia de oscilación que el resonador
+         *    analógico (mapeo de la envolvente de la respuesta impulsional), en vez de bilineal.
+         * 2. **Numerador** resuelto en forma cerrada para que la MAGNITUD coincida exactamente con
+         *    el prototipo en tres puntos —DC, f0 y Nyquist— usando la identidad de Vicanek
+         *    `|B(e^jω)|² = (b0+b1+b2)² − 4(b0b1 + 4b0b2 + b1b2)·Φ + 16·b0·b2·Φ²`, con `Φ = sin²(ω/2)`.
+         *    Que valga exactamente [gainDb] en el centro no es un detalle: es lo que la UI promete y
+         *    lo que la compensación mide (verificado, error ≤4·10⁻¹⁰ dB en todo el rango de uso).
+         * 3. **Los recortes son el RECÍPROCO exacto del realce del mismo módulo.** No es un atajo:
+         *    el prototipo RBJ tiene esa simetría por construcción (A → 1/A intercambia numerador y
+         *    denominador; verificado a 1e-16 en los propios coeficientes RBJ), así que un realce
+         *    seguido de su recorte se cancela. Y además es lo que evita un modo de fallo real: con
+         *    el sistema de 3 puntos aplicado DIRECTAMENTE a un recorte profundo cerca de Nyquist no
+         *    existe solución real y el diseño degenera en un NULO — medido, un recorte de −14 dB en
+         *    16 kHz daba −35 dB en 14 kHz, o sea un agujero en los agudos. Por el recíproco eso no
+         *    puede pasar: solo se diseñan realces.
+         *
+         * Verificado en todo el rango de uso (f0 de 31 Hz a 16 kHz, Q 0.7/0.9/1.41, ganancias de
+         * ±0.05 a ±18 dB —el techo de la compensación—, a 44.1/48/96/192 kHz): 0 filtros
+         * inestables, 0 recíprocos inestables, |coeficiente| ≤ 3.77 y peor error contra el
+         * analógico 1.40 dB (contra 8.05 dB del RBJ), en el extremo f0 = 16 kHz con Q 0.7.
+         *
+         * Vive en el companion y no duplicada en [EqCurve] a propósito: la matemática de los
+         * coeficientes es la MISMA en las dos rutas y tenerla dos veces era la forma más fácil de
+         * que divergieran. Lo que sigue duplicado (y debe seguirlo) es el punto fijo y el barrido,
+         * que tienen restricciones opuestas — ver el kdoc de [EqCurve].
+         */
+        internal fun matchedPeakCoeffs(
+            gainDb: Double,
+            f0: Double,
+            q: Double,
+            sampleRate: Double,
+            out: DoubleArray,
+            offset: Int
+        ) {
+            if (gainDb >= 0.0) {
+                matchedBoostCoeffs(gainDb, f0, q, sampleRate, out, offset)
+                return
+            }
+            matchedBoostCoeffs(-gainDb, f0, q, sampleRate, out, offset)
+            // Recíproco: numerador y denominador se intercambian y se renormaliza a a0 = 1.
+            val inv = 1.0 / out[offset]
+            val b1 = out[offset + 1]
+            val b2 = out[offset + 2]
+            out[offset] = inv
+            out[offset + 1] = out[offset + 3] * inv
+            out[offset + 2] = out[offset + 4] * inv
+            out[offset + 3] = b1 * inv
+            out[offset + 4] = b2 * inv
+        }
+
+        /** Realce casado ([gainDb] ≥ 0). Ver [matchedPeakCoeffs], que es su único llamador. */
+        private fun matchedBoostCoeffs(
+            gainDb: Double,
+            f0: Double,
+            q: Double,
+            sampleRate: Double,
+            out: DoubleArray,
+            offset: Int
+        ) {
+            val a = 10.0.pow(gainDb / 40.0)
+            val w0 = 2.0 * PI * f0 / sampleRate
+            // (1) Polos del resonador analógico s² + s/(A·Q) + 1 por su envolvente impulsional.
+            val damp = 1.0 / (2.0 * a * q)
+            val decay = exp(-damp * w0)
+            // La rama cosh es el caso sobreamortiguado (damp > 1, o sea Q·A < 0.5). Con los Q de
+            // esta clase y A ≥ 1 no se alcanza, pero un sqrt de negativo aquí sería NaN en el hilo
+            // de audio: si algún día se añade una banda con Q < 0.5, esto sigue dando un filtro.
+            val a1 = if (damp <= 1.0) {
+                -2.0 * decay * cos(sqrt(1.0 - damp * damp) * w0)
+            } else {
+                -2.0 * decay * cosh(sqrt(damp * damp - 1.0) * w0)
+            }
+            val a2 = decay * decay
+            // (2) |A| en los tres puntos de ajuste, vía la identidad de Vicanek.
+            val aDc = 1.0 + a1 + a2
+            val aNyq = 1.0 - a1 + a2
+            val halfSin = sin(w0 / 2.0)
+            val phi0 = halfSin * halfSin
+            val aCenter2 =
+                aDc * aDc - 4.0 * (a1 + 4.0 * a2 + a1 * a2) * phi0 + 16.0 * a2 * phi0 * phi0
+            // |H| del prototipo analógico en Nyquist (Ω = (fs/2)/f0).
+            val om = sampleRate / (2.0 * f0)
+            val flat = (1.0 - om * om) * (1.0 - om * om)
+            val zero = om * a / q
+            val pole = om / (a * q)
+            val mNyq = sqrt((flat + zero * zero) / (flat + pole * pole))
+            // (3) b0+b1+b2 lo fija DC (|H| = 1), b0-b1+b2 lo fija Nyquist, y el centro cierra el
+            // sistema sobre b0·b2 (raíces de x² - S·x + P).
+            val bSum = aDc
+            val bDiff = mNyq * aNyq
+            val b1 = (bSum - bDiff) / 2.0
+            val s = (bSum + bDiff) / 2.0
+            val center2 = 10.0.pow(gainDb / 10.0) * aCenter2
+            val p = (center2 - bSum * bSum + 4.0 * b1 * s * phi0) / (16.0 * phi0 * (phi0 - 1.0))
+            var disc = s * s - 4.0 * p
+            // Barrido completo del rango de uso: disc nunca sale negativa para un REALCE (mínimo
+            // normalizado medido 1.3e-7, en el filtro casi-identidad de 31 Hz). El clamp está para
+            // que un redondeo en el borde no propague un NaN por toda la cascada.
+            if (disc < 0.0) disc = 0.0
+            val b0 = (s + sqrt(disc)) / 2.0
+            out[offset] = b0
+            out[offset + 1] = b1
+            out[offset + 2] = s - b0
+            out[offset + 3] = a1
+            out[offset + 4] = a2
+        }
     }
 
     /**
      * Frecuencias + ganancias + refuerzos como snapshot ATÓMICO: el hilo de audio lo lee entero.
+     *
+     * Es `data class` por el [copy]: los setters cambian UN campo y arrastran el resto, y con un
+     * constructor posicional cada campo nuevo obliga a tocar los seis setters con el riesgo de
+     * olvidar uno en silencio. El `equals`/`hashCode` generados no se usan (comparar `FloatArray`
+     * sería por referencia).
      */
-    private class EqConfig(
+    private data class EqConfig(
         val frequencies: FloatArray,
         val gainsDb: FloatArray,
         val bassBoostDb: Float,
-        val trebleBoostDb: Float
+        val trebleBoostDb: Float,
+        val bassBoostFreq: Double,
+        val trebleBoostFreq: Double,
+        val preampDb: Float,
+        val limiterThresholdDb: Float
     )
 
     @Volatile
     private var enabled = false
 
     @Volatile
-    private var config = EqConfig(BANDS_5, FloatArray(BANDS_5.size), 0f, 0f)
+    private var config = EqConfig(
+        BANDS_5, FloatArray(BANDS_5.size), 0f, 0f,
+        BASS_BOOST_FREQ_DEFAULT_HZ, TREBLE_BOOST_FREQ_DEFAULT_HZ, 0f, LIMITER_THRESHOLD_MAX_DB
+    )
 
     @Volatile
     private var coeffsDirty = true
@@ -225,6 +713,14 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
     private var appliedDb: DoubleArray = DoubleArray(0)
     private var currentDb: DoubleArray = DoubleArray(0)
 
+    /**
+     * Preamp: se suaviza EN dB con el mismo one-pole que las bandas y se convierte a lineal una
+     * vez por bloque. Un escalón de ganancia global daría exactamente el mismo zipper noise que se
+     * corrigió en las bandas, así que no puede ir sin rampa.
+     */
+    private var preampTargetDb = 0.0
+    private var preampCurrentDb = 0.0
+
     /** `e^{-jω}` en cada frecuencia central de BANDA, precalculado para el punto fijo. */
     private var centerZRe: DoubleArray = DoubleArray(0)
     private var centerZIm: DoubleArray = DoubleArray(0)
@@ -233,23 +729,116 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
     private var smoothingActive = false
 
     /**
+     * Centro OBJETIVO de cada refuerzo. El centro ACTUAL vive en `filterFreq[bandCount]` y
+     * `filterFreq[bandCount + 1]`, y persigue a estos con el mismo one-pole que las ganancias
+     * (ver [advanceBoostFreq]): sin eso, arrastrar el slider del centro escribía coeficientes
+     * nuevos sobre el estado viejo del biquad en cada frame, por escalón — exactamente el zipper
+     * noise que la propiedad 2 del kdoc de la clase corrigió para las ganancias, colado por la
+     * puerta de al lado.
+     *
+     * Arrancan en el default y no en 0 para que la primera pasada tenga un valor válido aunque el
+     * bloque de `coeffsDirty` no hubiera corrido todavía (0 Hz daría un filtro sin sentido).
+     */
+    private var bassBoostTargetFreq = BASS_BOOST_FREQ_DEFAULT_HZ
+    private var trebleBoostTargetFreq = TREBLE_BOOST_FREQ_DEFAULT_HZ
+
+
+    /**
      * La curva debe aplicarse DE GOLPE en el siguiente buffer. Lo arma [onFlush]: rampar tiene
      * sentido cuando el usuario mueve un slider, no al configurar la pipeline ni tras un seek —
      * si no, el primer buffer de cada canción saldría plano y el EQ "entraría" con un fade.
      */
     private var snapPending = true
 
-    // Coeficientes de trabajo del punto fijo: campos en vez de objeto, para no asignar.
-    private var scratchB0 = 0.0
-    private var scratchB1 = 0.0
-    private var scratchB2 = 0.0
-    private var scratchA1 = 0.0
-    private var scratchA2 = 0.0
+    /**
+     * Coeficientes de trabajo (b0,b1,b2,a1,a2): UN array preasignado, no cinco campos. Cambió al
+     * compartir el diseño del filtro con [EqCurve] ([matchedPeakCoeffs] escribe en un array con
+     * offset, que es la forma que le sirve a las dos rutas). Escribir en un array ya asignado no
+     * viola la regla de cero asignación.
+     */
+    private val scratchCoeffs = DoubleArray(COEFFS_PER_FILTER)
 
-    // Limitador: envolvente de pico compartida entre canales (preserva la imagen estéreo) y
-    // coeficiente de release por muestra INTERCALADA (se fija en ensureFilters).
-    private var limiterEnv = 0.0
-    private var limiterReleaseCoeff = 0.9999
+    // --- Limitador con lookahead. Todo preasignado en [ensureFilters], como el resto.
+    //
+    // La línea de retardo está SIEMPRE activa mientras lo esté el EQ, incluso con el limitador
+    // apagado (entonces la ganancia es 1.0 y el retardo solo copia). Así la latencia del processor
+    // no depende del toggle, y encenderlo o apagarlo en caliente no produce un salto en el audio
+    // — que es lo que pasaría si la cadena cambiara de longitud a mitad de una canción.
+
+    @Volatile
+    private var limiterEnabled = false
+
+    /**
+     * Umbral en amplitud lineal, derivado del dB del config una vez por bloque (no por muestra:
+     * `pow` es caro y el valor solo cambia cuando el usuario mueve el slider).
+     */
+    private var limiterThreshold = 1.0
+
+    /**
+     * Retardo circular de [limiterDelayFrames] frames, intercalado por canal.
+     *
+     * [limiterDelayFrames] = [limiterLookaheadFrames] + [TRUE_PEAK_DELAY_FRAMES]: la ventana de
+     * rampa MÁS el retardo de grupo del detector true-peak. La contabilidad está en el kdoc de
+     * [TRUE_PEAK_DELAY_FRAMES] y es lo que sostiene la garantía del techo.
+     */
+    private var limiterDelay: DoubleArray = DoubleArray(0)
+    private var limiterDelayFrames = 0
+    private var limiterDelayPos = 0
+
+    /**
+     * Frames de la ventana de rampa (lookahead puro, SIN el retardo del detector). De aquí sale
+     * [limiterAttackSlew] — y no de [limiterDelayFrames], que es más largo.
+     */
+    private var limiterLookaheadFrames = 0
+
+    /** Muestras del frame en curso (ya con preamp y biquads), antes de entrar al retardo. */
+    private var limiterFrame: DoubleArray = DoubleArray(0)
+
+    /**
+     * Historia del detector true-peak: [TRUE_PEAK_TAPS_PER_PHASE] muestras por canal, DUPLICADAS
+     * (2·M por canal). Cada muestra se escribe en `pos` y en `pos + M`, de modo que la ventana de
+     * las M últimas queda siempre CONTIGUA en `[pos+1, pos+M]` y el FIR la recorre sin un `%` por
+     * tap. Ese módulo por tap serían 96 divisiones por frame en el hilo de audio.
+     */
+    private var truePeakHistory: DoubleArray = DoubleArray(0)
+    private var truePeakPos = 0
+
+    /** Acumulador de las [TRUE_PEAK_PHASES] fases del frame en curso. Preasignado y reutilizado. */
+    private var truePeakAcc: DoubleArray = DoubleArray(0)
+
+    // Máximo deslizante de la ventana de lookahead por DEQUE MONÓTONO sobre arrays circulares:
+    // O(1) amortizado y cero asignaciones. Guarda valor + posición absoluta del frame para poder
+    // expirar por ventana. Ver [pushLimiterPeak].
+    private var limiterDequeVal: DoubleArray = DoubleArray(0)
+    private var limiterDequePos: LongArray = LongArray(0)
+    private var limiterDequeHead = 0
+    private var limiterDequeTail = 0
+    private var limiterDequeCount = 0
+    private var limiterFramePos = 0L
+
+    /** Ganancia aplicada y los dos estados de release cuyo mínimo la gobierna (ver constantes). */
+    private var limiterGain = 1.0
+    private var limiterGainFast = 1.0
+    private var limiterGainSlow = 1.0
+
+    /** Derivados del sample rate en [ensureFilters]: pendiente máxima de bajada y releases. */
+    private var limiterAttackSlew = 1.0
+    private var limiterReleaseFast = 0.0
+    private var limiterReleaseSlow = 0.0
+    private var limiterSlowAttack = 0.0
+
+    /**
+     * Reducción MÁXIMA que el limitador calculó en el último bloque, en dB positivos (0 = no habría
+     * tocado nada). La lee la UI para el medidor, y ese medidor es la parte anti-humo del asunto:
+     * un procesador que se puede ver NO trabajando es lo contrario de un placebo.
+     *
+     * Se calcula ESTÉ O NO aplicándose ([limiterEnabled]): apagado, el número es lo que reduciría.
+     * Es lo que convierte el medidor en un diagnóstico útil para decidir si hace falta encenderlo,
+     * en vez de en un adorno que solo funciona cuando ya tomaste la decisión.
+     */
+    @Volatile
+    var gainReductionDb: Float = 0f
+        private set
 
     fun isEnabled(): Boolean = enabled
 
@@ -264,7 +853,7 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         if (band !in current.gainsDb.indices) return
         val next = current.gainsDb.copyOf()
         next[band] = db.coerceIn(-MAX_GAIN_DB, MAX_GAIN_DB)
-        config = EqConfig(current.frequencies, next, current.bassBoostDb, current.trebleBoostDb)
+        config = current.copy(gainsDb = next)
         coeffsDirty = true
     }
 
@@ -277,9 +866,7 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         val gains = FloatArray(frequencies.size) { i ->
             (gainsDb.getOrNull(i) ?: 0f).coerceIn(-MAX_GAIN_DB, MAX_GAIN_DB)
         }
-        config = EqConfig(
-            frequencies.copyOf(), gains, current.bassBoostDb, current.trebleBoostDb
-        )
+        config = current.copy(frequencies = frequencies.copyOf(), gainsDb = gains)
         coeffsDirty = true
     }
 
@@ -288,7 +875,7 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         val next = FloatArray(current.frequencies.size) { i ->
             (db.getOrNull(i) ?: 0f).coerceIn(-MAX_GAIN_DB, MAX_GAIN_DB)
         }
-        config = EqConfig(current.frequencies, next, current.bassBoostDb, current.trebleBoostDb)
+        config = current.copy(gainsDb = next)
         coeffsDirty = true
     }
 
@@ -297,7 +884,7 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         val current = config
         val value = db.coerceIn(0f, MAX_BOOST_DB)
         if (value == current.bassBoostDb) return
-        config = EqConfig(current.frequencies, current.gainsDb, value, current.trebleBoostDb)
+        config = current.copy(bassBoostDb = value)
         coeffsDirty = true
     }
 
@@ -306,7 +893,29 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         val current = config
         val value = db.coerceIn(0f, MAX_BOOST_DB)
         if (value == current.trebleBoostDb) return
-        config = EqConfig(current.frequencies, current.gainsDb, current.bassBoostDb, value)
+        config = current.copy(trebleBoostDb = value)
+        coeffsDirty = true
+    }
+
+    /**
+     * Centro del refuerzo de graves en Hz. EN VIVO: no cambia el layout de la cascada (los dos
+     * biquads de refuerzo siguen ahí), así que no reconstruye nada — solo marca los coeficientes
+     * como sucios.
+     */
+    fun setBassBoostFreq(hz: Double) {
+        val current = config
+        val value = hz.coerceIn(BASS_BOOST_FREQ_MIN_HZ, BASS_BOOST_FREQ_MAX_HZ)
+        if (value == current.bassBoostFreq) return
+        config = current.copy(bassBoostFreq = value)
+        coeffsDirty = true
+    }
+
+    /** Centro del refuerzo de agudos en Hz. EN VIVO, igual que [setBassBoostFreq]. */
+    fun setTrebleBoostFreq(hz: Double) {
+        val current = config
+        val value = hz.coerceIn(TREBLE_BOOST_FREQ_MIN_HZ, TREBLE_BOOST_FREQ_MAX_HZ)
+        if (value == current.trebleBoostFreq) return
+        config = current.copy(trebleBoostFreq = value)
         coeffsDirty = true
     }
 
@@ -314,16 +923,74 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
 
     fun getTrebleBoost(): Float = config.trebleBoostDb
 
+
+    fun getBassBoostFreq(): Double = config.bassBoostFreq
+
+    fun getTrebleBoostFreq(): Double = config.trebleBoostFreq
+
+    /**
+     * Ganancia global PREVIA a los filtros, en dB ([PREAMP_MIN_DB]..[PREAMP_MAX_DB]). EN VIVO.
+     *
+     * En una cadena lineal da exactamente igual si va antes o después de los biquads —un escalar
+     * conmuta con un filtro LTI, y aquí no hay ninguna saturación intermedia que rompa esa
+     * equivalencia—, pero va DELANTE por convención: es el mismo "Preamp" que encabeza los
+     * perfiles paramétricos de Equalizer APO y AutoEQ, donde significa precisamente esto. El
+     * "pre" viene de la era del punto fijo, donde el orden sí decidía dónde desbordaba.
+     */
+    fun setPreamp(db: Float) {
+        val current = config
+        val value = db.coerceIn(PREAMP_MIN_DB, PREAMP_MAX_DB)
+        if (value == current.preampDb) return
+        config = current.copy(preampDb = value)
+        coeffsDirty = true
+    }
+
+    fun getPreamp(): Float = config.preampDb
+
+    /**
+     * Enciende/apaga el limitador SIN reconstruir la pipeline: la línea de retardo sigue activa
+     * pase lo que pase (ver los campos del limitador), así que apagarlo solo deja la ganancia
+     * clavada en 1.0 y no cambia la latencia.
+     */
+    fun setLimiterEnabled(value: Boolean) {
+        limiterEnabled = value
+    }
+
+    fun isLimiterEnabled(): Boolean = limiterEnabled
+
+    /**
+     * Umbral del limitador en dBFS ([LIMITER_THRESHOLD_MIN_DB]..[LIMITER_THRESHOLD_MAX_DB]).
+     * EN VIVO: no cambia el layout de nada, solo el nivel a partir del cual se calcula la
+     * reducción. El salto de objetivo que provoca lo absorben la rampa de ataque y el release,
+     * que ya están ahí — no hace falta suavizarlo aparte.
+     */
+    fun setLimiterThreshold(db: Float) {
+        val current = config
+        val value = db.coerceIn(LIMITER_THRESHOLD_MIN_DB, LIMITER_THRESHOLD_MAX_DB)
+        if (value == current.limiterThresholdDb) return
+        config = current.copy(limiterThresholdDb = value)
+        coeffsDirty = true
+    }
+
+    fun getLimiterThreshold(): Float = config.limiterThresholdDb
+
+
     /** Las ganancias PEDIDAS (lo que muestra la UI), no las compensadas que se aplican. */
     fun getBandGains(): FloatArray = config.gainsDb.copyOf()
 
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
+        // El `enabled` va PRIMERO, antes de mirar el encoding: con el EQ apagado este processor
+        // tiene que ser transparente ante CUALQUIER formato (NOT_SET = inactivo, la pipeline queda
+        // idéntica a la stock). Al revés —comprobando el encoding antes— un formato que no fuera
+        // 16-bit ni float tumbaba el sink con una UnhandledAudioFormatException por un processor
+        // que ni siquiera iba a hacer nada; o sea que apagar el EQ no bastaba para quitarlo de en
+        // medio, que es justo lo único que se le pide a un módulo desactivado.
+        if (!enabled) return AudioProcessor.AudioFormat.NOT_SET
         if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT &&
             inputAudioFormat.encoding != C.ENCODING_PCM_FLOAT
         ) {
             throw AudioProcessor.UnhandledAudioFormatException(inputAudioFormat)
         }
-        if (!enabled) return AudioProcessor.AudioFormat.NOT_SET
         coeffsDirty = true
         return AudioProcessor.AudioFormat(
             inputAudioFormat.sampleRate,
@@ -343,10 +1010,31 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         val frames = if (channels > 0) samples / channels else 0
 
         // Orden: (1) layout → (2) compensación de interacción → (3) suavizado → (4) coeficientes.
+        //
+        // La bandera se limpia ANTES de leer el config, y ese orden es load-bearing: si la UI
+        // escribe un config nuevo entre las dos lecturas, vuelve a marcarla y el siguiente buffer
+        // recoge el valor. Al revés —snapshot primero y limpiar después— el hilo de audio aplicaba
+        // el config VIEJO y borraba la marca del nuevo, así que el último valor de un slider (justo
+        // el que queda al soltar el dedo) se podía perder PARA SIEMPRE.
+        //
+        // La limpieza es CONDICIONAL y eso también es load-bearing: escribir false incondicional
+        // dejaba una ventana de una instrucción en la que una marca recién puesta por la UI se
+        // pisaba con dirty leído en false — la misma pérdida, por una rendija más chica. Si solo
+        // se limpia habiendo leído true, el único caso que borra la marca lee el config DESPUÉS
+        // de borrarla, así que cualquier cambio anterior queda capturado en el snapshot y
+        // cualquier cambio posterior la vuelve a poner. Sin atómicas: es el patrón
+        // read-then-conditional-clear, que con un solo consumidor no pierde avisos.
+        val dirty = coeffsDirty
+        if (dirty) coeffsDirty = false
         val snapshot = config
-        ensureFilters(snapshot.frequencies, channels, sampleRate)
-        if (coeffsDirty) {
-            coeffsDirty = false
+        // Devuelve `true` si tuvo que rehacer el layout: ese es el segundo motivo para recalcular, y
+        // se COMBINA con la bandera en vez de marcarla (marcarla después de haberla limpiado dejaba
+        // un recálculo redundante colgando para el buffer siguiente).
+        val layoutChanged = ensureFilters(
+            snapshot.frequencies, channels, sampleRate,
+            snapshot.bassBoostFreq, snapshot.trebleBoostFreq
+        )
+        if (dirty || layoutChanged) {
             // Sin getOrNull: devuelve Float? y eso BOXEA en el hilo de audio.
             val gains = snapshot.gainsDb
             for (i in 0 until bandCount) {
@@ -354,6 +1042,14 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
             }
             targetDb[bandCount] = snapshot.bassBoostDb.toDouble()
             targetDb[bandCount + 1] = snapshot.trebleBoostDb.toDouble()
+            // Los CENTROS de los refuerzos se refrescan aquí y no en [ensureFilters]: esa solo
+            // corre cuando cambia el layout de bandas, los canales o el sample rate, y el usuario
+            // puede mover la frecuencia sin que ninguna de las tres cambie. Aquí solo se fija el
+            // OBJETIVO; el valor que leen los coeficientes lo rampa [advanceBoostFreq].
+            bassBoostTargetFreq = snapshot.bassBoostFreq
+            trebleBoostTargetFreq = snapshot.trebleBoostFreq
+            preampTargetDb = snapshot.preampDb.toDouble()
+            limiterThreshold = 10.0.pow(snapshot.limiterThresholdDb / 20.0)
             recomputeCompensation()
             smoothingActive = true
         }
@@ -361,45 +1057,265 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
             snapPending = false
             smoothingActive = false
             for (i in currentDb.indices) currentDb[i] = appliedDb[i]
+            preampCurrentDb = preampTargetDb
+            // Los centros también hacen snap: rampar la frecuencia a través de un configure o un
+            // seek tendría el mismo sinsentido que rampar la ganancia (ver [snapPending]).
+            filterFreq[bandCount] = bassBoostTargetFreq
+            filterFreq[bandCount + 1] = trebleBoostTargetFreq
             updateCoefficients()
         } else if (smoothingActive) {
             advanceSmoothing(frames, sampleRate)
         }
 
-        val output = replaceOutputBuffer(samples * 4)
-        // Limitador SOLO con filtros activos (y si el experimento lo tiene habilitado);
-        // curva plana = bit-perfect.
-        val limiting = LIMITER_ENABLED && activeCount > 0
-        var env = limiterEnv
-        val release = limiterReleaseCoeff
+        val output = replaceOutputBuffer(frames * channels * 4)
+        // Un preamp de 0 dB da 1.0 EXACTO, y multiplicar por 1.0 no altera ni un bit: con la curva
+        // plana la salida sigue siendo bit-perfect (solo retardada por el lookahead).
+        val preamp = if (preampCurrentDb == 0.0) 1.0 else 10.0.pow(preampCurrentDb / 20.0)
         val cascade = filters
         val indices = activeIndices
         val count = activeCount
+        val frame = limiterFrame
+        val delay = limiterDelay
+        val delayFrames = limiterDelayFrames
+        val limiting = limiterEnabled
+        val threshold = limiterThreshold
+        var minGain = 1.0
 
-        var channel = 0
-        while (inputBuffer.remaining() >= bytesPerSample) {
-            var sample = if (floatInput) {
-                inputBuffer.float.toDouble()
-            } else {
-                inputBuffer.short / 32768.0
+        var f = 0
+        while (f < frames) {
+            // (1) Preamp + cascada de biquads sobre el frame entero, quedándose con su pico. El
+            // pico es COMPARTIDO entre canales a propósito: una ganancia distinta por canal
+            // movería la imagen estéreo en cada transitorio.
+            var framePeak = 0.0
+            var ch = 0
+            while (ch < channels) {
+                var sample = if (floatInput) {
+                    inputBuffer.float.toDouble()
+                } else {
+                    inputBuffer.short / 32768.0
+                }
+                sample *= preamp
+                for (k in 0 until count) {
+                    sample = cascade[indices[k]].process(sample, ch)
+                }
+                frame[ch] = sample
+                val mag = if (sample < 0) -sample else sample
+                if (mag > framePeak) framePeak = mag
+                // Historia del detector, duplicada para que su ventana quede contigua.
+                val histBase = ch * TRUE_PEAK_SPAN
+                truePeakHistory[histBase + truePeakPos] = sample
+                truePeakHistory[histBase + truePeakPos + TRUE_PEAK_TAPS_PER_PHASE] = sample
+                ch++
             }
-            for (k in 0 until count) {
-                sample = cascade[indices[k]].process(sample, channel)
+            // (1b) Pico TRUE-PEAK: las cuatro estimaciones inter-muestra de cada canal, contra el
+            // pico de muestra. El máximo de los dos es lo que entra en la ventana — así el techo
+            // sobre las muestras se sigue cumpliendo exactamente aunque el estimador se quede
+            // corto, y de paso el medidor pasa a reflejar el overshoot inter-muestra, que es lo
+            // que de verdad recorta aguas abajo. Ver [TRUE_PEAK_PHASES].
+            ch = 0
+            while (ch < channels) {
+                val tp = truePeakOf(ch)
+                if (tp > framePeak) framePeak = tp
+                ch++
             }
-            if (limiting) {
-                // Peak limiter: la envolvente sigue el pico (ataque instantáneo) y decae con
-                // release exponencial; la ganancia (threshold/env) reduce SOLO mientras la
-                // señal filtrada superaría el techo. Gain riding suave, no satura la onda.
-                val ax = if (sample < 0) -sample else sample
-                env = if (ax > env) ax else env * release
-                if (env > LIMITER_THRESHOLD) sample *= LIMITER_THRESHOLD / env
+            truePeakPos++
+            if (truePeakPos == TRUE_PEAK_TAPS_PER_PHASE) truePeakPos = 0
+
+            // (2) El pico entra en la ventana ANTES de que su frame salga del retardo: en eso
+            // consiste el lookahead. El máximo deslizante mantiene el objetivo bajo mientras el
+            // pico siga en vuelo, así que la rampa de (3) dispone de la ventana entera.
+            val peakAhead = pushLimiterPeak(framePeak)
+
+            // (3) Objetivo y transición. BAJADA por rampa lineal acotada a [limiterAttackSlew] =
+            // 1/lookaheadFrames por frame: como la caída máxima posible es 1.0 (la ganancia vive
+            // en (0,1]), eso GARANTIZA llegar al objetivo dentro de la ventana — o sea, techo
+            // respetado y sin un solo escalón de ganancia. SUBIDA por los dos releases, el mínimo.
+            val target = if (peakAhead > threshold) threshold / peakAhead else 1.0
+            if (target < limiterGain) {
+                limiterGain -= limiterAttackSlew
+                if (limiterGain < target) limiterGain = target
+                // La RÁPIDA se sincroniza: eso es lo que hace que el release arranque exactamente
+                // donde acabó el ataque (sin ese enganche, el mínimo podría saltar hacia arriba).
+                limiterGainFast = limiterGain
+                // La LENTA no. Persigue la ganancia aplicada con su propio ataque one-pole, así que
+                // un transitorio suelto apenas la mueve (se queda arriba → gobierna la rápida →
+                // ~50 ms) y una limitación sostenida la hace converger (→ gobierna la lenta → sin
+                // pumping). Sincronizarla, como hacía la primera versión, dejaba la etapa rápida
+                // MUERTA: ver [LIMITER_RELEASE_FAST_SECONDS]. Nunca puede adelantar a limiterGain
+                // (viene de arriba y el one-pole no sobrepasa), así que el mínimo no la elige aquí.
+                limiterGainSlow += (limiterGain - limiterGainSlow) * limiterSlowAttack
+            } else if (limiterGain < 1.0) {
+                limiterGainFast += (target - limiterGainFast) * limiterReleaseFast
+                limiterGainSlow += (target - limiterGainSlow) * limiterReleaseSlow
+                limiterGain =
+                    if (limiterGainFast < limiterGainSlow) limiterGainFast else limiterGainSlow
+                if (limiterGain > target) limiterGain = target
+                // Cierre del release: los one-pole son asintóticos y sin esto la ganancia nunca
+                // vuelve a 1.0 exacto (ver [LIMITER_GAIN_SNAP_EPSILON]). Las tres a la vez, para
+                // que las envolventes no arranquen el siguiente ataque desde un valor distinto
+                // del aplicado.
+                if (target >= 1.0 && 1.0 - limiterGain < LIMITER_GAIN_SNAP_EPSILON) {
+                    limiterGain = 1.0
+                    limiterGainFast = 1.0
+                    limiterGainSlow = 1.0
+                }
             }
-            output.putFloat(sample.toFloat())
-            channel++
-            if (channel == channels) channel = 0
+            val gain = if (limiting) limiterGain else 1.0
+            // Se MIDE `limiterGain` y no `gain`: con el limitador apagado el medidor sigue
+            // diciendo cuánto REDUCIRÍA. Sin eso, para saber si te hace falta tendrías que
+            // encenderlo, y el dato que informa esa decisión desaparecía justo al plantearla.
+            if (limiterGain < minGain) minGain = limiterGain
+
+            // (4) Sale el frame de hace [delayFrames] y el actual ocupa su hueco.
+            val base = limiterDelayPos * channels
+            ch = 0
+            while (ch < channels) {
+                output.putFloat((delay[base + ch] * gain).toFloat())
+                delay[base + ch] = frame[ch]
+                ch++
+            }
+            limiterDelayPos++
+            if (limiterDelayPos == delayFrames) limiterDelayPos = 0
+            f++
         }
-        limiterEnv = env
+        // Los buffers de audio vienen alineados a frame. Si alguna vez no lo estuvieran, se
+        // descarta la cola en lugar de dejar el buffer a medio consumir — el sink lo interpretaría
+        // como que el processor se atascó y volvería a entregar lo mismo indefinidamente.
+        inputBuffer.position(inputBuffer.limit())
+        gainReductionDb = if (minGain >= 1.0) 0f else (-20.0 * log10(minGain)).toFloat()
         output.flip()
+    }
+
+    /**
+     * Máximo |interpolado| de las [TRUE_PEAK_PHASES] fases para el canal [ch], o sea el pico
+     * INTER-MUESTRA estimado alrededor de este frame. Ver [TRUE_PEAK_PHASES] para el diseño y
+     * [TRUE_PEAK_DELAY_FRAMES] para la contabilidad del retardo.
+     *
+     * Recorre la historia UNA vez acumulando las cuatro fases a la vez (los taps de un mismo
+     * retardo están contiguos), y se salta las muestras exactamente nulas: en silencio o al arrancar
+     * una pista eso deja el detector en casi nada de trabajo. Sin asignaciones.
+     */
+    private fun truePeakOf(ch: Int): Double {
+        val acc = truePeakAcc
+        var p = 0
+        while (p < TRUE_PEAK_PHASES) {
+            acc[p] = 0.0
+            p++
+        }
+        // La ventana contigua de las M últimas muestras empieza en pos+1 y acaba en pos+M (la más
+        // nueva). El tap `m` multiplica la muestra de hace m frames.
+        val newest = ch * TRUE_PEAK_SPAN + truePeakPos + TRUE_PEAK_TAPS_PER_PHASE
+        var m = 0
+        while (m < TRUE_PEAK_TAPS_PER_PHASE) {
+            val x = truePeakHistory[newest - m]
+            if (x != 0.0) {
+                val off = m * TRUE_PEAK_PHASES
+                p = 0
+                while (p < TRUE_PEAK_PHASES) {
+                    acc[p] += TRUE_PEAK_COEFFS[off + p] * x
+                    p++
+                }
+            }
+            m++
+        }
+        var peak = 0.0
+        p = 0
+        while (p < TRUE_PEAK_PHASES) {
+            val v = acc[p]
+            val mag = if (v < 0) -v else v
+            if (mag > peak) peak = mag
+            p++
+        }
+        return peak
+    }
+
+    /**
+     * Empuja el pico del frame en curso y devuelve el MÁXIMO de la ventana.
+     *
+     * Deque monótono decreciente sobre arrays circulares preasignados: cada frame entra y sale como
+     * mucho una vez, así que es O(1) amortizado y no asigna nada. Un barrido ingenuo del máximo
+     * sería O(ventana) por frame — con 95 frames de ventana, ~8,4 millones de comparaciones por
+     * segundo en el hilo de audio.
+     *
+     * La ventana mide [limiterDelayFrames] (lookahead + retardo del detector) y NO solo el
+     * lookahead: tiene que cubrir el frame que está saliendo del retardo, y con el detector de por
+     * medio la información sobre ese frame llegó unas posiciones más tarde. Sobra margen a
+     * propósito — mantener el máximo unas décimas de milisegundo de más es inocuo, quedarse corto
+     * dejaría salir un pico sin gobernar.
+     *
+     * Expira ANTES de insertar, y eso es load-bearing: así la ventana deja hueco garantizado para
+     * el frame nuevo y el deque nunca puede desbordar su capacidad (ventana + 1). Al revés, con
+     * la ventana llena, la escritura pisaría la cabeza.
+     */
+    private fun pushLimiterPeak(peak: Double): Double {
+        val cap = limiterDequeVal.size
+        val pos = limiterFramePos
+        limiterFramePos = pos + 1
+        val oldest = pos - limiterDelayFrames
+        while (limiterDequeCount > 0 && limiterDequePos[limiterDequeHead] < oldest) {
+            limiterDequeHead++
+            if (limiterDequeHead == cap) limiterDequeHead = 0
+            limiterDequeCount--
+        }
+        // Todo lo que ya sea menor o igual que el pico nuevo no puede volver a ser máximo: sale.
+        while (limiterDequeCount > 0) {
+            val tailPrev = if (limiterDequeTail == 0) cap - 1 else limiterDequeTail - 1
+            if (limiterDequeVal[tailPrev] > peak) break
+            limiterDequeTail = tailPrev
+            limiterDequeCount--
+        }
+        limiterDequeVal[limiterDequeTail] = peak
+        limiterDequePos[limiterDequeTail] = pos
+        limiterDequeTail++
+        if (limiterDequeTail == cap) limiterDequeTail = 0
+        limiterDequeCount++
+        return limiterDequeVal[limiterDequeHead]
+    }
+
+    /**
+     * Fin de pista: en la línea de retardo quedan [limiterDelayFrames] frames ya procesados que
+     * todavía no han salido. Sin volcarlos aquí, cada canción perdería sus últimos milisegundos —
+     * y en reproducción sin huecos eso ES un hueco.
+     */
+    override fun onQueueEndOfStream() {
+        val channels = filterChannels
+        val delayFrames = limiterDelayFrames
+        if (channels <= 0 || delayFrames <= 0 || limiterDelay.size < delayFrames * channels) return
+        val output = replaceOutputBuffer(delayFrames * channels * 4)
+        val gain = if (limiterEnabled) limiterGain else 1.0
+        var f = 0
+        while (f < delayFrames) {
+            val base = limiterDelayPos * channels
+            var ch = 0
+            while (ch < channels) {
+                output.putFloat((limiterDelay[base + ch] * gain).toFloat())
+                limiterDelay[base + ch] = 0.0
+                ch++
+            }
+            limiterDelayPos++
+            if (limiterDelayPos == delayFrames) limiterDelayPos = 0
+            f++
+        }
+        output.flip()
+    }
+
+    /** Deja el limitador como recién configurado: sin retardo acumulado y sin reducción. */
+    private fun resetLimiterState() {
+        limiterDelay.fill(0.0)
+        limiterDelayPos = 0
+        // La historia del detector también: si no, tras un seek las primeras estimaciones
+        // interpolarían entre el audio nuevo y el de antes del salto, y un pico inventado ahí
+        // agacharía la ganancia sin que nada lo justifique.
+        truePeakHistory.fill(0.0)
+        truePeakPos = 0
+        limiterDequeHead = 0
+        limiterDequeTail = 0
+        limiterDequeCount = 0
+        limiterFramePos = 0L
+        limiterGain = 1.0
+        limiterGainFast = 1.0
+        limiterGainSlow = 1.0
+        gainReductionDb = 0f
     }
 
     override fun onFlush() {
@@ -409,7 +1325,9 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         snapPending = true
         smoothingActive = false
         for (filter in filters) filter.clearState()
-        limiterEnv = 0.0
+        // El retardo guarda audio de ANTES del salto: soltarlo tras un seek sonaría como un eco
+        // del punto anterior, y su pico ya expirado seguiría gobernando la ganancia.
+        resetLimiterState()
     }
 
     override fun onReset() {
@@ -428,7 +1346,18 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         filterSampleRate = 0.0
         smoothingActive = false
         snapPending = true
-        limiterEnv = 0.0
+        limiterDelay = DoubleArray(0)
+        limiterFrame = DoubleArray(0)
+        limiterDequeVal = DoubleArray(0)
+        limiterDequePos = LongArray(0)
+        limiterDelayFrames = 0
+        limiterLookaheadFrames = 0
+        truePeakHistory = DoubleArray(0)
+        truePeakAcc = DoubleArray(0)
+        resetLimiterState()
+        preampCurrentDb = 0.0
+        bassBoostTargetFreq = BASS_BOOST_FREQ_DEFAULT_HZ
+        trebleBoostTargetFreq = TREBLE_BOOST_FREQ_DEFAULT_HZ
         coeffsDirty = true
     }
 
@@ -437,8 +1366,20 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
      * nº de canales o el sample rate (es decir: al configurar y al alternar 5↔10, no por buffer).
      * Tras un cambio de layout los índices apuntan a frecuencias distintas, así que el estado
      * arranca de cero: arrastrar estado ajeno mete un transitorio peor.
+     *
+     * Devuelve `true` si rehízo el layout, o sea "hay que recalcular compensación y coeficientes".
+     * ANTES marcaba `coeffsDirty` por su cuenta, y eso choca con el orden que necesita [queueInput]
+     * (limpiar la bandera antes de leer el config): la marca habría quedado puesta DESPUÉS de la
+     * limpieza y habría arrastrado un recálculo redundante al buffer siguiente. Con el Boolean, los
+     * dos motivos —config sucio y layout nuevo— se combinan en el sitio y no se pisan.
      */
-    private fun ensureFilters(frequencies: FloatArray, channels: Int, sampleRate: Double) {
+    private fun ensureFilters(
+        frequencies: FloatArray,
+        channels: Int,
+        sampleRate: Double,
+        bassBoostFreq: Double,
+        trebleBoostFreq: Double
+    ): Boolean {
         // Comparación a mano: `indices.all { }` construye un IntRange, y esto se evalúa en CADA
         // buffer (es la guarda que decide si hay que reasignar). `for (i in x.indices)` sí lo
         // compila Kotlin a un bucle indexado sin objeto intermedio.
@@ -452,7 +1393,7 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
                     break
                 }
             }
-            if (sameLayout) return
+            if (sameLayout) return false
         }
 
         val n = frequencies.size
@@ -465,10 +1406,15 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
             filterFreq[i] = frequencies[i].toDouble()
             filterQ[i] = q
         }
-        filterFreq[n] = BASS_BOOST_FREQ_HZ
         filterQ[n] = BOOST_Q
-        filterFreq[n + 1] = TREBLE_BOOST_FREQ_HZ
         filterQ[n + 1] = BOOST_Q
+        // Los CENTROS de los refuerzos se SIEMBRAN aquí con el valor del config (los arrays son
+        // nuevos y arrancarían en 0.0, que como frecuencia no significa nada y ni siquiera admite
+        // el suavizado logarítmico). Un layout nuevo estrena filtros, así que el centro empieza YA
+        // en su sitio en vez de rampar desde ninguna parte; a partir de ahí quien lo mueve es
+        // [advanceBoostFreq] desde el objetivo del snapshot.
+        filterFreq[n] = bassBoostFreq
+        filterFreq[n + 1] = trebleBoostFreq
 
         filters = Array(total) { Biquad(channels) }
         activeIndices = IntArray(total)
@@ -486,16 +1432,37 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         }
         filterChannels = channels
         filterSampleRate = sampleRate
-        // Release por muestra INTERCALADA (la envolvente avanza una vez por muestra de cada
-        // canal → sampleRate * channels pasos por segundo).
-        limiterReleaseCoeff = exp(-1.0 / (LIMITER_RELEASE_SECONDS * sampleRate * channels))
-        limiterEnv = 0.0
-        // El layout cambió: hay que recalcular compensación y coeficientes desde cero. NO se marca
-        // [snapPending] a propósito — un cambio 5↔10 en caliente entra por rampa desde plano (los
-        // filtros son nuevos y su estado está limpio, así que es la transición más suave posible).
-        // El arranque real ya hace snap por [onFlush], que Media3 llama después de configurar.
-        coeffsDirty = true
+
+        // Limitador: la ventana del lookahead se mide en FRAMES, así que depende del sample rate y
+        // hay que redimensionarla aquí (este es el único sitio donde se puede asignar). El deque
+        // guarda como mucho un frame por posición de la ventana, más el que entra.
+        limiterLookaheadFrames = max(1, (LIMITER_LOOKAHEAD_SECONDS * sampleRate).roundToInt())
+        // El retardo TOTAL suma el retardo de grupo del detector true-peak; la rampa sigue midiendo
+        // solo el lookahead. Ver la contabilidad en [TRUE_PEAK_DELAY_FRAMES].
+        limiterDelayFrames = limiterLookaheadFrames + TRUE_PEAK_DELAY_FRAMES
+        limiterDelay = DoubleArray(limiterDelayFrames * channels)
+        limiterFrame = DoubleArray(channels)
+        limiterDequeVal = DoubleArray(limiterDelayFrames + 1)
+        limiterDequePos = LongArray(limiterDelayFrames + 1)
+        truePeakHistory = DoubleArray(channels * TRUE_PEAK_SPAN)
+        truePeakAcc = DoubleArray(TRUE_PEAK_PHASES)
+        resetLimiterState()
+        // La ganancia baja como mucho 1/lookahead por frame: recorrer todo su rango (1.0 → 0.0)
+        // cuesta exactamente la ventana de rampa, que es lo que queda entre el último frame capaz
+        // de detectar un pico y el frame en que ese pico sale. De ahí sale la garantía de no
+        // sobrepasar el techo. Los releases avanzan una vez por FRAME (no por muestra intercalada,
+        // como el limitador viejo): la ganancia es una sola para todo el frame.
+        limiterAttackSlew = 1.0 / limiterLookaheadFrames
+        limiterReleaseFast = 1.0 - exp(-1.0 / (LIMITER_RELEASE_FAST_SECONDS * sampleRate))
+        limiterReleaseSlow = 1.0 - exp(-1.0 / (LIMITER_RELEASE_SLOW_SECONDS * sampleRate))
+        limiterSlowAttack = 1.0 - exp(-1.0 / (LIMITER_SLOW_ATTACK_SECONDS * sampleRate))
+        // El layout cambió: hay que recalcular compensación y coeficientes desde cero (lo señala el
+        // `true` de vuelta). NO se marca [snapPending] a propósito — un cambio 5↔10 en caliente
+        // entra por rampa desde plano (los filtros son nuevos y su estado está limpio, así que es la
+        // transición más suave posible). El arranque real ya hace snap por [onFlush], que Media3
+        // llama después de configurar.
         smoothingActive = false
+        return true
     }
 
     /**
@@ -535,10 +1502,10 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         for (j in 0 until bandCount) {
             if (abs(gains[j]) < IDENTITY_EPSILON_DB) continue
             computePeakCoeffs(gains[j], filterFreq[j], filterQ[j])
-            val numRe = scratchB0 + scratchB1 * zr + scratchB2 * z2r
-            val numIm = scratchB1 * zi + scratchB2 * z2i
-            val denRe = 1.0 + scratchA1 * zr + scratchA2 * z2r
-            val denIm = scratchA1 * zi + scratchA2 * z2i
+            val numRe = scratchCoeffs[0] + scratchCoeffs[1] * zr + scratchCoeffs[2] * z2r
+            val numIm = scratchCoeffs[1] * zi + scratchCoeffs[2] * z2i
+            val denRe = 1.0 + scratchCoeffs[3] * zr + scratchCoeffs[4] * z2r
+            val denIm = scratchCoeffs[3] * zi + scratchCoeffs[4] * z2i
             val numMag2 = numRe * numRe + numIm * numIm
             val denMag2 = denRe * denRe + denIm * denIm
             if (denMag2 > 0.0 && numMag2 > 0.0) totalDb += 10.0 * log10(numMag2 / denMag2)
@@ -546,18 +1513,12 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         return totalDb
     }
 
-    /** Peaking-EQ RBJ en los campos de scratch (sin asignar objeto). */
+    /**
+     * Peaking-EQ matched en [scratchCoeffs] (sin asignar objeto). La matemática vive en el
+     * companion y la comparte [EqCurve]: ver [matchedPeakCoeffs].
+     */
     private fun computePeakCoeffs(gainDb: Double, freq: Double, q: Double) {
-        val a = 10.0.pow(gainDb / 40.0)
-        val w0 = 2.0 * PI * freq / filterSampleRate
-        val alpha = sin(w0) / (2.0 * q)
-        val cosW0 = cos(w0)
-        val a0 = 1.0 + alpha / a
-        scratchB0 = (1.0 + alpha * a) / a0
-        scratchB1 = (-2.0 * cosW0) / a0
-        scratchB2 = (1.0 - alpha * a) / a0
-        scratchA1 = (-2.0 * cosW0) / a0
-        scratchA2 = (1.0 - alpha / a) / a0
+        matchedPeakCoeffs(gainDb, freq, q, filterSampleRate, scratchCoeffs, 0)
     }
 
     /**
@@ -578,8 +1539,48 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
                 moving = true
             }
         }
+        // El preamp se rampa con el MISMO one-pole: es una ganancia más, y aplicarla de golpe daría
+        // el mismo escalón que se corrigió en las bandas (propiedad 2 del kdoc de la clase).
+        val preampDiff = preampTargetDb - preampCurrentDb
+        if (abs(preampDiff) < GAIN_SNAP_EPSILON_DB) {
+            preampCurrentDb = preampTargetDb
+        } else {
+            preampCurrentDb += preampDiff * alpha
+            moving = true
+        }
+        // Y los CENTROS de los refuerzos, por el mismo motivo: mover el centro cambia los
+        // coeficientes exactamente igual que mover la ganancia, y hasta ahora ese slider los
+        // escribía por ESCALÓN en cada frame de arrastre sobre el estado viejo del biquad.
+        if (advanceBoostFreq(bandCount, bassBoostTargetFreq, alpha)) moving = true
+        if (advanceBoostFreq(bandCount + 1, trebleBoostTargetFreq, alpha)) moving = true
         smoothingActive = moving
         updateCoefficients()
+    }
+
+    /**
+     * Acerca el centro actual del refuerzo [index] a [targetHz] con el mismo one-pole que las
+     * ganancias, pero en dominio LOGARÍTMICO de frecuencia: la interpolación es multiplicativa,
+     * que es como se percibe el tono y como está trazado el propio slider. En lineal, un salto de
+     * 40 a 250 Hz correría al principio y se arrastraría al final.
+     *
+     * `pow(alpha)` es exactamente `exp(lnActual + alpha·(lnObjetivo − lnActual))` con una sola
+     * llamada, y esto corre una vez por BLOQUE, no por muestra. Devuelve si sigue en movimiento.
+     */
+    private fun advanceBoostFreq(index: Int, targetHz: Double, alpha: Double): Boolean {
+        val current = filterFreq[index]
+        // Defensivo: 0 (o negativo) no tiene logaritmo y propagaría un NaN por la cascada entera.
+        // [ensureFilters] siembra el centro, así que no debería pasar nunca.
+        if (current <= 0.0) {
+            filterFreq[index] = targetHz
+            return false
+        }
+        val ratio = targetHz / current
+        if (abs(ratio - 1.0) < FREQ_SNAP_EPSILON_RATIO) {
+            filterFreq[index] = targetHz
+            return false
+        }
+        filterFreq[index] = current * ratio.pow(alpha)
+        return true
     }
 
     /** Vuelca [currentDb] a los biquads y rearma la lista de activos. Sin asignaciones. */
@@ -597,7 +1598,10 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
                 continue
             }
             computePeakCoeffs(gain, filterFreq[i], filterQ[i])
-            filters[i].setCoeffs(scratchB0, scratchB1, scratchB2, scratchA1, scratchA2)
+            filters[i].setCoeffs(
+                scratchCoeffs[0], scratchCoeffs[1], scratchCoeffs[2],
+                scratchCoeffs[3], scratchCoeffs[4]
+            )
             activeIndices[count++] = i
         }
         activeCount = count

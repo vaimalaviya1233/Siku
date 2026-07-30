@@ -6,6 +6,7 @@ import androidx.datastore.preferences.SharedPreferencesMigration
 import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.floatPreferencesKey
@@ -70,15 +71,55 @@ class MusicPreferences(context: Context) {
      * en otro sitio por haber costado ya un bug. Con esto, escribir una preferencia se ve en el
      * mismo frame en todo lo que la observe, sin esperar al disco ni depender de su orden.
      */
-    private val prefs = MutableStateFlow(
-        runBlocking {
+    private val prefs = MutableStateFlow(emptyPreferences())
+
+    /**
+     * ¿La carga inicial leyó el disco de verdad?
+     *
+     * Es la diferencia entre "el usuario no tiene nada guardado" y "no pude leer lo que hay", que
+     * es la MISMA `emptyPreferences()` y hasta la auditoría del 30 jul 2026 no se distinguían. Con
+     * un error transitorio de IO al arrancar, el caché nacía vacío y como cada volcado escribe el
+     * snapshot COMPLETO (`clear()` + volcado), la primera preferencia que tocara el usuario
+     * persistía ese vacío: se iban de golpe las carpetas locales (la app volvía al onboarding), el
+     * delta token, las curvas del EQ y los colores manuales. Un fallo pasajero se convertía en
+     * pérdida definitiva.
+     *
+     * Mientras esto sea `false` el estado en RAM es una suposición, no la verdad, y [update] se
+     * niega a volcarlo (ver allí).
+     */
+    @Volatile
+    private var diskStateKnown = false
+
+    init {
+        runBlocking { loadInitialSnapshot() }
+    }
+
+    /**
+     * Lee el disco reintentando: el primer acceso a DataStore también corre la migración desde
+     * SharedPreferences, así que un fallo aquí no es necesariamente permanente.
+     */
+    private suspend fun loadInitialSnapshot() {
+        repeat(INITIAL_READ_ATTEMPTS) { attempt ->
             try {
-                dataStore.data.first()
-            } catch (_: Exception) {
-                emptyPreferences()
+                prefs.value = dataStore.data.first()
+                diskStateKnown = true
+                return
+            } catch (e: Exception) {
+                android.util.Log.e(
+                    "MusicPreferences",
+                    "Error leyendo preferencias (intento ${attempt + 1}/$INITIAL_READ_ATTEMPTS)",
+                    e
+                )
             }
         }
-    )
+        // Se sigue adelante con el caché vacío —la app tiene que arrancar— pero SIN permiso para
+        // escribirlo encima de lo que haya en disco.
+        android.util.Log.e(
+            "MusicPreferences",
+            "Preferencias ilegibles: se arranca con valores por defecto y NO se persistirá nada " +
+                "hasta poder leer el disco"
+        )
+    }
 
     private val cache: Preferences get() = prefs.value
 
@@ -118,6 +159,11 @@ class MusicPreferences(context: Context) {
         block(mutated)
         val newCache = mutated.toPreferences()
         prefs.value = newCache
+        // Sin una lectura buena del disco, este snapshot NO describe lo que el usuario tiene
+        // guardado: le faltaría todo lo que no se pudo leer. Y como el volcado hace `clear()` +
+        // snapshot completo, persistirlo BORRARÍA esas preferencias en vez de dejarlas intactas.
+        // La app funciona en memoria con los valores por defecto; el disco se queda como está.
+        if (!diskStateKnown) return
         // Se persiste el SNAPSHOT (no se re-ejecuta `block`): así un `block` no idempotente
         // —incremento, append— no se aplica dos veces sobre bases distintas (memoria vs. disco)
         // divergiendo. `trySend` sobre un canal UNLIMITED nunca falla ni bloquea.
@@ -357,12 +403,21 @@ class MusicPreferences(context: Context) {
         it[KEY_SCAN_WHOLE_DEVICE] = enabled
     }
 
+    /**
+     * Borra la sesión de REPRODUCCIÓN (cola, índice, posición, aleatorio).
+     *
+     * NO toca el delta token, aunque lo hizo hasta la auditoría del 30 jul 2026: ese token es
+     * estado del SYNC y no de la sesión, y esto lo llama `SessionStateManager.clearSession()`
+     * desde `MusicController.stop()`, o sea cada vez que se purga la cola entera. Quitar una
+     * carpeta local mientras sonaba música local tiraba el token de OneDrive y el siguiente
+     * auto-scan re-listaba TODO Graph sin que la nube hubiera cambiado. El logout —el único sitio
+     * donde sí hay que limpiarlo— llama a [clearDeltaToken] por su cuenta.
+     */
     fun clearQueue() = update {
         it.remove(KEY_LAST_QUEUE)
         it.remove(KEY_LAST_INDEX)
         it.remove(KEY_LAST_POSITION)
         it.remove(KEY_LAST_SONG_ID)
-        it.remove(KEY_DELTA_TOKEN)
         it.remove(KEY_SHUFFLE_ENABLED)
         it.remove(KEY_ORIGINAL_QUEUE)
     }
@@ -428,12 +483,76 @@ class MusicPreferences(context: Context) {
     fun loadEqBandCount(): Int = (cache[KEY_EQ_BAND_COUNT] ?: 5).let { if (it == 10) 10 else 5 }
 
     // Refuerzos de graves/agudos: NO van por modo de bandas (a diferencia de las ganancias), son
-    // dos peakings anchos fijos que se suman a cualquier curva, así que alternar 5↔10 los conserva.
+    // dos peakings anchos que se suman a cualquier curva, así que alternar 5↔10 los conserva.
     fun saveEqBassBoost(db: Float) = update { it[KEY_EQ_BASS_BOOST] = db }
     fun loadEqBassBoost(): Float = cache[KEY_EQ_BASS_BOOST] ?: 0f
 
     fun saveEqTrebleBoost(db: Float) = update { it[KEY_EQ_TREBLE_BOOST] = db }
     fun loadEqTrebleBoost(): Float = cache[KEY_EQ_TREBLE_BOOST] ?: 0f
+
+    // Centro de cada refuerzo en Hz. Devuelven null cuando el usuario nunca lo tocó, y el DEFAULT
+    // lo pone el consumidor: los valores por defecto y los rangos válidos son del processor, y
+    // esta clase es de la capa de datos — no debe importar `player`. El processor hace `coerceIn`
+    // al rango de todos modos, así que un valor fuera de rango en disco se sanea al aplicarlo.
+    fun saveEqBassFreq(hz: Double) = update { it[KEY_EQ_BASS_FREQ] = hz }
+    fun loadEqBassFreq(): Double? = cache[KEY_EQ_BASS_FREQ]
+
+    fun saveEqTrebleFreq(hz: Double) = update { it[KEY_EQ_TREBLE_FREQ] = hz }
+    fun loadEqTrebleFreq(): Double? = cache[KEY_EQ_TREBLE_FREQ]
+
+    // Preamp del EQ: ganancia global (solo negativa) que devuelve el headroom que consume la
+    // curva. Como los refuerzos, es independiente del modo de bandas.
+    fun saveEqPreamp(db: Float) = update { it[KEY_EQ_PREAMP] = db }
+    fun loadEqPreamp(): Float = cache[KEY_EQ_PREAMP] ?: 0f
+
+    /**
+     * Limitador del EQ. Default APAGADO, y el default ES la decisión de diseño: la app informa y
+     * no corrige por detrás, así que nadie recibe una no linealidad en su cadena sin haberla
+     * pedido. El aviso de headroom dice cuándo haría falta y el medidor enseña cuánto reduciría
+     * ANTES de encenderlo, de modo que la decisión se toma con el dato delante.
+     *
+     * Se valoró y descartó el default ENCENDIDO, que protegería a quien escucha por Bluetooth con
+     * volumen absoluto (donde la atenuación digital del mixer no existe) sin abrir nunca esta
+     * pantalla. Coste asumido: ese usuario se queda sin red hasta que lea el aviso.
+     */
+    fun saveEqLimiterEnabled(enabled: Boolean) = update { it[KEY_EQ_LIMITER] = enabled }
+    fun loadEqLimiterEnabled(): Boolean = cache[KEY_EQ_LIMITER] ?: false
+
+    /**
+     * Reactivo por el mismo motivo que [eqEnabledFlow]: conviven varias instancias de
+     * `PlaybackViewModel` (el overlay del player y la ruta `now_playing`) y un `MutableStateFlow`
+     * por instancia son dos verdades para el mismo ajuste — la que no recibió el toque se queda
+     * con el valor viejo y lo reimpone al reconstruirse.
+     */
+    val eqLimiterEnabledFlow: Flow<Boolean> = prefFlow { it[KEY_EQ_LIMITER] ?: false }
+
+    /**
+     * Umbral del limitador en dBFS. 0 = fondo de escala (pura protección); por debajo se convierte
+     * en un compresor de picos. El rango y el saneado son del processor (capa `player`), como con
+     * los centros de los refuerzos.
+     */
+    fun saveEqLimiterThreshold(db: Float) = update { it[KEY_EQ_LIMITER_THRESHOLD] = db }
+    fun loadEqLimiterThreshold(): Float? = cache[KEY_EQ_LIMITER_THRESHOLD]
+
+    /**
+     * Umbral en AUTOMÁTICO: 0 dBFS fijo, o sea el limitador como pura protección contra el recorte
+     * (true-peak, ver `EqualizerAudioProcessor.LIMITER_THRESHOLD_MAX_DB`) y nada más. Estuvo atado
+     * al pico de la curva hasta el 29 jul 2026, y eso lo convertía en un compresor que engancha en
+     * cuanto hay curva: corregir el nivel por detrás, que es justo lo que este proyecto ya había
+     * rechazado dos veces en el preamp. Quien quiera comprimir picos tiene el slider manual.
+     *
+     * Default true porque es la opción que no exige entender nada; el valor manual se guarda
+     * aparte, así que desmarcarlo devuelve el que el usuario tenía puesto.
+     */
+    fun saveEqLimiterThresholdAuto(auto: Boolean) =
+        update { it[KEY_EQ_LIMITER_THRESHOLD_AUTO] = auto }
+
+    fun loadEqLimiterThresholdAuto(): Boolean = cache[KEY_EQ_LIMITER_THRESHOLD_AUTO] ?: true
+
+    /** Reactivo por el mismo motivo que [eqLimiterEnabledFlow]. */
+    val eqLimiterThresholdAutoFlow: Flow<Boolean> =
+        prefFlow { it[KEY_EQ_LIMITER_THRESHOLD_AUTO] ?: true }
+
 
     // Las ganancias se guardan POR MODO (clave distinta para 5 y 10 bandas): al alternar
     // el nº de bandas se recupera la curva que el usuario tenía en ese modo, en vez de
@@ -647,6 +766,19 @@ class MusicPreferences(context: Context) {
     val downloadBannerMutedFlow: Flow<Boolean> =
         prefFlow { it[KEY_DOWNLOAD_BANNER_MUTED] ?: false }
 
+    /**
+     * ¿Ya se rellenaron número de pista y año en la biblioteca que existía antes de que se
+     * leyeran esos tags? Es una MIGRACIÓN DE DATOS de una sola pasada, no un estado del usuario.
+     *
+     * Va en preferencias y no en una columna centinela porque el trabajo es finito y ocurre una
+     * vez: las columnas `trackNumber`/`year` existen desde la v12 pero nunca se escribieron, así
+     * que toda fila anterior vale 0. Una query "las que están a 0" no se auto-vacía —un archivo
+     * sin el tag sigue a 0 después de mirarlo— y sin este cierre se re-analizaría la biblioteca
+     * entera en CADA sync. Las canciones nuevas no lo necesitan: entran ya con el dato.
+     */
+    fun saveTrackInfoBackfilled(done: Boolean) = update { it[KEY_TRACK_INFO_BACKFILLED] = done }
+    fun loadTrackInfoBackfilled(): Boolean = cache[KEY_TRACK_INFO_BACKFILLED] ?: false
+
     // --- Tope de almacenamiento para descargas (caché LRU) ---
 
     /**
@@ -797,6 +929,12 @@ class MusicPreferences(context: Context) {
         private val KEY_EQ_BAND_COUNT = intPreferencesKey("eq_band_count")
         private val KEY_EQ_BASS_BOOST = floatPreferencesKey("eq_bass_boost")
         private val KEY_EQ_TREBLE_BOOST = floatPreferencesKey("eq_treble_boost")
+        private val KEY_EQ_BASS_FREQ = doublePreferencesKey("eq_bass_freq")
+        private val KEY_EQ_TREBLE_FREQ = doublePreferencesKey("eq_treble_freq")
+        private val KEY_EQ_PREAMP = floatPreferencesKey("eq_preamp")
+        private val KEY_EQ_LIMITER = booleanPreferencesKey("eq_limiter")
+        private val KEY_EQ_LIMITER_THRESHOLD = floatPreferencesKey("eq_limiter_threshold")
+        private val KEY_EQ_LIMITER_THRESHOLD_AUTO = booleanPreferencesKey("eq_limiter_threshold_auto")
         private val KEY_EQ_CUSTOM_PRESETS = stringPreferencesKey("eq_custom_presets")
         private val KEY_EQ_CONFLICT_WARNING_SUPPRESSED = booleanPreferencesKey("eq_conflict_warning_suppressed")
         private val KEY_USE_SYSTEM_EQ = booleanPreferencesKey("use_system_eq")
@@ -813,6 +951,13 @@ class MusicPreferences(context: Context) {
 
         /** Igual que el default de Material You y el de MaterialKolor. */
         const val DEFAULT_PALETTE_STYLE = "TonalSpot"
+
+        /**
+         * Intentos de la lectura inicial del disco. Más de uno porque el primer acceso también
+         * corre la migración desde SharedPreferences y un fallo ahí puede ser pasajero; pocos
+         * porque esto corre en `runBlocking` durante el arranque.
+         */
+        private const val INITIAL_READ_ATTEMPTS = 3
         private val KEY_NOW_PLAYING_WAVY = booleanPreferencesKey("now_playing_wavy_progress")
         private val KEY_PLAYER_GESTURES = booleanPreferencesKey("player_gestures")
 
@@ -822,6 +967,7 @@ class MusicPreferences(context: Context) {
         private val KEY_STOP_BANNER_DISMISSED = booleanPreferencesKey("download_stop_banner_dismissed")
         private val KEY_DOWNLOAD_BANNER_MUTED = booleanPreferencesKey("download_banner_muted")
         private val KEY_STORAGE_LIMIT_BYTES = longPreferencesKey("download_storage_limit_bytes")
+        private val KEY_TRACK_INFO_BACKFILLED = booleanPreferencesKey("track_info_backfilled")
 
         private val KEY_LAST_QUEUE = stringPreferencesKey("last_queue_ids")
         private val KEY_LAST_INDEX = intPreferencesKey("last_index")

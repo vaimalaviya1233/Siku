@@ -65,6 +65,7 @@ class MusicRepository @Inject constructor(
     override suspend fun requeueDownloadedSongsWithoutMetadata(): Int = songRepository.requeueDownloadedSongsWithoutMetadata()
     override suspend fun deleteAudioFileById(songId: String) = songRepository.deleteAudioFileById(songId)
     override suspend fun deleteSongs(idsToDelete: List<String>) = songRepository.deleteSongs(idsToDelete)
+    override val songsDeleted: Flow<List<String>> get() = songRepository.songsDeleted
     override suspend fun countSongsNeedingWork(): Int = songRepository.countSongsNeedingWork()
     override suspend fun getTotalDownloadedBytes(): Long = songRepository.getTotalDownloadedBytes()
     override fun getTotalDownloadedBytesFlow(): Flow<Long> = songRepository.getTotalDownloadedBytesFlow()
@@ -77,10 +78,17 @@ class MusicRepository @Inject constructor(
     override fun getFailedDownloadsFlow(): Flow<List<FailedDownload>> = songRepository.getFailedDownloadsFlow()
     override suspend fun getEarliestRetryAt(): Long? = songRepository.getEarliestRetryAt()
     override suspend fun updateSongMetadata(song: Song) = songRepository.updateSongMetadata(song)
+    override suspend fun getSongsNeedingTrackInfo(localOnly: Boolean): List<Song> =
+        songRepository.getSongsNeedingTrackInfo(localOnly)
+    override suspend fun updateTrackInfo(songId: String, trackNumber: Int, year: Int) =
+        songRepository.updateTrackInfo(songId, trackNumber, year)
     override suspend fun getSongsNeedingLightMetadata(): List<Song> = songRepository.getSongsNeedingLightMetadata()
     override suspend fun updateLightMetadata(
-        songId: String, title: String, artist: String, album: String, genre: String?, durationMs: Long
-    ) = songRepository.updateLightMetadata(songId, title, artist, album, genre, durationMs)
+        songId: String, title: String, artist: String, album: String, genre: String?,
+        trackNumber: Int, year: Int, durationMs: Long
+    ) = songRepository.updateLightMetadata(
+        songId, title, artist, album, genre, trackNumber, year, durationMs
+    )
     override suspend fun getAlbumArtUri(album: String): String? = songRepository.getAlbumArtUri(album)
     override suspend fun setAlbumArt(album: String, uri: String) = songRepository.setAlbumArt(album, uri)
     override suspend fun updateAlbumArtUri(songId: String, uri: String?) = songRepository.updateAlbumArtUri(songId, uri)

@@ -3,6 +3,7 @@ package com.qhana.siku.data.source
 import android.Manifest
 import android.content.ContentUris
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -66,6 +67,16 @@ class LocalMusicSource @Inject constructor(
     /** Configurada si se escanea el dispositivo entero o si hay al menos una carpeta. */
     override suspend fun isConfigured(): Boolean = scansWholeDevice() || folderUris().isNotEmpty()
 
+    /**
+     * La misma condición, observable. Se deriva de los MISMOS dos ajustes que lee [isConfigured]
+     * (por sus flows del DataStore), así que las dos formas no pueden discrepar.
+     */
+    override val isConfiguredFlow: kotlinx.coroutines.flow.Flow<Boolean> =
+        kotlinx.coroutines.flow.combine(
+            musicPreferences.scanWholeDeviceFlow,
+            musicPreferences.localFolderUrisFlow
+        ) { wholeDevice, folders -> wholeDevice || folders.isNotEmpty() }
+
     /** ¿El modo activo es "toda la música del dispositivo"? */
     fun scansWholeDevice(): Boolean = musicPreferences.loadScanWholeDevice()
 
@@ -112,6 +123,7 @@ class LocalMusicSource @Inject constructor(
     suspend fun removeFolder(uri: String) {
         val remaining = folderUris() - uri
         musicPreferences.saveLocalFolderUris(remaining)
+        releaseFolderPermission(uri, remaining)
 
         // Era la última: ya no queda fuente local, así que se va TODA la música local. Filtrar por
         // prefijo aquí dejaría atrás las filas que aún arrastren un id del esquema viejo (usuario
@@ -164,6 +176,34 @@ class LocalMusicSource @Inject constructor(
     }
 
     private suspend fun clearLocalSongs() = musicRepository.clearSourceData(SourceType.LOCAL)
+
+    /**
+     * Devuelve al sistema el permiso persistido de SAF de una carpeta que se deja de escanear.
+     * Retenerlo era una fuga silenciosa: el cupo de URIs persistidas por app es limitado, y quien
+     * fuera probando carpetas las acumulaba todas para siempre.
+     *
+     * Tres razones para NO soltarlo, y las tres importan:
+     *  - la carpeta sigue en la lista (no debería llegar aquí, pero soltarlo la volvería ilegible);
+     *  - está en el STASH — las carpetas guardadas al activar el escaneo del dispositivo, que se
+     *    restauran al apagarlo: sin permiso volverían vacías;
+     *  - es la carpeta donde se guardan los `.lrc`. Puede ser LA MISMA que la de música (lo normal,
+     *    de hecho: las letras van junto al audio), y ese permiso incluye ESCRITURA. Soltarlo aquí
+     *    rompería el guardado de letras sin que nada lo relacionara con haber quitado una carpeta.
+     */
+    private fun releaseFolderPermission(uri: String, remaining: Set<String>) {
+        if (uri in remaining) return
+        if (uri in musicPreferences.loadStashedFolderUris()) return
+        if (uri == musicPreferences.loadLyricsFolderUri()) return
+        try {
+            context.contentResolver.releasePersistableUriPermission(
+                Uri.parse(uri),
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (e: SecurityException) {
+            // No lo teníamos: revocado desde los ajustes del sistema, o nunca llegó a persistirse.
+            Log.w(TAG, "No se pudo devolver el permiso SAF de $uri", e)
+        }
+    }
 
     // --- Descubrimiento -----------------------------------------------------------------------
 
@@ -262,6 +302,8 @@ class LocalMusicSource @Inject constructor(
             artist = analysis.artist ?: song.artist,
             album = analysis.album ?: song.album,
             genre = analysis.genre ?: song.genre,
+            trackNumber = analysis.trackNumber.takeIf { it > 0 } ?: song.trackNumber,
+            year = analysis.year.takeIf { it > 0 } ?: song.year,
             duration = if (analysis.duration > 0) analysis.duration else song.duration,
             albumArtUri = artUri?.let { Uri.parse(it) } ?: song.albumArtUri
         )
@@ -294,8 +336,9 @@ class LocalMusicSource @Inject constructor(
      * con OneDrive conectado. Por eso el plazo se cuenta desde la release que introduce el cambio
      * y no desde antes.
      *
-     * Solo afecta al modo CARPETAS: `legacyId` únicamente se calcula en `walkAudioFiles`, porque el
-     * modo dispositivo nació ya con el esquema por volumen.
+     * Cubre DOS cambios de id, con el mismo mecanismo: el modo carpetas migra del esquema relativo
+     * a la carpeta elegida al esquema por volumen (`walkAudioFiles`), y el modo dispositivo migra
+     * las rutas con la barra duplicada que producía `RELATIVE_PATH` (`queryDeviceAudio`).
      */
     private suspend fun migrateLegacyId(file: LocalAudioFile, legacyId: String) {
         val existing = (musicRepository.getSongById(legacyId)
@@ -331,6 +374,10 @@ class LocalMusicSource @Inject constructor(
             artist = analysis.artist ?: file.artist ?: AppConfig.UNKNOWN_ARTIST,
             album = analysis.album ?: file.album ?: AppConfig.UNKNOWN_ALBUM,
             genre = analysis.genre,
+            // Mismo criterio que el resto: manda el tag del archivo y el índice del sistema solo
+            // rellena el hueco (en modo carpetas el índice no aporta nada y siempre vale 0).
+            trackNumber = analysis.trackNumber.takeIf { it > 0 } ?: file.trackNumber,
+            year = analysis.year.takeIf { it > 0 } ?: file.year,
             duration = if (analysis.duration > 0) analysis.duration else file.duration,
             path = file.uri.toString(),
             albumArtUri = artUri?.let { Uri.parse(it) },
@@ -347,8 +394,9 @@ class LocalMusicSource @Inject constructor(
         /** `local:<volumen>/<ruta>` */
         val id: String,
         /**
-         * Id que ESTA canción habría tenido con el esquema viejo (relativo a la carpeta que la
-         * contiene). Solo existe en el modo carpetas, que es el único que pudo haberlo escrito.
+         * Id que ESTA canción tiene guardado si se indexó con un esquema anterior: relativo a la
+         * carpeta elegida (modo carpetas) o con la barra duplicada de `RELATIVE_PATH` (modo
+         * dispositivo). `null` cuando el id actual coincide con el que ya estaría en la BD.
          */
         val legacyId: String?,
         val name: String,
@@ -361,8 +409,24 @@ class LocalMusicSource @Inject constructor(
         val title: String? = null,
         val artist: String? = null,
         val album: String? = null,
+        /** 0 = el índice no lo declara (siempre, en modo carpetas: SAF no indexa tags). */
+        val trackNumber: Int = 0,
+        val year: Int = 0,
         val duration: Long = 0L
     )
+
+    /**
+     * `MediaStore.Audio.Media.TRACK` NO es el número de pista pelado: cuando el archivo declara
+     * número de disco, MediaProvider los empaqueta como `disco * 1000 + pista`, así que la pista 4
+     * del disco 2 se guarda como 2004. Sin deshacer eso, un álbum doble ordenaría bien por
+     * casualidad (el disco 1 va antes que el 2) pero mostraría "2004" como número de pista, y
+     * cualquier comparación con el valor leído del tag del archivo —que sí es pelado— fallaría.
+     *
+     * Se conserva solo la pista: el número de disco no tiene columna en `songs`, y con el orden
+     * ya resuelto no aporta nada que se pueda mostrar.
+     */
+    private fun mediaStoreTrackNumber(raw: Int): Int =
+        if (raw >= MEDIASTORE_DISC_MULTIPLIER) raw % MEDIASTORE_DISC_MULTIPLIER else raw.coerceAtLeast(0)
 
     /**
      * Resultado de listar, con el ÁMBITO de lo listado: [covers] dice si un id de la biblioteca
@@ -493,6 +557,8 @@ class LocalMusicSource @Inject constructor(
             add(MediaStore.Audio.Media.TITLE)
             add(MediaStore.Audio.Media.ARTIST)
             add(MediaStore.Audio.Media.ALBUM)
+            add(MediaStore.Audio.Media.TRACK)
+            add(MediaStore.Audio.Media.YEAR)
             if (useRelativePath) {
                 add(MediaStore.Audio.Media.RELATIVE_PATH)
                 add(MediaStore.Audio.Media.VOLUME_NAME)
@@ -528,6 +594,8 @@ class LocalMusicSource @Inject constructor(
             val titleCol = rows.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
             val artistCol = rows.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
             val albumCol = rows.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
+            val trackCol = rows.getColumnIndexOrThrow(MediaStore.Audio.Media.TRACK)
+            val yearCol = rows.getColumnIndexOrThrow(MediaStore.Audio.Media.YEAR)
             val relativeCol =
                 if (useRelativePath) rows.getColumnIndexOrThrow(MediaStore.Audio.Media.RELATIVE_PATH) else -1
             val volumeCol =
@@ -541,20 +609,26 @@ class LocalMusicSource @Inject constructor(
                 val name = rows.getString(nameCol) ?: continue
                 if (!isAudioFile(name)) continue
 
-                val volumePath = if (useRelativePath) {
+                val rawPath = if (useRelativePath) {
                     val relative = rows.getString(relativeCol).orEmpty()
                     val volume = rows.getString(volumeCol).orEmpty()
-                    normalizeRelativePath("${canonicalVolume(volume)}/$relative/$name")
+                    "${canonicalVolume(volume)}/$relative/$name"
                 } else {
                     val data = rows.getString(dataCol) ?: continue
-                    volumePathFromAbsolutePath(data)
+                    rawVolumePathFromAbsolutePath(data)
                 }
+                val volumePath = normalizeRelativePath(rawPath)
+                val doubleSlashPath = normalizeKeepingRepeatedSeparators(rawPath)
 
                 out.add(
                     LocalAudioFile(
                         id = SourceType.LOCAL.buildId(volumePath),
-                        // El escaneo del dispositivo es nuevo: nunca escribió ids del esquema viejo.
-                        legacyId = null,
+                        // Este modo nunca escribió ids relativos a la carpeta (nació con el esquema
+                        // por volumen), pero SÍ escribió ids con la barra duplicada que dejaba
+                        // `RELATIVE_PATH` al terminar en `/`. Se migran por el mismo camino.
+                        legacyId = doubleSlashPath
+                            .takeIf { it != volumePath }
+                            ?.let { SourceType.LOCAL.buildId(it) },
                         name = name,
                         uri = ContentUris.withAppendedId(collection, rows.getLong(idCol)),
                         size = rows.getLong(sizeCol),
@@ -563,6 +637,9 @@ class LocalMusicSource @Inject constructor(
                         title = rows.getString(titleCol),
                         artist = rows.getString(artistCol)?.takeIf { it != MEDIASTORE_UNKNOWN },
                         album = rows.getString(albumCol)?.takeIf { it != MEDIASTORE_UNKNOWN },
+                        trackNumber = mediaStoreTrackNumber(rows.getInt(trackCol)),
+                        // NULL en la columna se lee como 0, que es justo "no lo declara".
+                        year = rows.getInt(yearCol),
                         duration = rows.getLong(durationCol)
                     )
                 )
@@ -589,15 +666,33 @@ class LocalMusicSource @Inject constructor(
         return normalizeRelativePath("$volume/${docId.substring(separator + 1)}")
     }
 
-    /** Igual, partiendo de una ruta absoluta (`MediaStore.DATA`, único camino antes de API 29). */
-    private fun volumePathFromAbsolutePath(path: String): String {
+    /**
+     * Igual, partiendo de una ruta absoluta (`MediaStore.DATA`, único camino antes de API 29). Se
+     * devuelve SIN normalizar para poder derivar también el id que esta misma ruta tuvo con la
+     * normalización anterior (ver [normalizeKeepingRepeatedSeparators]).
+     */
+    private fun rawVolumePathFromAbsolutePath(path: String): String {
         val externalRoot = Environment.getExternalStorageDirectory()?.absolutePath
         if (externalRoot != null && path.startsWith(externalRoot)) {
-            return normalizeRelativePath("$PRIMARY_VOLUME/${path.removePrefix(externalRoot)}")
+            return "$PRIMARY_VOLUME/${path.removePrefix(externalRoot)}"
         }
         // Volumen secundario: /storage/<UUID>/… → el UUID hace de nombre de volumen.
-        return normalizeRelativePath(path.removePrefix("/storage/"))
+        return path.removePrefix("/storage/")
     }
+
+    /**
+     * La normalización que había ANTES de colapsar las barras repetidas. Existe solo para calcular
+     * el id que una canción ya indexada tiene guardado y poder migrarlo; no debe usarse para nada
+     * más.
+     *
+     * **CUÁNDO SE PUEDE BORRAR ESTO**: dos releases después de la primera que colapse las barras
+     * (o sea, la que suceda a `versionCode 4` / 1.1.1). Mismo criterio que [migrateLegacyId]: no hay
+     * telemetría —la app se distribuye como APK—, así que es una decisión por plazo. Quien
+     * actualice más tarde verá sus canciones del modo dispositivo reindexadas como nuevas, con la
+     * pérdida de playlists e historial que eso implica.
+     */
+    private fun normalizeKeepingRepeatedSeparators(raw: String): String =
+        raw.replace('\\', '/').trim('/').lowercase()
 
     /**
      * Nombre de volumen canónico. SAF dice `primary` y MediaStore `external_primary` para el mismo
@@ -649,5 +744,8 @@ class LocalMusicSource @Inject constructor(
 
         /** Marcador literal que MediaStore usa cuando el archivo no trae el tag. */
         private const val MEDIASTORE_UNKNOWN = "<unknown>"
+
+        /** Factor con el que MediaProvider empaqueta el disco en TRACK (ver [mediaStoreTrackNumber]). */
+        private const val MEDIASTORE_DISC_MULTIPLIER = 1000
     }
 }

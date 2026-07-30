@@ -1,9 +1,7 @@
 package com.qhana.siku.ui.screens
 
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -46,6 +44,8 @@ import com.qhana.siku.ui.components.TonalChip
 import com.qhana.siku.ui.components.rememberListItemShape
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
+
+import com.qhana.siku.ui.theme.appEffectsSpec
 
 /**
  * Detalle de lista de reproducción / favoritos, con el MISMO lenguaje inmersivo que álbum y
@@ -103,7 +103,9 @@ fun PlaylistDetailScreen(
             rawTitleFraction >= 0.5f -> 1f
             else -> 0f
         },
-        animationSpec = spring(stiffness = Spring.StiffnessMedium),
+        // Ver el kdoc de este mismo bloque en ArtistDetailScreen: effects (sin rebote) porque la
+        // fracción conduce a la vez la posición del título y un alpha.
+        animationSpec = appEffectsSpec(),
         label = "topBarFraction"
     )
     var overlayOrigin by remember { mutableStateOf(Offset.Zero) }

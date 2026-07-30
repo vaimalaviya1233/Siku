@@ -7,6 +7,7 @@ import com.qhana.siku.data.model.AppResult
 import com.qhana.siku.data.repository.OneDriveFolderBrowser
 import com.qhana.siku.data.repository.RemoteFolder
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -74,20 +75,32 @@ class OneDriveFolderPickerViewModel @Inject constructor(
         val parentId = _state.value.crumbs.last().id
         viewModelScope.launch {
             _state.update { it.copy(isLoading = true, error = null, folders = emptyList()) }
-            when (val result = browser.listFolders(parentId)) {
-                is AppResult.Success -> _state.update {
-                    // El nivel pudo cambiar mientras cargaba (el usuario siguió navegando): se
-                    // descarta el resultado viejo en vez de pintar la carpeta equivocada.
-                    if (it.crumbs.last().id != parentId) it
-                    else it.copy(folders = result.data, isLoading = false)
+            try {
+                when (val result = browser.listFolders(parentId)) {
+                    is AppResult.Success -> _state.update {
+                        // El nivel pudo cambiar mientras cargaba (el usuario siguió navegando): se
+                        // descarta el resultado viejo en vez de pintar la carpeta equivocada.
+                        if (it.crumbs.last().id != parentId) it
+                        else it.copy(folders = result.data, isLoading = false)
+                    }
+                    is AppResult.Error -> _state.update {
+                        if (it.crumbs.last().id != parentId) it
+                        else it.copy(isLoading = false, error = result.error.message)
+                    }
+                    // El browser nunca devuelve Loading (es una suspend que ya resolvió), pero la
+                    // rama existe para que añadir un estado al sealed no pase inadvertido aquí.
+                    AppResult.Loading -> Unit
                 }
-                is AppResult.Error -> _state.update {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Sin esto, una excepción (en vez de un AppResult.Error) dejaba el spinner
+                // girando para siempre: el botón de reintentar solo aparece cuando hay `error`,
+                // así que el diálogo quedaba sin salida más que cerrarlo.
+                _state.update {
                     if (it.crumbs.last().id != parentId) it
-                    else it.copy(isLoading = false, error = result.error.message)
+                    else it.copy(isLoading = false, error = e.message ?: e.javaClass.simpleName)
                 }
-                // El browser nunca devuelve Loading (es una suspend que ya resolvió), pero la
-                // rama existe para que añadir un estado al sealed no pase inadvertido aquí.
-                AppResult.Loading -> Unit
             }
         }
     }

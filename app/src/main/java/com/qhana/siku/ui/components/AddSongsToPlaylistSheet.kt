@@ -22,9 +22,9 @@ import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MaterialTheme.colorScheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -77,7 +77,8 @@ fun AddSongsToPlaylistSheet(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            OutlinedTextField(
+            // FILLED (`TextField`), la variante por defecto de M3.
+            TextField(
                 value = query,
                 onValueChange = onQueryChange,
                 singleLine = true,
@@ -135,6 +136,7 @@ fun AddSongsToPlaylistSheet(
                             color = if (checked) colorScheme.secondaryContainer else colorScheme.surfaceContainer,
                             shape = rememberListItemShape(index, candidates.size),
                             modifier = Modifier
+                                .animateItem()
                                 .fillMaxWidth()
                                 .padding(horizontal = 16.dp, vertical = 1.dp)
                         ) {

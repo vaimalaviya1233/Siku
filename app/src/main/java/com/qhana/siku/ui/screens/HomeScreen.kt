@@ -57,12 +57,36 @@ import com.qhana.siku.ui.viewmodel.HomeArtistPick
 import com.qhana.siku.ui.viewmodel.HomeStats
 import com.qhana.siku.data.model.PlaybackContext
 import java.time.LocalTime
+import com.qhana.siku.ui.theme.AppBoundsTransform
 
 // Tarjeta grande de los carruseles Expressive del inicio (item "grande" del multi-browse; los
 // medianos/chicos los deriva el propio carrusel). Cuadrada con etiqueta superpuesta.
 private val HomeCardWidth = 196.dp
 private val HomeCardHeight = 196.dp
 private val HomeCardShape = RoundedCornerShape(24.dp)
+
+/**
+ * Margen lateral de TODO el contenido del inicio: saludo, chips de acciones rápidas, títulos de
+ * sección y carruseles. Sale de una constante única porque el trabajo de que las tarjetas queden
+ * a plomo con los títulos es exactamente eso — que los cinco sitios usen el MISMO número, no cinco
+ * `16.dp` sueltos que se desalinean en cuanto alguien toca uno.
+ */
+private val HomeContentPadding = 16.dp
+
+/**
+ * Si este carrusel tiene algo que desplazar. Load-bearing para el GESTO, no para el aspecto:
+ * `HorizontalMultiBrowseCarousel` es por dentro un `HorizontalPager` y queda ANIDADO dentro del
+ * pager de las pestañas de la biblioteca, así que con el scroll habilitado se queda con el arrastre
+ * horizontal aunque tenga una sola página — y cambiar de pestaña deslizando sobre el carrusel
+ * dejaba de funcionar. Con un item no hay nada que desplazar y el gesto tiene que pasar de largo.
+ *
+ * Es `size > 1` y no una medida de si el contenido cabe: la tarjeta ocupa [HomeCardWidth] y con dos
+ * o más el multi-browse siempre tiene recorrido en un teléfono. La condición se queda del lado
+ * conservador — como mucho un carrusel de dos items sigue capturando el gesto, que es el
+ * comportamiento normal de un carrusel con contenido fuera de pantalla.
+ */
+private val Collection<*>.isScrollable: Boolean
+    get() = size > 1
 
 /**
  * Pantalla de inicio (primera pestaña de la biblioteca). Carruseles horizontales Material 3
@@ -80,12 +104,19 @@ fun HomeScreen(
     recentlyAdded: List<Song>,
     topAlbums: List<AlbumSummary>,
     recentContexts: List<PlaybackContext>,
+    // Carátulas del collage de los contextos de género, por nombre en minúsculas: un género no
+    // tiene carátula propia (ver LibraryViewModel.recentGenreArts).
+    genreArts: Map<String, List<String>>,
     stats: HomeStats,
     artistPick: HomeArtistPick?,
     rediscover: List<Song>,
     currentSongId: String?,
     contentPadding: PaddingValues,
     onPlaySongs: (List<Song>, Int) -> Unit,
+    // Reproducir del bloque "Porque escuchaste X" SÍ tiene un contexto reanudable (ese artista),
+    // a diferencia de los demás carruseles de canciones sueltas: va por su propio callback para
+    // que el caller pueda registrarlo. Recibe el nombre del artista además de la cola.
+    onPlayArtistPick: (String, List<Song>, Int) -> Unit,
     onAlbumClick: (String) -> Unit,
     onResumeContext: (PlaybackContext) -> Unit,
     // Acciones rápidas de la fila de chips (arriba de los carruseles). Todas ARRANCAN música al
@@ -152,6 +183,7 @@ fun HomeScreen(
                     title = stringResource(R.string.home_section_continue),
                     contexts = recentContexts,
                     collageCovers = collageCovers,
+                    genreArts = genreArts,
                     onResumeContext = onResumeContext
                 )
             }
@@ -173,7 +205,7 @@ fun HomeScreen(
                     title = stringResource(R.string.home_section_because_you_listened, pick.artist),
                     songs = pick.songs,
                     currentSongId = currentSongId,
-                    onPlaySongs = onPlaySongs
+                    onPlaySongs = { songs, index -> onPlayArtistPick(pick.artist, songs, index) }
                 )
             }
         }
@@ -229,7 +261,14 @@ private fun GreetingHeader(stats: HomeStats) {
             pluralStringResource(R.plurals.home_stats_library, stats.librarySize, stats.librarySize)
         else -> null
     }
-    Column(modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 4.dp)) {
+    Column(
+        modifier = Modifier.padding(
+            start = HomeContentPadding,
+            end = HomeContentPadding,
+            top = 8.dp,
+            bottom = 4.dp
+        )
+    ) {
         Text(
             text = stringResource(greetingRes),
             style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.SemiBold),
@@ -267,7 +306,7 @@ private fun HomeQuickActions(
         FlowRow(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 4.dp),
+                .padding(horizontal = HomeContentPadding, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
             maxItemsInEachRow = 3
@@ -317,7 +356,12 @@ private fun SectionHeader(title: String) {
         color = colorScheme.onSurface,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
-        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 10.dp)
+        modifier = Modifier.padding(
+            start = HomeContentPadding,
+            end = HomeContentPadding,
+            top = 8.dp,
+            bottom = 10.dp
+        )
     )
 }
 
@@ -337,9 +381,10 @@ private fun SongCarousel(
             state = state,
             preferredItemWidth = HomeCardWidth,
             itemSpacing = 8.dp,
-            contentPadding = PaddingValues(horizontal = 16.dp),
+            userScrollEnabled = songs.isScrollable,
             modifier = Modifier
                 .fillMaxWidth()
+                .padding(horizontal = HomeContentPadding)
                 .height(HomeCardHeight)
         ) { i ->
             val song = songs[i]
@@ -368,6 +413,7 @@ private fun ContextCarousel(
     title: String,
     contexts: List<PlaybackContext>,
     collageCovers: List<String>,
+    genreArts: Map<String, List<String>>,
     onResumeContext: (PlaybackContext) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -377,17 +423,23 @@ private fun ContextCarousel(
             state = state,
             preferredItemWidth = HomeCardWidth,
             itemSpacing = 8.dp,
-            contentPadding = PaddingValues(horizontal = 16.dp),
+            userScrollEnabled = contexts.isScrollable,
             modifier = Modifier
                 .fillMaxWidth()
+                .padding(horizontal = HomeContentPadding)
                 .height(HomeCardHeight)
         ) { i ->
             val ctx = contexts[i]
-            // Los contextos de biblioteca (aleatorio / toda la biblioteca) no tienen carátula
-            // propia → collage de una muestra de la biblioteca.
-            val collage = if (ctx is PlaybackContext.LibraryShuffle || ctx is PlaybackContext.LibraryAll) {
-                collageCovers
-            } else null
+            // Contextos SIN carátula propia → collage. Los de biblioteca (aleatorio / toda la
+            // biblioteca) usan una muestra de la biblioteca; un GÉNERO usa las suyas, que es lo
+            // que ya muestra su tarjeta en la pestaña Géneros — aquí se quedaba en el glifo de
+            // relleno porque dependía del arte de la primera canción con la que se reprodujo.
+            // Si el género aún no resolvió sus carátulas, `art` sigue de respaldo.
+            val collage = when {
+                ctx is PlaybackContext.LibraryShuffle || ctx is PlaybackContext.LibraryAll -> collageCovers
+                ctx is PlaybackContext.Genre -> genreArts[ctx.name.lowercase()]
+                else -> null
+            }
             HomeCarouselCard(
                 art = ctx.coverUri(),
                 cacheKey = ctx.key,
@@ -462,9 +514,10 @@ private fun AlbumCarousel(
             state = state,
             preferredItemWidth = HomeCardWidth,
             itemSpacing = 8.dp,
-            contentPadding = PaddingValues(horizontal = 16.dp),
+            userScrollEnabled = albums.isScrollable,
             modifier = Modifier
                 .fillMaxWidth()
+                .padding(horizontal = HomeContentPadding)
                 .height(HomeCardHeight)
         ) { i ->
             val album = albums[i]
@@ -475,7 +528,9 @@ private fun AlbumCarousel(
                     with(sharedTransitionScope) {
                         Modifier.sharedBounds(
                             sharedContentState = rememberSharedContentState(key = "album_image_${album.name}"),
-                            animatedVisibilityScope = animatedVisibilityScope
+                            animatedVisibilityScope = animatedVisibilityScope,
+                            // Spring del tema en vez del default de la API (ver AppBoundsTransform).
+                            boundsTransform = AppBoundsTransform
                         )
                     }
                 } else Modifier

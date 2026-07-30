@@ -25,6 +25,11 @@ class BrowseRepository @Inject constructor(
     private val songDao: SongDao,
     private val artistDao: ArtistDao
 ) {
+    private companion object {
+        /** Un género ya reproducido merece su collage aunque tenga una sola canción. */
+        const val GENRE_ARTS_MIN_COUNT = 1
+    }
+
     fun getArtists(
         sort: ArtistSortOrder,
         sourceFilters: Set<SongSourceFilter> = emptySet()
@@ -72,6 +77,29 @@ class BrowseRepository @Inject constructor(
         artsLimit = SongDao.ARTS_PER_GENRE,
         artsSeparator = SongDao.ARTS_SEPARATOR
     )
+
+    /**
+     * Carátulas (para el collage) de unos géneros concretos, por nombre en minúsculas.
+     *
+     * Lo usa "Seguir escuchando" del inicio por la MISMA razón que la foto del artista se
+     * resuelve en vivo: un género no tiene carátula propia, tiene muchas, y el snapshot que se
+     * guardaba al reproducirlo —el arte de su primera canción— era arbitrario (cambia con el
+     * orden) y quedaba en `null` en cuanto esa canción no tenía carátula, que es lo que dejaba
+     * la tarjeta con el glifo de relleno. La clave va normalizada porque el agrupamiento de
+     * géneros ignora mayúsculas y devuelve un nombre representativo que no tiene por qué
+     * coincidir letra a letra con el que se guardó en el contexto.
+     *
+     * `minCount = 1`: un género ya reproducido se pinta aunque tenga pocas canciones (el tope
+     * de los chips del inicio es otra cosa).
+     */
+    fun getGenreArts(names: Set<String>): Flow<Map<String, List<String>>> {
+        val wanted = names.map { it.lowercase() }.toSet()
+        return getGenres(minCount = GENRE_ARTS_MIN_COUNT).map { genres ->
+            genres.asSequence()
+                .filter { it.name.lowercase() in wanted }
+                .associate { it.name.lowercase() to it.arts }
+        }
+    }
 
     /**
      * Canciones de un género para su pantalla de detalle. [partialMatch] = ajuste "incluir

@@ -3,11 +3,6 @@ package com.qhana.siku.ui.navigation
 import android.app.Activity
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -31,6 +26,12 @@ import com.qhana.siku.ui.screens.SettingsPlayerBarScreen
 import com.qhana.siku.ui.screens.SettingsScreen
 import com.qhana.siku.ui.screens.SettingsSourcesScreen
 import com.qhana.siku.ui.screens.SettingsTabsScreen
+import com.qhana.siku.ui.theme.appNavBackEnter
+import com.qhana.siku.ui.theme.appNavBackExit
+import com.qhana.siku.ui.theme.appNavFadeEnter
+import com.qhana.siku.ui.theme.appNavFadeExit
+import com.qhana.siku.ui.theme.appNavForwardEnter
+import com.qhana.siku.ui.theme.appNavForwardExit
 import com.qhana.siku.ui.viewmodel.LibraryViewModel
 import com.qhana.siku.ui.viewmodel.PlaybackViewModel
 import com.qhana.siku.ui.viewmodel.SourcesViewModel
@@ -69,11 +70,29 @@ fun AppNavHost(
     val playbackState by playbackViewModel.playbackState.collectAsStateWithLifecycle()
     val libraryUiState by libraryViewModel.uiState.collectAsStateWithLifecycle()
 
-    NavHost(navController = navController, startDestination = startDestination) {
+    // Transiciones del grafo, declaradas UNA vez aquí y no ruta por ruta. Antes cada `composable`
+    // repetía el mismo par `slideInHorizontally(tween(300))` / `slideOutHorizontally(tween(300))`
+    // —14 veces, con la duración a mano— y solo declaraba `enterTransition` + `popExitTransition`.
+    // Faltaban las OTRAS dos, así que la pantalla que quedaba detrás no se movía: no había shared
+    // axis (una capa entrando sobre un fondo congelado) y el predictive back no tenía recorrido que
+    // enseñar durante el gesto. Los cuatro specs salen del MotionScheme (ver ui/theme/Motion.kt).
+    NavHost(
+        navController = navController,
+        startDestination = startDestination,
+        enterTransition = appNavForwardEnter,
+        exitTransition = appNavForwardExit,
+        popEnterTransition = appNavBackEnter,
+        popExitTransition = appNavBackExit
+    ) {
         composable(
             route = Screen.Onboarding.route,
-            enterTransition = { fadeIn(tween(300)) },
-            exitTransition = { fadeOut(tween(300)) }
+            // Única ruta que NO usa el eje horizontal: no tiene "atrás" ni jerarquía con la
+            // biblioteca (se sustituyen mutuamente según haya fuentes), así que un desplazamiento
+            // le inventaría una dirección que no existe.
+            enterTransition = appNavFadeEnter,
+            exitTransition = appNavFadeExit,
+            popEnterTransition = appNavFadeEnter,
+            popExitTransition = appNavFadeExit
         ) {
             OnboardingScreen(
                 isLoggedIn = loggedIn,
@@ -92,11 +111,9 @@ fun AppNavHost(
             )
         }
 
-        composable(
-            route = Screen.Library.route,
-            enterTransition = { fadeIn(tween(300)) },
-            exitTransition = { fadeOut(tween(300)) }
-        ) {
+        // Sin overrides: la biblioteca es la raíz del eje horizontal, así que CEDE con paralaje al
+        // abrir un detalle y vuelve con él. Antes se desvanecía, que es lo que rompía el eje.
+        composable(route = Screen.Library.route) {
             LibraryScreen(
                 isLoggedIn = loggedIn,
                 onLogoutClick = onDisconnectOneDrive,
@@ -106,7 +123,7 @@ fun AppNavHost(
                 onArtistClick = { name -> navController.navigate(Screen.ArtistDetail.createRoute(name)) },
                 onAlbumClick = { name -> navController.navigate(Screen.AlbumDetail.createRoute(name)) },
                 onGenreClick = { name -> navController.navigate(Screen.GenreDetail.createRoute(name)) },
-                onNavigateToNowPlaying = { appState.playerExpanded = true },
+                onNavigateToNowPlaying = { appState.openPlayer() },
                 onNavigateToSettings = { navController.navigate(Screen.Settings.route) },
                 playbackViewModel = playbackViewModel,
                 // El MISMO LibraryViewModel que reciben los detalles. Antes esta ruta se quedaba
@@ -120,9 +137,7 @@ fun AppNavHost(
         }
 
         composable(
-            route = Screen.PlaylistDetail.route,
-            enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
-            popExitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) }
+            route = Screen.PlaylistDetail.route
         ) { backStackEntry ->
             val playlistId = backStackEntry.arguments
                 ?.getString(Screen.PlaylistDetail.ARG_PLAYLIST_ID)
@@ -144,14 +159,14 @@ fun AppNavHost(
                         PlaybackContext.Playlist(playlistId, playlistName, songs.firstOrNull()?.albumArtUri?.toString())
                     )
                     playbackViewModel.playSongs(songs, index)
-                    appState.playerExpanded = true
+                    appState.openPlayer()
                 },
                 onShufflePlay = { songs ->
                     libraryViewModel.recordContext(
                         PlaybackContext.Playlist(playlistId, playlistName, songs.firstOrNull()?.albumArtUri?.toString())
                     )
                     playbackViewModel.shufflePlay(songs)
-                    appState.playerExpanded = true
+                    appState.openPlayer()
                 },
                 onToggleFavorite = { libraryViewModel.toggleFavorite(it) },
                 onReorderSongs = { songIds -> libraryViewModel.reorderPlaylistSongs(playlistId, songIds) },
@@ -161,9 +176,7 @@ fun AppNavHost(
         }
 
         composable(
-            route = Screen.ArtistDetail.route,
-            enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
-            popExitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) }
+            route = Screen.ArtistDetail.route
         ) { backStackEntry ->
             val artistName = Screen.ArtistDetail.decodeName(
                 backStackEntry.arguments?.getString(Screen.ArtistDetail.ARG_ARTIST_NAME)
@@ -181,14 +194,14 @@ fun AppNavHost(
                         PlaybackContext.Artist(artistName, songs.firstOrNull()?.albumArtUri?.toString())
                     )
                     playbackViewModel.playSongs(songs, index)
-                    appState.playerExpanded = true
+                    appState.openPlayer()
                 },
                 onShufflePlay = { songs ->
                     libraryViewModel.recordContext(
                         PlaybackContext.Artist(artistName, songs.firstOrNull()?.albumArtUri?.toString())
                     )
                     playbackViewModel.shufflePlay(songs)
-                    appState.playerExpanded = true
+                    appState.openPlayer()
                 },
                 onToggleFavorite = { libraryViewModel.toggleFavorite(it) },
                 onAddSongToPlaylist = { playlistId, songId -> libraryViewModel.addSongToPlaylist(playlistId, songId) },
@@ -203,9 +216,7 @@ fun AppNavHost(
         }
 
         composable(
-            route = Screen.AlbumDetail.route,
-            enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
-            popExitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) }
+            route = Screen.AlbumDetail.route
         ) { backStackEntry ->
             val albumName = Screen.AlbumDetail.decodeName(
                 backStackEntry.arguments?.getString(Screen.AlbumDetail.ARG_ALBUM_NAME)
@@ -223,14 +234,14 @@ fun AppNavHost(
                         PlaybackContext.Album(albumName, songs.firstOrNull()?.albumArtUri?.toString())
                     )
                     playbackViewModel.playSongs(songs, index)
-                    appState.playerExpanded = true
+                    appState.openPlayer()
                 },
                 onShufflePlay = { songs ->
                     libraryViewModel.recordContext(
                         PlaybackContext.Album(albumName, songs.firstOrNull()?.albumArtUri?.toString())
                     )
                     playbackViewModel.shufflePlay(songs)
-                    appState.playerExpanded = true
+                    appState.openPlayer()
                 },
                 onToggleFavorite = { libraryViewModel.toggleFavorite(it) },
                 onAddSongToPlaylist = { playlistId, songId -> libraryViewModel.addSongToPlaylist(playlistId, songId) },
@@ -245,9 +256,7 @@ fun AppNavHost(
         }
 
         composable(
-            route = Screen.GenreDetail.route,
-            enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
-            popExitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) }
+            route = Screen.GenreDetail.route
         ) { backStackEntry ->
             val genreName = Screen.GenreDetail.decodeName(
                 backStackEntry.arguments?.getString(Screen.GenreDetail.ARG_GENRE_NAME)
@@ -264,14 +273,14 @@ fun AppNavHost(
                         PlaybackContext.Genre(genreName, songs.firstOrNull()?.albumArtUri?.toString())
                     )
                     playbackViewModel.playSongs(songs, index)
-                    appState.playerExpanded = true
+                    appState.openPlayer()
                 },
                 onShufflePlay = { songs ->
                     libraryViewModel.recordContext(
                         PlaybackContext.Genre(genreName, songs.firstOrNull()?.albumArtUri?.toString())
                     )
                     playbackViewModel.shufflePlay(songs)
-                    appState.playerExpanded = true
+                    appState.openPlayer()
                 },
                 onToggleFavorite = { libraryViewModel.toggleFavorite(it) },
                 onAddSongToPlaylist = { playlistId, songId -> libraryViewModel.addSongToPlaylist(playlistId, songId) },
@@ -286,9 +295,7 @@ fun AppNavHost(
         }
 
         composable(
-            route = Screen.Favorites.route,
-            enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
-            popExitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) }
+            route = Screen.Favorites.route
         ) {
             PlaylistDetailScreen(
                 playlistName = "Favoritos",
@@ -300,12 +307,12 @@ fun AppNavHost(
                 onPlayAll = { songs, index ->
                     libraryViewModel.recordContext(PlaybackContext.Favorites)
                     playbackViewModel.playSongs(songs, index)
-                    appState.playerExpanded = true
+                    appState.openPlayer()
                 },
                 onShufflePlay = { songs ->
                     libraryViewModel.recordContext(PlaybackContext.Favorites)
                     playbackViewModel.shufflePlay(songs)
-                    appState.playerExpanded = true
+                    appState.openPlayer()
                 },
                 onToggleFavorite = { libraryViewModel.toggleFavorite(it) },
                 onAddSongs = { appState.showAddSongsSheet = true }
@@ -313,9 +320,7 @@ fun AppNavHost(
         }
 
         composable(
-            route = Screen.Settings.route,
-            enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
-            popExitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) }
+            route = Screen.Settings.route
         ) {
             // Hub de categorías: cada una navega a su propia sub-pantalla.
             SettingsScreen(
@@ -327,9 +332,7 @@ fun AppNavHost(
         }
 
         composable(
-            route = Screen.SettingsSources.route,
-            enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
-            popExitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) }
+            route = Screen.SettingsSources.route
         ) {
             SettingsSourcesScreen(
                 onBackClick = { navController.popBackStack() },
@@ -342,9 +345,7 @@ fun AppNavHost(
         }
 
         composable(
-            route = Screen.SettingsBackup.route,
-            enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
-            popExitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) }
+            route = Screen.SettingsBackup.route
         ) {
             SettingsBackupScreen(
                 onBackClick = { navController.popBackStack() },
@@ -353,9 +354,7 @@ fun AppNavHost(
         }
 
         composable(
-            route = Screen.SettingsPlayback.route,
-            enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
-            popExitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) }
+            route = Screen.SettingsPlayback.route
         ) {
             SettingsPlaybackScreen(
                 onBackClick = { navController.popBackStack() }
@@ -363,9 +362,7 @@ fun AppNavHost(
         }
 
         composable(
-            route = Screen.SettingsDownloads.route,
-            enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
-            popExitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) }
+            route = Screen.SettingsDownloads.route
         ) {
             SettingsDownloadsScreen(
                 onBackClick = { navController.popBackStack() }
@@ -373,9 +370,7 @@ fun AppNavHost(
         }
 
         composable(
-            route = Screen.SettingsAppearance.route,
-            enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
-            popExitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) }
+            route = Screen.SettingsAppearance.route
         ) {
             SettingsAppearanceScreen(
                 onBackClick = { navController.popBackStack() },
@@ -384,25 +379,19 @@ fun AppNavHost(
         }
 
         composable(
-            route = Screen.SettingsGestures.route,
-            enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
-            popExitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) }
+            route = Screen.SettingsGestures.route
         ) {
             SettingsGesturesScreen(onBackClick = { navController.popBackStack() })
         }
 
         composable(
-            route = Screen.SettingsTabs.route,
-            enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
-            popExitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) }
+            route = Screen.SettingsTabs.route
         ) {
             SettingsTabsScreen(onBackClick = { navController.popBackStack() })
         }
 
         composable(
-            route = Screen.SettingsPlayerBar.route,
-            enterTransition = { slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300)) },
-            popExitTransition = { slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300)) }
+            route = Screen.SettingsPlayerBar.route
         ) {
             SettingsPlayerBarScreen(onBackClick = { navController.popBackStack() })
         }

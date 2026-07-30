@@ -227,6 +227,7 @@ private fun blockerText(reason: SaveBlocker): String = stringResource(
         SaveBlocker.NOT_DOWNLOADED -> R.string.lyrics_save_blocked_not_downloaded
         SaveBlocker.NO_LYRICS_FOLDER -> R.string.lyrics_save_blocked_no_folder
         SaveBlocker.NO_REMOTE_HANDLE -> R.string.lyrics_save_blocked_no_remote
+        SaveBlocker.FOLDER_READ_ONLY -> R.string.lyrics_save_blocked_folder_read_only
     }
 )
 

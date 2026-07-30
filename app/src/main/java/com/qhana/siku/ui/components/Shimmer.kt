@@ -21,6 +21,10 @@ import androidx.compose.ui.unit.dp
 
 /**
  * Aplica un efecto de brillo (shimmer) animado al componente.
+ *
+ * El `tween` lineal de aquí NO sale del `MotionScheme` a propósito, por el mismo motivo que el giro
+ * de la cookie del play: los tokens del scheme son springs finitos (se asientan en un objetivo) y
+ * esto es un barrido que se repite sin fin a velocidad constante.
  */
 fun Modifier.shimmerEffect(): Modifier = composed {
     var size by remember { mutableStateOf(IntSize.Zero) }

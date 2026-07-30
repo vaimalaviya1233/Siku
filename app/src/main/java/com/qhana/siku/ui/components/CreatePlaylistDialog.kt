@@ -24,12 +24,16 @@ fun CreatePlaylistDialog(
             Column {
                 Text(stringResource(R.string.playlist_create_prompt))
                 Spacer(modifier = Modifier.height(16.dp))
-                OutlinedTextField(
+                // FILLED (`TextField`), la variante por defecto de M3. Sin `shape` propia: el
+                // relleno se apoya en la línea indicadora de abajo y sus esquinas superiores
+                // redondeadas salen del token del componente — redondearle las cuatro, como hacía
+                // el `RoundedCornerShape(12.dp)` que traía de outlined, deja la línea inferior
+                // colgando de un contorno que ya no existe.
+                TextField(
                     value = text,
                     onValueChange = { text = it },
                     singleLine = true,
                     placeholder = { Text(stringResource(R.string.playlist_create_placeholder)) },
-                    shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -65,11 +69,11 @@ fun RenamePlaylistDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.playlist_rename_title), fontWeight = FontWeight.Bold) },
         text = {
-            OutlinedTextField(
+            // FILLED, igual que el de crear (ver la nota de arriba sobre la shape).
+            TextField(
                 value = text,
                 onValueChange = { text = it },
                 singleLine = true,
-                shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth()
             )
         },

@@ -49,6 +49,7 @@ class SyncManagerTest {
     @RelaxedMockK lateinit var oneDriveSource: MusicSource
     @RelaxedMockK lateinit var artistImageRepository: com.qhana.siku.data.repository.ArtistImageRepository
     @RelaxedMockK lateinit var lightMetadataFetcher: LightMetadataFetcher
+    @RelaxedMockK lateinit var trackInfoBackfiller: TrackInfoBackfiller
     @RelaxedMockK lateinit var artworkHealingManager: ArtworkHealingManager
     @RelaxedMockK lateinit var snackbarManager: com.qhana.siku.data.util.SnackbarManager
 
@@ -72,7 +73,8 @@ class SyncManagerTest {
         syncManager = SyncManager(
             context, musicRepository, musicPreferences, networkManager,
             musicDownloader, requestCoordinator, authManager, sourceRegistry,
-            artistImageRepository, lightMetadataFetcher, artworkHealingManager, snackbarManager
+            artistImageRepository, lightMetadataFetcher, trackInfoBackfiller,
+            artworkHealingManager, snackbarManager
         )
 
         // Defaults seguros: sin trabajo pendiente, sin pausas, red y WiFi disponibles

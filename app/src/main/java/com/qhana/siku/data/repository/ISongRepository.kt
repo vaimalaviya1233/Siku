@@ -106,6 +106,19 @@ interface ISongRepository {
     suspend fun requeueDownloadedSongsWithoutMetadata(): Int
     suspend fun deleteAudioFileById(songId: String)
     suspend fun deleteSongs(idsToDelete: List<String>)
+
+    /**
+     * Ids que acaban de salir de la biblioteca, emitidos por [deleteSongs] — el único camino de
+     * borrado de la app (ver convención 8: nunca un `DELETE` crudo).
+     *
+     * Existe porque una canción borrada puede seguir EN LA COLA del reproductor, y ahí no se
+     * cura sola: al quitar una carpeta local los archivos no se tocan (son `content://`, siguen
+     * en el dispositivo), así que el tema sigue sonando perfectamente aunque ya no esté en la
+     * biblioteca. Que el consumidor sea un evento y no cada llamador es lo que hace que valga
+     * para TODOS los caminos —quitar una carpeta, apagar el escaneo del dispositivo, la
+     * reconciliación de un scan, desconectar la nube— sin tener que acordarse en cada uno.
+     */
+    val songsDeleted: Flow<List<String>>
     suspend fun countSongsNeedingWork(): Int
 
     // Tope de almacenamiento (caché LRU): bytes ocupados por audio descargado de la nube y
@@ -129,6 +142,12 @@ interface ISongRepository {
 
     // Metadata ligera (tags leídos de la cabecera remota, sin descargar el audio).
 
+    /** Canciones a las que les falta el número de pista (ver [SongDao.getSongsNeedingTrackInfo]). */
+    suspend fun getSongsNeedingTrackInfo(localOnly: Boolean): List<Song>
+
+    /** Escribe solo número de pista y año (ver [SongDao.updateTrackInfo]). */
+    suspend fun updateTrackInfo(songId: String, trackNumber: Int, year: Int)
+
     /** Canciones de nube que siguen con el centinela de "sin tags". */
     suspend fun getSongsNeedingLightMetadata(): List<Song>
 
@@ -139,6 +158,8 @@ interface ISongRepository {
         artist: String,
         album: String,
         genre: String?,
+        trackNumber: Int,
+        year: Int,
         durationMs: Long
     )
 

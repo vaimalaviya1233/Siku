@@ -6,6 +6,7 @@ import android.os.BatteryManager
 import android.os.StatFs
 import android.util.Log
 import com.qhana.siku.R
+import com.qhana.siku.data.config.AppConfig
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.repository.ArtworkRepository
 import com.qhana.siku.data.repository.IMusicRepository
@@ -52,6 +53,18 @@ class MusicDownloader @Inject constructor(
     companion object {
         private const val TAG = "MusicDownloader"
         private const val IO_BUFFER_SIZE = 64 * 1024 // 64KB: mejor throughput en WiFi moderno (menos llamadas read/write).
+
+        /**
+         * Cadencia de los avisos de progreso: se emite al superar este salto de fracción O al
+         * pasar [PROGRESS_EMIT_INTERVAL_MS] desde el último, y SIEMPRE al terminar.
+         *
+         * Sin el acotado, un FLAC entero emite miles de veces por segundo y con N descargas en
+         * paralelo eso satura el StateFlow que alimenta la UI. Los dos criterios se necesitan: el
+         * de porcentaje solo dejaría muda una descarga lenta, y el de tiempo solo haría trabajar
+         * de más a una rápida.
+         */
+        private const val PROGRESS_EMIT_STEP = 0.05f
+        private const val PROGRESS_EMIT_INTERVAL_MS = 250L
         private const val MIN_BATTERY_LEVEL = 20
         private const val MIN_DISK_SPACE_BYTES = 50L * 1024 * 1024 // 50MB mínimo
         // Stall detector: si no llegan bytes nuevos en este tiempo, abortar la descarga.
@@ -77,11 +90,6 @@ class MusicDownloader @Inject constructor(
          * cuelgue llegaría como una IOException genérica.
          */
         internal const val SOCKET_IDLE_TIMEOUT_MS = STALL_TIMEOUT_MS * 2
-
-        // Tolerancia al comparar el archivo local contra el tamaño reportado por el
-        // proveedor. Un corte de conexión "limpio" (EOF prematuro sin excepción) deja un
-        // archivo truncado que pasaría el viejo check de `length() > 0` para siempre.
-        private const val SIZE_TOLERANCE_BYTES = 1024L
 
         private val KNOWN_AUDIO_EXTENSIONS = setOf(
             "flac", "mp3", "m4a", "wav", "ogg", "opus", "aac", "wma", "aif", "aiff", "ape", "wv"
@@ -282,11 +290,10 @@ class MusicDownloader @Inject constructor(
                                     if (totalBytes > 0) {
                                         val currentProgress = currentBytes.toFloat() / totalBytes.toFloat()
                                         val now = System.currentTimeMillis()
-                                        // Emite cada 5% o cada 250ms (lo que ocurra antes), y siempre al 100%.
-                                        // Reduce el spam al StateFlow con N descargas paralelas sin perder
-                                        // suavidad perceptible en la UI.
-                                        val byPercent = currentProgress - lastProgress >= 0.05f
-                                        val byTime = now - lastProgressEmitAt >= 250L
+                                        // Lo que ocurra antes, y siempre al 100%: ver
+                                        // PROGRESS_EMIT_STEP y PROGRESS_EMIT_INTERVAL_MS.
+                                        val byPercent = currentProgress - lastProgress >= PROGRESS_EMIT_STEP
+                                        val byTime = now - lastProgressEmitAt >= PROGRESS_EMIT_INTERVAL_MS
                                         val isFinal = currentBytes == totalBytes
                                         if (byPercent || byTime || isFinal) {
                                             onProgress(currentProgress)
@@ -403,12 +410,21 @@ class MusicDownloader @Inject constructor(
         }
     }
 
+    /**
+     * Hay hueco para descargar. Si el propio `StatFs` falla no se puede saber, y se deja pasar
+     * a propósito: bloquear aquí convertiría un fallo al MEDIR en "ninguna descarga funciona",
+     * que es mucho peor que el caso que evita — con el disco lleno de verdad la escritura falla
+     * igual, ya clasificada y con reintento. Lo que sí cambia es que deje rastro: antes se
+     * tragaba la excepción en silencio y ese "sí, adelante" era indistinguible de una medición
+     * real, así que un dispositivo donde StatFs fallara siempre no habría dado ninguna pista.
+     */
     private fun hasEnoughDiskSpace(): Boolean {
         return try {
             val stat = StatFs(context.filesDir.absolutePath)
             stat.availableBytes > MIN_DISK_SPACE_BYTES
         } catch (e: Exception) {
-            true // En caso de error, permitir la descarga
+            Log.w(TAG, "No se pudo medir el espacio libre; se permite la descarga", e)
+            true
         }
     }
 
@@ -469,10 +485,12 @@ class MusicDownloader @Inject constructor(
 
     /**
      * true si [length] es notablemente menor que [expectedSize] (tamaño del proveedor).
-     * Con expectedSize desconocido (<= 0) no se puede juzgar: false.
+     * Delega en [AppConfig.looksTruncated]: el criterio de integridad es uno solo y compartido
+     * con el recovery de reproducción. Se mantiene como método para los llamadores (y tests)
+     * que ya lo usaban a través del downloader.
      */
     fun looksTruncated(length: Long, expectedSize: Long): Boolean =
-        expectedSize > 0 && expectedSize - length > SIZE_TOLERANCE_BYTES
+        AppConfig.looksTruncated(length, expectedSize)
 
     /** Borra TODOS los archivos de esta canción (cualquier extensión). Para re-descarga forzada. */
     fun deleteExistingDownloads(songId: String) {

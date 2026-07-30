@@ -4,9 +4,7 @@ import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -50,6 +48,9 @@ import com.qhana.siku.ui.components.TonalChip
 import com.qhana.siku.ui.components.overSharedElementsModifier
 import com.qhana.siku.ui.components.rememberListItemShape
 import com.qhana.siku.ui.viewmodel.BrowseViewModel
+
+import com.qhana.siku.ui.theme.appEffectsSpec
+import com.qhana.siku.ui.theme.AppBoundsTransform
 
 /**
  * Detalle de un género: mismo diseño inmersivo que el detalle de álbum/artista (header
@@ -110,7 +111,9 @@ fun GenreDetailScreen(
             rawTitleFraction >= 0.5f -> 1f
             else -> 0f
         },
-        animationSpec = spring(stiffness = Spring.StiffnessMedium),
+        // Ver el kdoc de este mismo bloque en ArtistDetailScreen: effects (sin rebote) porque la
+        // fracción conduce a la vez la posición del título y un alpha.
+        animationSpec = appEffectsSpec(),
         label = "topBarFraction"
     )
     var overlayOrigin by remember { mutableStateOf(Offset.Zero) }
@@ -187,6 +190,7 @@ fun GenreDetailScreen(
                             color = colorScheme.surfaceContainer,
                             shape = rememberListItemShape(index, songs.size),
                             modifier = Modifier
+                                .animateItem()
                                 .fillMaxWidth()
                                 .padding(horizontal = 16.dp, vertical = 1.dp)
                         ) {
@@ -314,7 +318,9 @@ private fun GenreImmersiveHeader(
         with(sharedTransitionScope) {
             Modifier.sharedBounds(
                 sharedContentState = rememberSharedContentState(key = "genre_image_$genreName"),
-                animatedVisibilityScope = animatedVisibilityScope
+                animatedVisibilityScope = animatedVisibilityScope,
+                // Spring del tema en vez del default de la API (ver AppBoundsTransform).
+                boundsTransform = AppBoundsTransform
             )
         }
     } else Modifier

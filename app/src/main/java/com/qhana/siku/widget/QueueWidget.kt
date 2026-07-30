@@ -46,6 +46,7 @@ import androidx.glance.text.Text
 import androidx.glance.text.TextStyle
 import com.qhana.siku.MainActivity
 import com.qhana.siku.R
+import com.qhana.siku.data.repository.ArtworkRepository
 
 class QueueWidgetReceiver : GlanceAppWidgetReceiver() {
     override val glanceAppWidget: GlanceAppWidget = QueueWidget()
@@ -87,12 +88,17 @@ class QueueWidget : GlanceAppWidget() {
 /**
  * Acento carátula → (fondo, contenido) como providers day/night, o null si el snapshot aún
  * no trae colores. El contenido se decide por luminancia (blanco sobre acentos oscuros).
+ *
+ * El snapshot trae los **seeds crudos** de la carátula, así que hay que proyectarlos al tono que
+ * contrasta en cada tema ([ArtworkRepository.accentForTheme]) antes de usarlos como fondo: un
+ * widget no vive bajo un `MaterialTheme` seedeado y no tiene quién le derive el rol. La operación
+ * es idempotente sobre un snapshot viejo (ya venía proyectado), así que no hace falta versionarlo.
  */
 private fun accentColors(snapshot: WidgetSnapshot): Pair<androidx.glance.unit.ColorProvider, androidx.glance.unit.ColorProvider>? {
     val light = snapshot.accentLight ?: return null
     val dark = snapshot.accentDark ?: return null
-    val day = Color(light)
-    val night = Color(dark)
+    val day = Color(ArtworkRepository.accentForTheme(light, isDarkTheme = false))
+    val night = Color(ArtworkRepository.accentForTheme(dark, isDarkTheme = true))
     val onDay = if (day.luminance() > 0.5f) Color.Black else Color.White
     val onNight = if (night.luminance() > 0.5f) Color.Black else Color.White
     return ColorProvider(day = day, night = night) to ColorProvider(day = onDay, night = onNight)

@@ -23,6 +23,7 @@ import com.qhana.siku.R
 import com.qhana.siku.data.model.Playlist
 import com.qhana.siku.data.repository.PlaylistCoverMeta
 import com.qhana.siku.ui.components.MaterialSymbol
+import com.qhana.siku.ui.components.MenuItemIcon
 import com.qhana.siku.ui.components.rememberListItemShape
 
 /**
@@ -114,7 +115,8 @@ fun PlaylistList(
                 onClick = { onPlaylistClick(playlist.id) },
                 onPlay = { onPlayPlaylist(playlist.id) },
                 onRename = { playlistToRename = playlist },
-                onDelete = { playlistToDelete = playlist }
+                onDelete = { playlistToDelete = playlist },
+                modifier = Modifier.animateItem()
             )
         }
     }
@@ -218,10 +220,11 @@ private fun PlaylistItem(
     onClick: () -> Unit,
     onPlay: () -> Unit,
     onRename: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Surface(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp), // Segmented margins
         onClick = onClick,
@@ -277,23 +280,32 @@ private fun PlaylistItemMenu(onRename: () -> Unit, onDelete: () -> Unit) {
         IconButton(onClick = { showMenu = true }) {
             MaterialSymbol("more_vert", color = MaterialTheme.colorScheme.onSurfaceVariant, size = 24.sp)
         }
-        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.playlist_rename_title)) },
-                leadingIcon = { MaterialSymbol("edit") },
-                onClick = {
-                    showMenu = false
-                    onRename()
-                }
-            )
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.common_delete), color = MaterialTheme.colorScheme.error) },
-                leadingIcon = { MaterialSymbol("delete", color = MaterialTheme.colorScheme.error) },
-                onClick = {
-                    showMenu = false
-                    onDelete()
-                }
-            )
+        // Menú SEGMENTADO (popup + grupo), no el `DropdownMenu` clásico: ver la nota en SortChip.
+        DropdownMenuPopup(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+            DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
+                DropdownMenuItem(
+                    onClick = {
+                        showMenu = false
+                        onRename()
+                    },
+                    text = { Text(stringResource(R.string.playlist_rename_title)) },
+                    shape = MenuDefaults.leadingItemShape,
+                    leadingIcon = { MenuItemIcon("edit") }
+                )
+                // El destructivo se tiñe con `error` en los propios slots y NO con
+                // `MenuDefaults.itemColors().copy(...)`: `MenuItemColors` expone dos sobrecargas
+                // de `copy` que comparten `textColor`/`leadingIconColor`, así que esa llamada no
+                // resuelve.
+                DropdownMenuItem(
+                    onClick = {
+                        showMenu = false
+                        onDelete()
+                    },
+                    text = { Text(stringResource(R.string.common_delete), color = MaterialTheme.colorScheme.error) },
+                    shape = MenuDefaults.trailingItemShape,
+                    leadingIcon = { MenuItemIcon("delete", color = MaterialTheme.colorScheme.error) }
+                )
+            }
         }
     }
 }

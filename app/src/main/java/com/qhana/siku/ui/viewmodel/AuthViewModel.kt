@@ -1,5 +1,6 @@
 package com.qhana.siku.ui.viewmodel
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.qhana.siku.data.auth.AuthManager
@@ -11,9 +12,13 @@ import com.qhana.siku.data.repository.ArtworkRepository
 import com.qhana.siku.data.repository.IMusicRepository
 import com.qhana.siku.player.MusicController
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import androidx.work.WorkManager
@@ -29,11 +34,26 @@ class AuthViewModel @Inject constructor(
     private val musicPreferences: MusicPreferences
 ) : ViewModel() {
 
-    // null = sesión aún sin resolver (MSAL inicializando/leyendo la cuenta de disco).
-    // MainActivity espera a que se resuelva antes de componer el NavHost, para no
-    // mostrar el Login un instante y navegar a Library después (flash al reabrir).
-    private val _isLoggedIn = MutableStateFlow<Boolean?>(null)
-    val isLoggedIn: StateFlow<Boolean?> = _isLoggedIn.asStateFlow()
+    /**
+     * ¿Se resolvió ya la sesión al arrancar? Es lo ÚNICO que este ViewModel sabe y `AuthManager`
+     * no: la diferencia entre "no hay sesión" y "todavía no lo sé".
+     */
+    private val _sessionResolved = MutableStateFlow(false)
+
+    /**
+     * `null` = sesión aún sin resolver (MSAL inicializando/leyendo la cuenta de disco).
+     * MainActivity retiene el splash mientras valga null, para no mostrar el onboarding un
+     * instante y navegar a la biblioteca después (flash al reabrir).
+     *
+     * Se DERIVA de `AuthManager.hasSession`, que es el dueño del hecho. Antes era un
+     * `MutableStateFlow` propio escrito en tres sitios (restaurar, entrar, salir), en paralelo a
+     * la copia que mantenía `SourcesViewModel`: dos estados que representaban lo mismo y que solo
+     * coincidían mientras nadie olvidara actualizar uno de ellos.
+     */
+    val isLoggedIn: StateFlow<Boolean?> =
+        combine(_sessionResolved, authManager.hasSession) { resolved, hasSession ->
+            if (resolved) hasSession else null
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
@@ -48,11 +68,26 @@ class AuthViewModel @Inject constructor(
     private fun checkExistingSession() {
         viewModelScope.launch {
             _isLoading.value = true
-            // tryRestoreSession suspende hasta que MSAL esté listo (con timeout propio:
-            // AuthManager.MSAL_INIT_TIMEOUT_MS, que es el techo real del splash).
-            // El resultado (true/false) resuelve el estado null inicial.
-            _isLoggedIn.value = authManager.tryRestoreSession()
-            _isLoading.value = false
+            try {
+                // tryRestoreSession suspende hasta que MSAL esté listo (con timeout propio:
+                // AuthManager.MSAL_INIT_TIMEOUT_MS, que es el techo real del splash) y siembra
+                // `hasSession` con el resultado. Aquí solo hace falta marcar que ya se resolvió.
+                authManager.tryRestoreSession()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Un fallo al restaurar significa exactamente "no hay sesión" — que es el valor
+                // con el que `hasSession` ya arranca—, y es recuperable: el usuario entra desde
+                // Ajustes. Lo que NO puede pasar es quedarse sin resolver.
+                Log.w(TAG, "No se pudo restaurar la sesión: ${e.message}")
+            } finally {
+                // En el `finally`: mientras esto no se marque, `isLoggedIn` vale null y el splash
+                // del sistema sigue en pantalla (MainActivity.setKeepOnScreenCondition). Si MSAL
+                // lanza —cuenta corrupta, config inválida, error del broker— y no se marcara, la
+                // app se quedaría colgada en el splash sin pantalla que mostrar ni forma de salir.
+                _sessionResolved.value = true
+                _isLoading.value = false
+            }
         }
     }
 
@@ -63,20 +98,26 @@ class AuthViewModel @Inject constructor(
             // (red, cancelación de MSAL) dejaba el banner de error para siempre — el reintento
             // podía tener éxito y el usuario seguía viendo el mensaje viejo bajo las tarjetas.
             _error.value = null
-            authManager.signIn(activity).collect { result ->
-                when (result) {
-                    is AuthResult.Success -> {
-                        _isLoggedIn.value = true
-                        _isLoading.value = false
-                    }
-                    is AuthResult.Error -> {
-                        _error.value = result.message
-                        _isLoading.value = false
-                    }
-                    AuthResult.Cancelled -> {
-                        _isLoading.value = false
+            // El `finally` es la única garantía de que el spinner se apaga: si `signIn` LANZA en
+            // vez de emitir un `AuthResult.Error` —o si la corrutina se cancela—, apagarlo en
+            // cada rama del `when` no sirve de nada y el botón de entrar se queda girando para
+            // siempre, sin error visible y sin forma de reintentar.
+            try {
+                authManager.signIn(activity).collect { result ->
+                    // El éxito NO se anota aquí: `AuthManager` ya publica la sesión nueva en
+                    // `hasSession`, de donde sale `isLoggedIn`. Este colector solo se ocupa del
+                    // error, que sí es de este intento y de nadie más.
+                    when (result) {
+                        is AuthResult.Error -> _error.value = result.message
+                        is AuthResult.Success, AuthResult.Cancelled -> Unit
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _error.value = e.message ?: e.javaClass.simpleName
+            } finally {
+                _isLoading.value = false
             }
         }
     }
@@ -93,7 +134,8 @@ class AuthViewModel @Inject constructor(
         viewModelScope.launch {
             authManager.signOut().collect { success ->
                 if (success) {
-                    _isLoggedIn.value = false
+                    // La sesión ya la dio de baja `AuthManager` en su propio callback; aquí solo
+                    // queda la limpieza de datos que depende de ella.
                     // Un error de un login anterior no describe el estado actual: sin sesión no
                     // hay nada que hubiera fallado.
                     _error.value = null
@@ -121,4 +163,7 @@ class AuthViewModel @Inject constructor(
         }
     }
 
+    private companion object {
+        const val TAG = "AuthViewModel"
+    }
 }

@@ -3,14 +3,16 @@ package com.qhana.siku.ui.components
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuGroup
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DropdownMenuPopup
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MaterialTheme.colorScheme
+import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -125,23 +127,35 @@ fun SongOverflowButton(
         ) {
             MaterialSymbol("more_vert", size = 18.sp, color = colorScheme.onSecondaryContainer)
         }
-        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-            DropdownMenuItem(
-                text = { Text(if (isFavorite) stringResource(R.string.common_remove_from_favorites) else stringResource(R.string.common_add_to_favorites)) },
-                leadingIcon = { MaterialSymbol("favorite", fill = isFavorite) },
-                onClick = {
-                    showMenu = false
-                    onToggleFavorite()
-                }
-            )
-            DropdownMenuItem(
-                text = { Text(stringResource(R.string.common_add_to_playlist)) },
-                leadingIcon = { MaterialSymbol("playlist_add") },
-                onClick = {
-                    showMenu = false
-                    onAddToPlaylist()
-                }
-            )
+        // Menú SEGMENTADO (popup + grupo), no el `DropdownMenu` clásico: ver la nota en SortChip.
+        DropdownMenuPopup(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+            DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
+                // Favorito es un TOGGLE, no una acción: va con la sobrecarga `checked`
+                // (contenedor marcado, morph de forma y `Role.Checkbox`). El texto sigue diciendo
+                // qué pasa al tocarlo — el estado lo cuenta el item, no solo el relleno del
+                // corazón, que un lector de pantalla no anuncia.
+                DropdownMenuItem(
+                    checked = isFavorite,
+                    onCheckedChange = {
+                        showMenu = false
+                        onToggleFavorite()
+                    },
+                    text = { Text(if (isFavorite) stringResource(R.string.common_remove_from_favorites) else stringResource(R.string.common_add_to_favorites)) },
+                    // Menú de items fijos: la posición se dice con `leading`/`trailing` en vez de
+                    // `itemShape(index, count)`, que obligaría a mantener a mano un total.
+                    shapes = MenuDefaults.itemShapes(shape = MenuDefaults.leadingItemShape),
+                    leadingIcon = { MenuItemIcon("favorite", fill = isFavorite) }
+                )
+                DropdownMenuItem(
+                    onClick = {
+                        showMenu = false
+                        onAddToPlaylist()
+                    },
+                    text = { Text(stringResource(R.string.common_add_to_playlist)) },
+                    shape = MenuDefaults.trailingItemShape,
+                    leadingIcon = { MenuItemIcon("playlist_add") }
+                )
+            }
         }
     }
 }

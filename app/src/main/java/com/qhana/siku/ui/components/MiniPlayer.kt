@@ -1,13 +1,14 @@
 package com.qhana.siku.ui.components
 
 import androidx.compose.animation.*
-import androidx.compose.animation.core.FastOutLinearInEasing
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
-import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Size
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -17,83 +18,112 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import com.qhana.siku.R
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.qhana.siku.data.model.Song
+
+import com.qhana.siku.ui.theme.AppBoundsTransform
+import com.qhana.siku.ui.theme.appSpatialSpec
+import com.qhana.siku.ui.theme.appFastSpatialSpec
+import com.qhana.siku.ui.theme.appEffectsSpec
+import com.qhana.siku.ui.theme.appFastEffectsSpec
 
 // ============== MINI PLAYER ==============
 
+// PROGRESO: el mini lo muestra como RELLENO del contenedor (ver [MiniPlayerProgressFillAlpha]).
+//
+// Historia, porque es el tercer intento y los dos anteriores se descartaron: hubo una barra de 3dp
+// en el borde inferior que la forma de píldora obligaba a recortar 34dp por lado (a esa altura el
+// contorno ya se ha metido hacia adentro), y un tinte del contenedor entero. La conclusión que
+// quedó escrita fue que, antes que el estilo del indicador, había que resolver la GEOMETRÍA de la
+// píldora.
+//
+// Esto es lo que la resuelve: un relleno de altura COMPLETA no tiene borde propio que recortar —
+// las esquinas de la píldora lo recortan solas, sin cálculos—, y a diferencia del tinte uniforme
+// tiene un borde vertical nítido que se puede leer como posición. No cuesta ni un píxel de alto,
+// que era la otra objeción de fondo: el mini mide 72dp y no había dónde meter un indicador.
+
+/**
+ * Opacidad del relleno de progreso sobre `surfaceContainer`.
+ *
+ * Es BAJA a propósito y el color es `primary` (no `primaryContainer` ni `secondaryContainer`), por
+ * dos restricciones que se cruzan encima de esta misma superficie:
+ *  - el botón "siguiente" ES `secondaryContainer`, así que un relleno de esa familia lo borraría
+ *    justo en la mitad de la canción en la que el relleno lo alcanza;
+ *  - el texto va en blanco (oscuro) o casi negro (claro) según el tema, y no se re-calcula por
+ *    encima del relleno: subir la opacidad mueve la luminancia del fondo bajo el título y se come
+ *    el contraste de una de las dos mitades.
+ *
+ * Con `primary` a esta opacidad el tinte hereda el acento del álbum —así que el relleno cambia con
+ * la portada, como el resto del reproductor— sin acercarse a ninguno de los dos límites. Subirlo es
+ * lo primero que se nota si el efecto queda flojo; el techo lo marca el contraste del título, no el
+ * gusto.
+ */
+private const val MiniPlayerProgressFillAlpha = 0.16f
+
+/**
+ * Default de los flows de progreso: sin posición ni duración el relleno no se dibuja.
+ *
+ * Es una instancia COMPARTIDA y no un `MutableStateFlow(0L)` en la firma: un default con
+ * constructor crea un objeto nuevo en cada composición del mini que no los pase, y aquí solo hace
+ * falta un cero constante. Los parámetros son no-nullables a propósito — con `StateFlow?` el
+ * `collectAsStateWithLifecycle` quedaría detrás de un `?.`, o sea una llamada composable dentro de
+ * una rama condicional, que es justo lo que conviene no tener en el camino de una recomposición
+ * por segundo.
+ */
+private val ZeroProgressFlow: StateFlow<Long> = MutableStateFlow(0L)
+
+/**
+ * Título y subtítulo del mini. Son los ROLES del esquema, `onSurface`/`onSurfaceVariant`, que es el
+ * par de contenido del fondo que hay debajo (`surfaceContainer`).
+ *
+ * Sustituyen a un blanco puro y un `#1A1A1A` FIJOS con alpha 0.7/0.6, elegidos por
+ * `isSystemInDarkTheme()`. Eran lo único de esta pantalla que no se teñía con la carátula: el fondo
+ * del mini sí es un rol del tema, así que el texto quedaba genérico sobre una superficie de color —
+ * el mismo defecto que acabábamos de corregir en los iconos, con otra ropa. Y de paso arregla dos
+ * cosas más: la jerarquía título/subtítulo la hace el ROL y no un alpha inventado (M3 garantiza el
+ * contraste de los dos, que un 0.6 de alpha sobre un fondo tonal no garantiza), y desaparece la
+ * consulta al tema del SISTEMA, que no tiene por qué coincidir con el tema de la app (ver
+ * `AmbientPlayerActivity`, que lo fuerza oscuro).
+ */
 @Immutable
 private data class MiniPlayerColors(
     val titleColor: Color,
     val contentColor: Color
 )
 
-private fun calculateMiniPlayerTextColors(
-    isDarkTheme: Boolean
-): MiniPlayerColors {
-    val titleColor: Color
-    val contentColor: Color
-
-    if (isDarkTheme) {
-        titleColor = Color.White
-        contentColor = Color.White.copy(alpha = 0.7f)
-    } else {
-        titleColor = Color(0xFF1A1A1A)
-        contentColor = Color(0xFF1A1A1A).copy(alpha = 0.6f)
-    }
-
-    return MiniPlayerColors(
-        titleColor = titleColor,
-        contentColor = contentColor
-    )
-}
-
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun MiniPlayer(
     song: Song?,
     isPlaying: Boolean,
-    currentPositionFlow: kotlinx.coroutines.flow.StateFlow<Long>,
-    duration: Long,
-    albumColors: com.qhana.siku.data.model.AlbumColors?,
     onPlayPause: () -> Unit,
     onNextClick: () -> Unit,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     isBuffering: Boolean = false,
+    /**
+     * Posición y duración como FLOWS, igual que el NowPlaying: la posición cambia cada segundo y
+     * pasarla como valor recompondría el mini —y con él la carátula y el marquee— en cada tick.
+     * Colectados aquí y leídos SOLO dentro de la lambda de dibujo, el tick invalida el dibujo del
+     * relleno y nada más.
+     */
+    currentPositionFlow: StateFlow<Long> = ZeroProgressFlow,
+    durationFlow: StateFlow<Long> = ZeroProgressFlow,
     sharedTransitionScope: SharedTransitionScope? = null,
     animatedVisibilityScope: AnimatedVisibilityScope? = null
 ) {
     if (song == null) return
 
-    // collectAsStateWithLifecycle: detiene la recolección cuando la app está en background
-    // para evitar trabajo innecesario (MiniPlayer no debe actualizar progreso sin UI visible).
-    val currentPosition by currentPositionFlow.collectAsStateWithLifecycle()
-    val progress = if (duration > 0) currentPosition.toFloat() / duration.toFloat() else 0f
-
-    val isDarkTheme = isSystemInDarkTheme()
-
-    val primaryColor = MaterialTheme.colorScheme.primary
-    // Acento del álbum para la barra de progreso (fallback a primary del sistema), con la misma
-    // guarda de contraste que el botón (canciones sin carátula → acento visible).
-    val progressAccent = remember(albumColors, isDarkTheme, primaryColor) {
-        albumAccent(albumColors, isDarkTheme, fallback = primaryColor)
-    }
-
-    // Colores del texto (título/artista) según el tema.
-    val textColors = remember(isDarkTheme) {
-        calculateMiniPlayerTextColors(isDarkTheme)
-    }
+    // Colores del texto (título/artista): roles del esquema, ver [MiniPlayerColors].
+    val textColors = MiniPlayerColors(
+        titleColor = MaterialTheme.colorScheme.onSurface,
+        contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+    )
 
     // Background SÓLIDO surfaceContainer (el mismo del ajuste "fondo sólido" del NowPlaying):
     // superficie plana estable, sin tinte de acento. Es un rol del scheme sembrado con el álbum,
@@ -126,7 +156,28 @@ fun MiniPlayer(
         // debe LEERSE flotante; el default de Card (1dp) quedaría casi plano y desharía la sombra.
         elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
     ) {
-        Box(modifier = Modifier.fillMaxSize().background(backgroundColor)) {
+        val position = currentPositionFlow.collectAsStateWithLifecycle()
+        val duration = durationFlow.collectAsStateWithLifecycle()
+        val fillColor = MaterialTheme.colorScheme.primary.copy(alpha = MiniPlayerProgressFillAlpha)
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(backgroundColor)
+                // `drawBehind` y no un Box con `fillMaxWidth(fraction)`: la fracción se lee dentro
+                // de la lambda de dibujo, así que el tick de posición NO recompone nada, solo
+                // repinta. (Además `fillMaxWidth(0f)` es ilegal, y al empezar una canción la
+                // fracción es exactamente 0.)
+                .drawBehind {
+                    val total = duration.value
+                    if (total <= 0L) return@drawBehind
+                    val fraction = (position.value.toFloat() / total).coerceIn(0f, 1f)
+                    if (fraction <= 0f) return@drawBehind
+                    // Borde derecho RECTO: es lo que se lee como "hasta aquí vamos". Las esquinas
+                    // de la píldora las recorta el Card, que ya clipea a su shape.
+                    drawRect(color = fillColor, size = Size(size.width * fraction, size.height))
+                }
+        ) {
             // Contenido
             MiniPlayerContent(
                 song,
@@ -137,37 +188,6 @@ fun MiniPlayer(
                 isBuffering,
                 sharedTransitionScope,
                 animatedVisibilityScope
-            )
-
-            // Barra de progreso inferior (fina, siempre visible). Va INSET y con puntas
-            // redondeadas. Un único Box con drawBehind (track + progreso) en vez de un Box
-            // hijo con fillMaxWidth(progress): así el tick de posición solo re-DIBUJA, sin
-            // disparar una pasada de layout cada segundo.
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    // El inset NO es estético: la barra vive pegada al borde inferior de una
-                    // píldora de radio = alto/2, así que a esa altura el contorno curvo ya se
-                    // metió ~26dp hacia adentro (r - √(r² - (r-y)²), con r = 36 e y = 3). Con
-                    // menos que eso las puntas se saldrían del recorte del Card.
-                    .padding(horizontal = 34.dp)
-                    .height(3.dp)
-                    .align(Alignment.BottomCenter)
-                    .drawBehind {
-                        val radius = CornerRadius(size.height / 2f)
-                        drawRoundRect(
-                            color = progressAccent.copy(alpha = 0.15f),
-                            cornerRadius = radius
-                        )
-                        val p = progress.coerceIn(0f, 1f)
-                        if (p > 0f) {
-                            drawRoundRect(
-                                color = progressAccent,
-                                size = Size(size.width * p, size.height),
-                                cornerRadius = radius
-                            )
-                        }
-                    }
             )
         }
     }
@@ -196,10 +216,22 @@ private fun MiniPlayerContent(
     // Transporte alineado con el NowPlaying: laterales tonales (secondaryContainer) y play
     // resaltado (primary). Son roles del scheme sembrado con el álbum, así que ya vienen
     // teñidos por la canción sin animar colores a mano.
+    //
+    // Los pares `on*` van CRUDOS, igual que en el NowPlaying: el mini y el reproductor comparten el
+    // shared element de la carátula, así que se ven uno al lado del otro durante la transición y
+    // cualquier diferencia de tratamiento se leería como un salto de color. Ver el porqué de no
+    // reencuadrarlos junto a `ensureContrast` en PlayerWidgets.kt.
     val sideContainer = MaterialTheme.colorScheme.secondaryContainer
     val sideContent = MaterialTheme.colorScheme.onSecondaryContainer
     val playContainer = MaterialTheme.colorScheme.primary
     val playContent = MaterialTheme.colorScheme.onPrimary
+
+    // Izados: los `transitionSpec` de los dos `AnimatedContent` del botón de play no son lambdas
+    // composables. Mismos tokens que el glifo del transporte del NowPlaying — es el mismo control.
+    val bufferFadeIn = appEffectsSpec<Float>()
+    val bufferFadeOut = appFastEffectsSpec<Float>()
+    val glyphEnterScale = appSpatialSpec<Float>()
+    val glyphExitScale = appFastSpatialSpec<Float>()
 
     Row(
         // fillMaxHeight + CenterVertically: el contenido se centra en los 64.dp fijos del Surface
@@ -211,8 +243,19 @@ private fun MiniPlayerContent(
         val sharedElementModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
             with(sharedTransitionScope) {
                 Modifier.sharedElement(
-                    sharedContentState = rememberSharedContentState(key = "album_art_${song.id}"),
-                    animatedVisibilityScope = animatedVisibilityScope
+                    // Key CONSTANTE, no `..._${song.id}`: ver [ALBUM_ART_SHARED_KEY]. Con el id
+                    // dentro, abrir una canción distinta desde una lista pedía keys diferentes en
+                    // cada punta y el morph no ocurría.
+                    sharedContentState = rememberSharedContentState(key = ALBUM_ART_SHARED_KEY),
+                    animatedVisibilityScope = animatedVisibilityScope,
+                    // MISMA curva y duración que el slide del player (ver AppBoundsTransform y
+                    // PLAYER_SLIDE_MS). Es obligatorio: el slide desplaza el reproductor con un
+                    // graphicsLayer, que NO mueve el layout, así que este shared element viaja
+                    // hacia la posición FINAL de la carátula. Si asienta antes que el slide
+                    // —como hacía con el spring default de la API, ~300 ms contra 500— se queda
+                    // quieta arriba mientras el resto del player todavía sube por debajo: el
+                    // "flash" reportado el 30 jul.
+                    boundsTransform = AppBoundsTransform
                 )
             }
         } else Modifier
@@ -231,7 +274,7 @@ private fun MiniPlayerContent(
             cacheKey = song.id
         )
 
-        Spacer(modifier = Modifier.width(14.dp))
+        Spacer(modifier = Modifier.width(ComponentConfig.MiniPlayerTextGap))
 
         Column(modifier = Modifier.weight(1f)) {
             Text(
@@ -247,7 +290,7 @@ private fun MiniPlayerContent(
                     velocity = 30.dp
                 )
             )
-            Spacer(modifier = Modifier.height(2.dp))
+            Spacer(modifier = Modifier.height(ComponentConfig.MiniPlayerTextLineGap))
             Text(
                 text = song.artist,
                 style = MaterialTheme.typography.bodySmall,
@@ -257,7 +300,10 @@ private fun MiniPlayerContent(
             )
         }
 
-        Spacer(modifier = Modifier.width(8.dp))
+        // MISMO gap que hay entre la carátula y el texto: el bloque de título/artista queda con el
+        // mismo aire a ambos lados. Con el gap de los botones (4dp) el texto llegaba pegado al
+        // play. Todo el ancho que sobra se lo sigue quedando la Column de arriba.
+        Spacer(modifier = Modifier.width(ComponentConfig.MiniPlayerTextGap))
 
         // Solo play + siguiente. El "anterior" salió del mini a propósito: con tres controles
         // el texto se quedaba en ~155dp (marquee permanente) y los botones no llegaban al
@@ -273,7 +319,7 @@ private fun MiniPlayerContent(
         ) {
             AnimatedContent(
                 targetState = isBuffering,
-                transitionSpec = { fadeIn() togetherWith fadeOut() },
+                transitionSpec = { fadeIn(bufferFadeIn) togetherWith fadeOut(bufferFadeOut) },
                 label = "bufferingAnimation"
             ) { buffering: Boolean ->
                 if (buffering) {
@@ -287,11 +333,7 @@ private fun MiniPlayerContent(
                     AnimatedContent(
                         targetState = showAsPlaying,
                         transitionSpec = {
-                            scaleIn(
-                                animationSpec = tween(200, easing = FastOutSlowInEasing)
-                            ) togetherWith scaleOut(
-                                animationSpec = tween(150, easing = FastOutLinearInEasing)
-                            )
+                            scaleIn(glyphEnterScale) togetherWith scaleOut(glyphExitScale)
                         },
                         label = "playPauseAnimation"
                     ) { playing: Boolean ->

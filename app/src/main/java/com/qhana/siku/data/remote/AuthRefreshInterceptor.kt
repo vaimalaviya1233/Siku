@@ -60,7 +60,6 @@ class AuthRefreshInterceptor @Inject constructor(
         if (request.header(HEADER_RETRY_MARKER) != null) return response
 
         Log.w(TAG, "401 recibido en ${request.url.encodedPath}, refrescando token")
-        response.close()
 
         val newToken = try {
             runBlocking {
@@ -77,9 +76,18 @@ class AuthRefreshInterceptor @Inject constructor(
         }
 
         if (newToken !is AuthResult.Success || newToken.token.isBlank()) {
+            // Se devuelve el 401 ORIGINAL, sin tocar la red. Antes se cerraba arriba y aquí se
+            // hacía `chain.proceed(request)`: o sea, la MISMA petición con el MISMO token muerto,
+            // que solo podía dar otro 401 — coste doble en cada petición de un scan con la sesión
+            // rota. Por eso el `close()` se movió a después de esta decisión: quien devuelve una
+            // respuesta no puede haberla cerrado.
             Log.e(TAG, "Token refresh falló, devolviendo 401 original")
-            return chain.proceed(request)
+            return response
         }
+
+        // A partir de aquí sí se descarta: el cuerpo del 401 no lo va a leer nadie y hay que
+        // cerrarlo para liberar la conexión antes del reintento.
+        response.close()
 
         val retryRequest = request.newBuilder()
             .header("Authorization", "Bearer ${newToken.token}")

@@ -2,10 +2,7 @@ package com.qhana.siku.ui.screens
 
 import androidx.compose.animation.*
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.background
@@ -44,6 +41,15 @@ import com.qhana.siku.ui.components.*
 import dev.chrisbanes.haze.HazeState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+
+import com.qhana.siku.ui.theme.AppBoundsTransform
+import com.qhana.siku.ui.theme.appSpatialSpec
+import com.qhana.siku.ui.theme.appFastSpatialSpec
+import com.qhana.siku.ui.theme.appSlowSpatialSpec
+import com.qhana.siku.ui.theme.appEffectsSpec
+import com.qhana.siku.ui.theme.appFastEffectsSpec
+import com.qhana.siku.ui.theme.appSlowEffectsSpec
+import com.qhana.siku.ui.theme.AppRevealSpec
 
 /*
  * Carátula, cabecera e identidad de la canción en el NowPlaying: la barra superior con el chip
@@ -222,7 +228,8 @@ internal fun PlaybackSourceChip(
     }
 }
 
-@OptIn(ExperimentalSharedTransitionApi::class)
+// ExpressiveApi: `MaterialShapes.Cookie12Sided` del reveal, que pasó a exigir opt-in en alpha24.
+@OptIn(ExperimentalSharedTransitionApi::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 internal fun AlbumArtSection(
     song: Song,
@@ -243,21 +250,20 @@ internal fun AlbumArtSection(
 ) {
     // "Respiración" al pausar: la carátula se encoge sutilmente y su forma morfea de
     // MaterialShapes.Square a MaterialShapes.Circle (estado de reposo); al reproducir recupera
-    // plena presencia y vuelve a cuadrado. Springs suaves.
+    // plena presencia y vuelve a cuadrado.
+    //
+    // Token `slowSpatial` (el más blando del scheme) para los dos, sustituyendo a un
+    // `spring(LowBouncy, StiffnessLow)` a mano: es el elemento más grande de la pantalla y el que
+    // peor lleva ir deprisa. Un solo spec compartido, porque forma y escala son UN gesto.
+    val artBreathSpec = appSlowSpatialSpec<Float>()
     val artMorphProgress by animateFloatAsState(
         targetValue = if (isPlaying) 0f else 1f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioLowBouncy,
-            stiffness = Spring.StiffnessLow
-        ),
+        animationSpec = artBreathSpec,
         label = "artMorph"
     )
     val artScale by animateFloatAsState(
         targetValue = if (isPlaying) 1f else 0.93f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioLowBouncy,
-            stiffness = Spring.StiffnessLow
-        ),
+        animationSpec = artBreathSpec,
         label = "artScale"
     )
 
@@ -288,8 +294,12 @@ internal fun AlbumArtSection(
             if (sharedTransitionScope != null && animatedVisibilityScope != null) {
                 with(sharedTransitionScope) {
                     Modifier.sharedElement(
-                        sharedContentState = rememberSharedContentState(key = "album_art_${song.id}"),
-                        animatedVisibilityScope = animatedVisibilityScope
+                        // Key CONSTANTE (ver [ALBUM_ART_SHARED_KEY]): la otra punta es la píldora,
+                        // que durante el tap todavía puede venir de otra canción.
+                        sharedContentState = rememberSharedContentState(key = ALBUM_ART_SHARED_KEY),
+                        animatedVisibilityScope = animatedVisibilityScope,
+                        // Acoplado al slide del player; ver el otro extremo del par en MiniPlayer.
+                        boundsTransform = AppBoundsTransform
                     )
                 }
             } else Modifier
@@ -303,15 +313,32 @@ internal fun AlbumArtSection(
         var incomingArt by remember { mutableStateOf<Pair<String, String?>?>(null) }
         val reveal = remember { Animatable(0f) }
 
+        // ¿El reproductor ya está ABIERTO y quieto, o todavía subiendo desde la píldora? Misma
+        // señal que apaga el blur durante la apertura (ver `glassBlurEnabled` en NowPlayingScreen).
+        val playerSettled = animatedVisibilityScope?.transition?.let {
+            it.currentState == it.targetState
+        } ?: true
+
+        // Izado: dentro del `LaunchedEffect` ya no hay composición donde leer el tema.
+        //
+        // Spec propio y no un token del scheme: ver el kdoc de [AppRevealSpec].
+        val artRevealSpec = AppRevealSpec
         LaunchedEffect(song.id, song.albumArtUriString) {
             val target = song.id to song.albumArtUriString
             if (displayedArt == target) return@LaunchedEffect
+            // El reveal cookie SOLO tiene sentido con el reproductor ya abierto: es la coreografía
+            // de "cambió la canción bajo tus ojos" (siguiente/anterior/notificación). Al ABRIR desde
+            // la lista nunca viste la carátula anterior en grande, así que no hay nada que revelar —
+            // y correr el reveal (doble composición + clip de Path por frame) ENCIMA del slide de
+            // apertura es lo que apilaba dos animaciones caras y producía el tartamudeo. Aquí se
+            // salta el reveal y se muestra la carátula destino directamente.
+            if (!playerSettled) {
+                displayedArt = target
+                return@LaunchedEffect
+            }
             incomingArt = target
             reveal.snapTo(0f)
-            reveal.animateTo(
-                1f,
-                spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)
-            )
+            reveal.animateTo(1f, artRevealSpec)
             displayedArt = target
             incomingArt = null
         }
@@ -405,10 +432,13 @@ internal fun AlbumArtSection(
                 // Destello del salto por doble toque, del lado que se tocó. Va DENTRO del
                 // recorte de la carátula para que el círculo no se salga de la forma cuando
                 // ésta morfea a redonda (en pausa).
+                // Asimetría preservada con tokens en vez de con dos duraciones a mano: `fastEffects`
+                // es el más rápido del scheme (entra ya visible bajo el dedo) y `slowEffects` el más
+                // lento sin rebote (se va sin pedir atención).
                 androidx.compose.animation.AnimatedVisibility(
                     visible = flashVisible,
-                    enter = fadeIn(animationSpec = tween(SEEK_FLASH_FADE_IN_MS)),
-                    exit = fadeOut(animationSpec = tween(SEEK_FLASH_FADE_OUT_MS)),
+                    enter = fadeIn(appFastEffectsSpec()),
+                    exit = fadeOut(appSlowEffectsSpec()),
                     modifier = Modifier
                         .align(if (flashForward) Alignment.CenterEnd else Alignment.CenterStart)
                         .padding(horizontal = SeekFlashSidePadding)
@@ -556,21 +586,25 @@ private fun FavoriteHeartPill(
     val onActive = MaterialTheme.colorScheme.onSecondary
     val tonalContainer = MaterialTheme.colorScheme.secondaryContainer
     val onTonalContainer = MaterialTheme.colorScheme.onSecondaryContainer
+    val heartColorSpec = appEffectsSpec<Color>()
     val container by animateColorAsState(
         targetValue = if (isFavorite) activeContainer else tonalContainer,
-        animationSpec = tween(durationMillis = 250),
+        animationSpec = heartColorSpec,
         label = "heartContainer"
     )
     val heartColor by animateColorAsState(
         targetValue = if (isFavorite) onActive else onTonalContainer,
-        animationSpec = tween(durationMillis = 250),
+        animationSpec = heartColorSpec,
         label = "heartContent"
     )
     val favoriteDesc = if (isFavorite) stringResource(R.string.common_remove_from_favorites) else stringResource(R.string.common_add_to_favorites)
+    // El rebote del latido: `fastSpatial` es el token con más rebote del scheme (dampingRatio 0.6),
+    // que es lo que pedía el `DampingRatioMediumBouncy` a mano que había aquí.
+    val heartPopSpec = appFastSpatialSpec<Float>()
     // FilledIconToggleButton REAL (M3 Expressive: shape-morph presionado/checked, como los
     // toggles de la floating toolbar) en vez de Surface artesanal. Los colores animados del
-    // acento se pasan idénticos para ambos estados: la transición de color sigue siendo
-    // nuestra (tween 250), el componente aporta ripple/formas/semántica de toggle.
+    // acento se pasan idénticos para ambos estados: la transición de color sigue siendo nuestra
+    // (token `defaultEffects`), el componente aporta ripple/formas/semántica de toggle.
     // Morph INVERTIDO a petición del usuario: squircle en reposo → redondo (píldora) activo.
     FilledIconToggleButton(
         checked = isFavorite,
@@ -579,13 +613,7 @@ private fun FavoriteHeartPill(
             onToggle()
             scope.launch {
                 heartScale.snapTo(0.7f)
-                heartScale.animateTo(
-                    1f,
-                    spring(
-                        dampingRatio = Spring.DampingRatioMediumBouncy,
-                        stiffness = Spring.StiffnessMedium
-                    )
-                )
+                heartScale.animateTo(1f, heartPopSpec)
             }
         },
         shapes = IconButtonDefaults.toggleableShapes(
@@ -636,12 +664,6 @@ private val SeekFlashSidePadding = 12.dp
  */
 private const val SEEK_FLASH_SCRIM_ALPHA = 0.45f
 
-/**
- * Entrada instantánea y salida lenta: el destello tiene que estar ya visible cuando el usuario
- * levanta el dedo, y desvanecerse sin pedir atención.
- */
-private const val SEEK_FLASH_FADE_IN_MS = 90
-private const val SEEK_FLASH_FADE_OUT_MS = 260
 /**
  * Sombra del chip de origen cuando el reproductor va en DEGRADADO (ver [PlaybackSourceChip]).
  * Es lo que despega el chip de un fondo de su mismo color, ya que el relleno no cambia entre

@@ -120,7 +120,9 @@ fun ArtistPickerSheet(
                                     }
                                 }
                             },
-                            modifier = Modifier.clickable { onCandidateSelected(candidate) }
+                            modifier = Modifier
+                                .animateItem()
+                                .clickable { onCandidateSelected(candidate) }
                         )
                     }
                 }
