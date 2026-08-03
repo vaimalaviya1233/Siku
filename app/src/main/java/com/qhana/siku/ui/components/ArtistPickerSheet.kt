@@ -19,7 +19,6 @@ import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -49,7 +48,9 @@ fun ArtistPickerSheet(
     onNoneSelected: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    AppModalSheet(onDismissRequest = onDismiss) {
+        // Elegir foto (o "ninguna de estas") cierra la hoja desde dentro. Ver [LocalSheetCloser].
+        val close = LocalSheetCloser.current
         Column(modifier = Modifier.padding(bottom = 24.dp)) {
             Text(
                 text = stringResource(R.string.artist_picker_title),
@@ -122,7 +123,7 @@ fun ArtistPickerSheet(
                             },
                             modifier = Modifier
                                 .animateItem()
-                                .clickable { onCandidateSelected(candidate) }
+                                .clickable { close { onCandidateSelected(candidate) } }
                         )
                     }
                 }
@@ -148,7 +149,7 @@ fun ArtistPickerSheet(
                             MaterialSymbol("person_off", color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     },
-                    modifier = Modifier.clickable { onNoneSelected() }
+                    modifier = Modifier.clickable { close(onNoneSelected) }
                 )
             }
         }

@@ -348,10 +348,14 @@ private fun SongItemOptimized(
         else -> surfaceHigh
     }
 
-    val trailingContent: @Composable (() -> Unit)? = remember(isFavorite, songId, isRedownloading, isPlaying, song.isLocalAudio) {
+    // Fondo bajo el contenido de la fila: el del grupo, con el tinte del ítem activo compuesto (el
+    // mismo que pinta `SongItem`). Es contra esto que se mide la píldora de acciones.
+    val rowBackground = songRowBackground(backgroundColor, isPlaying)
+
+    val trailingContent: @Composable (() -> Unit)? = remember(isFavorite, songId, isRedownloading, rowBackground, song.isLocalAudio) {
         {
             SongItemMenu(
-                isPlaying = isPlaying,
+                rowBackground = rowBackground,
                 isFavorite = isFavorite,
                 isRedownloading = isRedownloading,
                 songId = songId,
@@ -394,53 +398,37 @@ private fun SongItemOptimized(
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun SongItemMenu(
-    isPlaying: Boolean,
     isFavorite: Boolean,
     isRedownloading: Boolean,
     songId: String,
     showRedownload: Boolean,
     isDownloaded: Boolean,
+    // Fondo REAL de la fila (con el tinte del ítem activo ya compuesto): de él salen los colores
+    // de la píldora. Ver `rememberRowActionColors` — un rol fijo no garantiza separación.
+    rowBackground: Color,
     onRedownload: () -> Unit,
     onToggleFavorite: (String) -> Unit,
     onAddToPlaylistRequest: (String) -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
+    // Píldora vertical, MISMO componente y mismos colores que el overflow de las pantallas de
+    // detalle (SongOverflowButton): un solo criterio de color para las dos listas.
+    val colors = rememberRowActionColors(rowBackground)
     Box {
-        // Píldora vertical tonal pequeña, mismo estilo que el overflow de las pantallas de
-        // detalle de artista/álbum (SongOverflowButton). Sobre el fondo TEÑIDO del ítem
-        // en reproducción el tonal se pierde → sube a acento. En tema CLARO el primary
-        // seeded es un tono oscuro (quedaba un botón casi negro): se aclara hacia blanco
-        // manteniendo el matiz del álbum.
-        val isDark = androidx.compose.foundation.isSystemInDarkTheme()
-        val container = when {
-            !isPlaying -> MaterialTheme.colorScheme.secondaryContainer
-            // En oscuro el primary seedeado es un tono CLARO (quedaba una píldora casi
-            // blanca): se oscurece hacia negro manteniendo el matiz del álbum — espejo
-            // del aclarado hacia blanco del tema claro. 30% = punto medio: más del 40%
-            // se confundía con el fondo teñido de la fila en reproducción.
-            isDark -> androidx.compose.ui.graphics.lerp(
-                MaterialTheme.colorScheme.primary, Color.Black, 0.30f
-            )
-            else -> androidx.compose.ui.graphics.lerp(
-                MaterialTheme.colorScheme.primary, Color.White, 0.55f
-            )
-        }
-        val content = if (isPlaying) onContainerColor(container)
-                      else MaterialTheme.colorScheme.onSecondaryContainer
         // FilledIconButton real (M3 Expressive: shape-morph al presionar) en vez de
         // Surface+Box artesanal. Píldora VERTICAL, igual que SongOverflowButton en los detalles.
         FilledIconButton(
             onClick = { showMenu = true },
             shapes = IconButtonDefaults.shapes(),
             colors = IconButtonDefaults.filledIconButtonColors(
-                containerColor = container,
-                contentColor = content
+                containerColor = colors.container,
+                contentColor = colors.content
             ),
             modifier = Modifier
                 .width(28.dp)
                 .height(44.dp)
         ) {
-            MaterialSymbol("more_vert", size = 18.sp, color = content)
+            MaterialSymbol("more_vert", size = 18.sp, color = colors.content)
         }
         // Menú SEGMENTADO (popup + grupo), no el `DropdownMenu` clásico: ver la nota en SortChip.
         DropdownMenuPopup(expanded = showMenu, onDismissRequest = { showMenu = false }) {

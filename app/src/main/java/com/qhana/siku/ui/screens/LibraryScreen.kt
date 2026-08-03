@@ -47,6 +47,7 @@ import com.qhana.siku.data.model.PlaybackContext
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.model.SongFilter
 import com.qhana.siku.data.repository.ArtworkRepository
+import com.qhana.siku.ui.PlayerArtOrigin
 import com.qhana.siku.ui.components.*
 import com.qhana.siku.ui.viewmodel.BrowseViewModel
 import com.qhana.siku.ui.viewmodel.LibraryBannerState
@@ -119,7 +120,7 @@ fun LibraryScreen(
     onArtistClick: (String) -> Unit,
     onAlbumClick: (String) -> Unit,
     onGenreClick: (String) -> Unit,
-    onNavigateToNowPlaying: () -> Unit,
+    onNavigateToNowPlaying: (PlayerArtOrigin) -> Unit,
     onNavigateToSettings: () -> Unit,
     // Scopes para los shared elements foto/carátula → header del detalle (artista/álbum).
     sharedTransitionScope: SharedTransitionScope? = null,
@@ -558,7 +559,7 @@ fun LibraryScreen(
                                 contentPadding = listInsets,
                                 onPlaySongs = { songs, index ->
                                     playbackViewModel.playSongs(songs, index)
-                                    onNavigateToNowPlaying()
+                                    onNavigateToNowPlaying(PlayerArtOrigin.NONE)
                                 },
                                 onPlayArtistPick = { artist, songs, index ->
                                     // Igual que tocar una canción en el detalle del artista: la
@@ -570,7 +571,7 @@ fun LibraryScreen(
                                         )
                                     )
                                     playbackViewModel.playSongs(songs, index)
-                                    onNavigateToNowPlaying()
+                                    onNavigateToNowPlaying(PlayerArtOrigin.NONE)
                                 },
                                 onAlbumClick = onAlbumClick,
                                 onResumeContext = { ctx -> resumeContext(
@@ -580,11 +581,11 @@ fun LibraryScreen(
                                 canPlayAll = songCount > 0,
                                 onShuffleAll = {
                                     playbackViewModel.shuffleAllFromLibrary()
-                                    onNavigateToNowPlaying()
+                                    onNavigateToNowPlaying(PlayerArtOrigin.NONE)
                                 },
                                 onPlayAll = {
                                     playbackViewModel.playAllFromLibrary()
-                                    onNavigateToNowPlaying()
+                                    onNavigateToNowPlaying(PlayerArtOrigin.NONE)
                                 },
                                 hasFavorites = uiState.favoriteSongs.isNotEmpty(),
                                 onShuffleFavorites = {
@@ -592,7 +593,7 @@ fun LibraryScreen(
                                     // chip es otro atajo a lo mismo, no otra cosa.
                                     libraryViewModel.recordContext(PlaybackContext.Favorites)
                                     playbackViewModel.shufflePlay(uiState.favoriteSongs)
-                                    onNavigateToNowPlaying()
+                                    onNavigateToNowPlaying(PlayerArtOrigin.NONE)
                                 },
                                 genres = homeTopGenres,
                                 onShuffleGenre = { genre ->
@@ -611,7 +612,7 @@ fun LibraryScreen(
                                                 )
                                             )
                                             playbackViewModel.shufflePlay(songs)
-                                            onNavigateToNowPlaying()
+                                            onNavigateToNowPlaying(PlayerArtOrigin.NONE)
                                         }
                                     }
                                 },
@@ -625,7 +626,7 @@ fun LibraryScreen(
                             SongsScreen(
                                 currentFilter = SongFilter.ALL,
                                 contentPadding = listInsets,
-                                onNavigateToNowPlaying = onNavigateToNowPlaying,
+                                onNavigateToNowPlaying = { onNavigateToNowPlaying(PlayerArtOrigin.ROW) },
                                 onAddToPlaylistRequest = { songIdForPlaylist = it },
                                 viewModel = libraryViewModel,
                                 playbackViewModel = playbackViewModel,
@@ -894,7 +895,7 @@ private fun resumeContext(
     libraryViewModel: LibraryViewModel,
     playbackViewModel: PlaybackViewModel,
     favoriteSongs: List<Song>,
-    onNavigateToNowPlaying: () -> Unit
+    onNavigateToNowPlaying: (PlayerArtOrigin) -> Unit
 ) {
     when (ctx) {
         is PlaybackContext.Album -> scope.launch {
@@ -902,7 +903,7 @@ private fun resumeContext(
             if (songs.isNotEmpty()) {
                 libraryViewModel.recordContext(ctx.copy(coverUri = songs.firstOrNull()?.albumArtUri?.toString()))
                 playbackViewModel.playSongs(songs, 0)
-                onNavigateToNowPlaying()
+                onNavigateToNowPlaying(PlayerArtOrigin.NONE)
             }
         }
         is PlaybackContext.Artist -> scope.launch {
@@ -910,7 +911,7 @@ private fun resumeContext(
             if (songs.isNotEmpty()) {
                 libraryViewModel.recordContext(ctx.copy(coverUri = songs.firstOrNull()?.albumArtUri?.toString()))
                 playbackViewModel.playSongs(songs, 0)
-                onNavigateToNowPlaying()
+                onNavigateToNowPlaying(PlayerArtOrigin.NONE)
             }
         }
         is PlaybackContext.Genre -> scope.launch {
@@ -918,27 +919,27 @@ private fun resumeContext(
             if (songs.isNotEmpty()) {
                 libraryViewModel.recordContext(ctx.copy(coverUri = songs.firstOrNull()?.albumArtUri?.toString()))
                 playbackViewModel.playSongs(songs, 0)
-                onNavigateToNowPlaying()
+                onNavigateToNowPlaying(PlayerArtOrigin.NONE)
             }
         }
         is PlaybackContext.Playlist -> {
             libraryViewModel.playPlaylist(ctx.id)
-            onNavigateToNowPlaying()
+            onNavigateToNowPlaying(PlayerArtOrigin.NONE)
         }
         PlaybackContext.Favorites -> {
             if (favoriteSongs.isNotEmpty()) {
                 libraryViewModel.recordContext(PlaybackContext.Favorites)
                 playbackViewModel.playSongs(favoriteSongs, 0)
-                onNavigateToNowPlaying()
+                onNavigateToNowPlaying(PlayerArtOrigin.NONE)
             }
         }
         PlaybackContext.LibraryShuffle -> {
             playbackViewModel.shuffleAllFromLibrary()
-            onNavigateToNowPlaying()
+            onNavigateToNowPlaying(PlayerArtOrigin.NONE)
         }
         PlaybackContext.LibraryAll -> {
             playbackViewModel.playAllFromLibrary()
-            onNavigateToNowPlaying()
+            onNavigateToNowPlaying(PlayerArtOrigin.NONE)
         }
     }
 }
@@ -1122,18 +1123,31 @@ private fun LibraryTabs(
                     modifier = Modifier.padding(horizontal = TabContentPadding)
                 ) {
                     MaterialSymbol(tab.iconName, size = TabIconSize, fill = selected)
-                    // La etiqueta solo en la activa. `expandHorizontally` + `fadeIn` con el MISMO
-                    // spring espacial que usaba la botonera: si el texto se abriera con otra curva
-                    // se vería llegar tarde respecto al ensanchado de la píldora.
+                    // La etiqueta solo en la activa.
+                    //
+                    // El ancho va con un spec de EFFECTS —crítico, sin rebote— y no con el spatial
+                    // que tenía, y aquí el motivo no es estético sino de FRAMES. `expandHorizontally`
+                    // anima el TAMAÑO, así que cada frame es una pasada de LAYOUT, no un repintado; y
+                    // no una local: al cambiar de ancho una pestaña, el `PrimaryScrollableTabRow`
+                    // recalcula el reparto de todas, la posición del indicador y el scroll, y el
+                    // `Text` de dentro se vuelve a medir. Con `appFastSpatialSpec()` —el token que
+                    // MÁS rebota (dampingRatio 0.6)— la píldora oscilaba alrededor de su ancho final
+                    // un buen rato, y cada oscilación era otra pasada completa de eso: el rebote
+                    // multiplicaba el trabajo caro justo mientras el `HorizontalPager` componía la
+                    // página nueva. Se veía como pérdida de fps al cambiar de pestaña.
+                    //
+                    // Regla general que sale de aquí: **un spec que rebota sobre algo que EMPUJA
+                    // LAYOUT sale caro**. Sobre un `graphicsLayer` (posición, escala, alpha) el
+                    // rebote es gratis; sobre un tamaño, no.
                     AnimatedVisibility(
                         visible = selected,
                         enter = expandHorizontally(
-                            animationSpec = appFastSpatialSpec()
+                            animationSpec = appEffectsSpec()
                         ) + fadeIn(
                             animationSpec = appEffectsSpec()
                         ),
                         exit = shrinkHorizontally(
-                            animationSpec = appFastSpatialSpec()
+                            animationSpec = appFastEffectsSpec()
                         ) + fadeOut(
                             animationSpec = appFastEffectsSpec()
                         )
@@ -1530,7 +1544,7 @@ private fun SearchResults(
     playingAccent: Color?,
     onAddToPlaylistRequest: (String) -> Unit,
     onCollapseAnd: (() -> Unit) -> Unit,
-    onNavigateToNowPlaying: () -> Unit,
+    onNavigateToNowPlaying: (PlayerArtOrigin) -> Unit,
     onArtistClick: (String) -> Unit,
     onAlbumClick: (String) -> Unit
 ) {
@@ -1542,7 +1556,10 @@ private fun SearchResults(
             top = 8.dp,
             bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 16.dp
         ),
-        onNavigateToNowPlaying = { onCollapseAnd(onNavigateToNowPlaying) },
+        // NONE y no ROW: la fila que el usuario tocó vive en el diálogo, que se cierra antes de
+        // navegar, y la de la lista de abajo solo existe si esa canción cae en su viewport — un
+        // origen que puede no estar deja la carátula quieta en el overlay. Sube con el contenido.
+        onNavigateToNowPlaying = { onCollapseAnd { onNavigateToNowPlaying(PlayerArtOrigin.NONE) } },
         onAddToPlaylistRequest = { songId -> onCollapseAnd { onAddToPlaylistRequest(songId) } },
         viewModel = libraryViewModel,
         playbackViewModel = playbackViewModel,

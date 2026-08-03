@@ -21,7 +21,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MaterialTheme.colorScheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
@@ -64,10 +63,13 @@ fun AddSongsToPlaylistSheet(
     // otra cosa y seguir sumando antes de confirmar.
     var selectedIds by remember { mutableStateOf(emptySet<String>()) }
 
-    ModalBottomSheet(
+    AppModalSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState
     ) {
+        // Cierre animado para el botón de confirmar (ver [LocalSheetCloser]). Se lee AQUÍ dentro:
+        // el local lo publica `AppModalSheet` y solo existe bajo su contenido.
+        val close = LocalSheetCloser.current
         Column(modifier = Modifier.fillMaxWidth()) {
             Text(
                 text = stringResource(R.string.playlist_add_songs_title, playlistName),
@@ -164,7 +166,10 @@ fun AddSongsToPlaylistSheet(
             Spacer(modifier = Modifier.height(8.dp))
 
             Button(
-                onClick = { onConfirm(selectedIds.toList()) },
+                // A través de [LocalSheetCloser]: `onConfirm` apaga el flag que monta esta hoja, y
+                // llamarlo directo la arrancaría del árbol sin darle tiempo a animar la salida —
+                // se veía desaparecer de golpe. Así primero se oculta y LUEGO se confirma.
+                onClick = { close { onConfirm(selectedIds.toList()) } },
                 enabled = selectedIds.isNotEmpty(),
                 shapes = ButtonDefaults.shapes(),
                 modifier = Modifier

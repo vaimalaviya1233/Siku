@@ -2,6 +2,8 @@ package com.qhana.siku.ui.components
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.ui.util.lerp
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -60,6 +62,16 @@ fun EqResponseGraph(
      * número; esta curva lo da como forma, y además enseña SOBRE QUÉ FRECUENCIAS actúa.
      */
     boostResponse: FloatArray? = null,
+    /**
+     * Hay un dedo sobre un control de refuerzo: la punteada pasa a primer plano y la total se
+     * atenúa.
+     *
+     * Mover un refuerzo desplaza las DOS curvas —la total tiene que moverse, es lo que suena— y dos
+     * trazos cambiando a la vez no dicen cuál mirar. Mientras dura el gesto, la pregunta que el
+     * usuario se está haciendo es "cuánto de esto lo pongo yo con este control", y esa la responde la
+     * punteada. Al soltar vuelven las dos a su peso normal, que es la lectura correcta en reposo.
+     */
+    boostFocused: Boolean = false,
     /** Pico de la curva; decide el color, igual que el indicador de headroom. */
     headroomDb: Float,
     /** Umbral desde el que la curva se pinta como "atención". */
@@ -158,12 +170,22 @@ fun EqResponseGraph(
     }
     val rangeDb = rangeAnim.value
 
+    // Foco como FRACCIÓN animada y no como Boolean crudo: el resalte entra y sale mientras el dedo
+    // ya está moviendo la curva, y un salto seco de opacidad ahí se lee como un parpadeo. Spec de
+    // EFFECTS —se animan opacidad y grosor, y sobre todo el valor está acotado a [0,1]: un token
+    // spatial rebota y se saldría del rango por los dos lados.
+    val focus by animateFloatAsState(
+        targetValue = if (boostFocused && boostResponse != null) 1f else 0f,
+        animationSpec = appEffectsSpec(),
+        label = "eqBoostFocus"
+    )
+
     Box(modifier = modifier.fillMaxWidth().height(height)) {
         Canvas(modifier = Modifier.fillMaxWidth().height(height).padding(bottom = LabelGutter)) {
             drawGrid(gridColor, axisLabels, rangeDb)
             // Debajo de la total y sin relleno: es un componente de la curva, no otra lectura.
-            boostResponse?.let { drawBoostCurve(it, curveColor, enabled, rangeDb) }
-            drawCurve(response, curveColor, enabled, rangeDb)
+            boostResponse?.let { drawBoostCurve(it, curveColor, enabled, rangeDb, focus) }
+            drawCurve(response, curveColor, enabled, rangeDb, focus)
             drawFrame(frameColor)
         }
         Canvas(modifier = Modifier.fillMaxWidth().height(height)) {
@@ -228,11 +250,16 @@ private fun DrawScope.drawCurve(
     response: FloatArray,
     color: Color,
     enabled: Boolean,
-    rangeDb: Float
+    rangeDb: Float,
+    /** 0 = reposo, 1 = el dedo está en un refuerzo y esta curva cede el primer plano. */
+    focus: Float = 0f
 ) {
     if (response.isEmpty()) return
     val zeroY = size.height / 2f
-    val alpha = if (enabled) 1f else DisabledAlpha
+    // Se atenúa, NO se esconde: sigue siendo lo que suena, y el sentido del resalte es justamente
+    // poder comparar cuánto de ella pone el refuerzo. Con la total desaparecida no habría nada
+    // contra qué comparar.
+    val alpha = (if (enabled) 1f else DisabledAlpha) * lerp(1f, FocusedDimAlpha, focus)
 
     fun yFor(db: Float): Float =
         zeroY - (db / rangeDb).coerceIn(-1f, 1f) * (size.height / 2f)
@@ -282,11 +309,16 @@ private fun DrawScope.drawBoostCurve(
     response: FloatArray,
     color: Color,
     enabled: Boolean,
-    rangeDb: Float
+    rangeDb: Float,
+    /** 0 = reposo, 1 = el dedo está en un refuerzo y esta curva pasa a primer plano. */
+    focus: Float = 0f
 ) {
     if (response.isEmpty()) return
     val zeroY = size.height / 2f
-    val alpha = (if (enabled) 1f else DisabledAlpha) * BoostCurveAlpha
+    // Con foco sube a opacidad plena y engorda hasta el grosor de la curva total: sigue siendo
+    // punteada —es lo que la distingue cuando se solapan— pero deja de ser la línea secundaria.
+    val alpha = (if (enabled) 1f else DisabledAlpha) * lerp(BoostCurveAlpha, 1f, focus)
+    val width = lerp(BoostCurveWidth.toPx(), CurveWidth.toPx(), focus)
 
     val path = Path()
     response.forEachIndexed { index, db ->
@@ -298,7 +330,7 @@ private fun DrawScope.drawBoostCurve(
         path = path,
         color = color.copy(alpha = alpha),
         style = Stroke(
-            width = BoostCurveWidth.toPx(),
+            width = width,
             pathEffect = PathEffect.dashPathEffect(floatArrayOf(DashOn, DashOff))
         )
     )
@@ -401,6 +433,13 @@ private const val RANGE_HYSTERESIS_DB = 2f
 
 /** Peso visual de la curva de refuerzo: presente pero claramente secundaria. */
 private const val BoostCurveAlpha = 0.55f
+
+/**
+ * Opacidad de la curva TOTAL mientras el dedo está en un refuerzo. No baja más porque el resalte
+ * sirve para COMPARAR las dos curvas: por debajo de ~0.35 la total deja de leerse y la punteada se
+ * queda sola, que es tan poco informativo como el problema que se está arreglando.
+ */
+private const val FocusedDimAlpha = 0.35f
 
 private val BoostCurveWidth = 1.5.dp
 

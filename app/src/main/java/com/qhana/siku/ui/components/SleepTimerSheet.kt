@@ -26,7 +26,10 @@ fun SleepTimerSheet(
     onCancel: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    AppModalSheet(onDismissRequest = onDismiss) {
+        // Cerrar ANIMANDO antes de ejecutar la acción: `onDismiss` apaga el flag que monta la hoja
+        // y llamarlo directo la arranca del árbol sin salida. Ver [LocalSheetCloser].
+        val close = LocalSheetCloser.current
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -87,8 +90,7 @@ fun SleepTimerSheet(
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                         FilledTonalButton(onClick = {
-                            onCancel()
-                            onDismiss()
+                            close { onCancel(); onDismiss() }
                         }) {
                             Text(stringResource(R.string.sleep_timer_cancel))
                         }
@@ -106,8 +108,7 @@ fun SleepTimerSheet(
                 listOf(10, 15, 30, 45, 60, 90).forEach { minutes ->
                     FilledTonalButton(
                         onClick = {
-                            onStart(minutes, finishSong)
-                            onDismiss()
+                            close { onStart(minutes, finishSong); onDismiss() }
                         }
                     ) {
                         Text(stringResource(R.string.sleep_timer_minutes, minutes))

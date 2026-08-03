@@ -152,7 +152,7 @@ fun AlbumTileCard(
                 shapes = IconButtonDefaults.shapes(),
                 modifier = Modifier.size(40.dp)
             ) {
-                MaterialSymbol("play_circle", size = 30.sp, color = colorScheme.primary, fill = false)
+                MaterialSymbol("play_circle", size = 30.sp, color = colorScheme.primary, fill = true)
             }
         }
     }

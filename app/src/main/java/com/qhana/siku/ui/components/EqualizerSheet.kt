@@ -2,9 +2,15 @@ package com.qhana.siku.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -15,11 +21,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import kotlinx.coroutines.launch
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
 import com.qhana.siku.data.model.EqCustomPreset
+import androidx.compose.ui.graphics.Color
 import com.qhana.siku.player.audio.AudioRoute
 import com.qhana.siku.player.audio.EqCurve
 import com.qhana.siku.player.audio.EqualizerAudioProcessor
@@ -28,6 +38,7 @@ import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.roundToInt
 import com.qhana.siku.ui.theme.appEffectsSpec
+import com.qhana.siku.ui.theme.appFastEffectsSpec
 import com.qhana.siku.ui.theme.appShrinkFadeOut
 import com.qhana.siku.ui.theme.appExpandFadeIn
 
@@ -39,19 +50,38 @@ import com.qhana.siku.ui.theme.appExpandFadeIn
  */
 internal object EqPresets {
 
-    internal class Preset(val labelRes: Int, val anchors: FloatArray)
+    /**
+     * [key] es la identidad PERSISTIBLE del preset (hoy la usa la lista de ocultos). Tiene que ser
+     * una constante propia y no [labelRes]: los ids de recurso los reasignan AAPT/R8 entre builds,
+     * así que guardar uno haría que tras una actualización se ocultara un preset distinto — sin
+     * fallar en compilación y sin forma de notarlo salvo por el síntoma.
+     *
+     * Se persiste NAMESPACED ([hideKey]), nunca cruda.
+     */
+    internal class Preset(val key: String, val labelRes: Int, val anchors: FloatArray)
+
+    /**
+     * Identidad de un preset de fábrica dentro del conjunto de ocultos, que comparte con los
+     * UUID de los presets propios. El prefijo es la misma convención que los ids de canción
+     * (`onedrive:` / `local:`) y por el mismo motivo: en cuanto dos espacios de nombres conviven en
+     * la misma bolsa, "funciona porque un UUID no se parece a `rock`" es una coincidencia, no una
+     * garantía. Con el prefijo, un id propio NUNCA puede leerse como uno de fábrica ni al revés.
+     */
+    fun hideKey(preset: Preset): String = "$BUILT_IN_PREFIX${preset.key}"
+
+    const val BUILT_IN_PREFIX = "builtin:"
 
     val ALL = listOf(
-        Preset(R.string.eq_preset_flat, floatArrayOf(0f, 0f, 0f, 0f, 0f)),
-        Preset(R.string.eq_preset_rock, floatArrayOf(5f, 3f, -1f, 3f, 5f)),
-        Preset(R.string.eq_preset_pop, floatArrayOf(-1f, 2f, 5f, 1f, -2f)),
-        Preset(R.string.eq_preset_jazz, floatArrayOf(4f, 2f, -2f, 2f, 5f)),
-        Preset(R.string.eq_preset_classical, floatArrayOf(5f, 3f, -2f, 4f, 4f)),
-        Preset(R.string.eq_preset_dance, floatArrayOf(6f, 0f, 2f, 4f, 1f)),
-        Preset(R.string.eq_preset_hiphop, floatArrayOf(5f, 3f, 0f, 1f, 3f)),
-        Preset(R.string.eq_preset_bass, floatArrayOf(6f, 4f, 1f, 0f, 0f)),
-        Preset(R.string.eq_preset_treble, floatArrayOf(0f, 0f, 1f, 4f, 6f)),
-        Preset(R.string.eq_preset_vocal, floatArrayOf(-2f, 1f, 4f, 3f, -1f))
+        Preset("flat", R.string.eq_preset_flat, floatArrayOf(0f, 0f, 0f, 0f, 0f)),
+        Preset("rock", R.string.eq_preset_rock, floatArrayOf(5f, 3f, -1f, 3f, 5f)),
+        Preset("pop", R.string.eq_preset_pop, floatArrayOf(-1f, 2f, 5f, 1f, -2f)),
+        Preset("jazz", R.string.eq_preset_jazz, floatArrayOf(4f, 2f, -2f, 2f, 5f)),
+        Preset("classical", R.string.eq_preset_classical, floatArrayOf(5f, 3f, -2f, 4f, 4f)),
+        Preset("dance", R.string.eq_preset_dance, floatArrayOf(6f, 0f, 2f, 4f, 1f)),
+        Preset("hiphop", R.string.eq_preset_hiphop, floatArrayOf(5f, 3f, 0f, 1f, 3f)),
+        Preset("bass", R.string.eq_preset_bass, floatArrayOf(6f, 4f, 1f, 0f, 0f)),
+        Preset("treble", R.string.eq_preset_treble, floatArrayOf(0f, 0f, 1f, 4f, 6f)),
+        Preset("vocal", R.string.eq_preset_vocal, floatArrayOf(-2f, 1f, 4f, 3f, -1f))
     )
 
     fun gainsFor(preset: Preset, bandCount: Int): FloatArray =
@@ -107,6 +137,8 @@ fun EqualizerSheet(
     gainReductionDb: Float,
     audioRoute: AudioRoute,
     customPresets: List<EqCustomPreset>,
+    hiddenPresets: Set<String>,
+    routeProfilesEnabled: Boolean,
     conflictWarningSuppressed: Boolean,
     onSuppressConflictWarning: () -> Unit,
     onEnabledChange: (Boolean) -> Unit,
@@ -159,16 +191,51 @@ fun EqualizerSheet(
         )
     }
 
+    // ¿Hay un dedo sobre alguno de los cuatro controles de refuerzo? De ahí sale el resalte de la
+    // curva punteada en el gráfico: mover un refuerzo desplaza las DOS curvas —la total tiene que
+    // moverse, es lo que suena— y ver dos trazos cambiando a la vez no dice cuál mirar. Mientras dura
+    // el gesto se destaca la aportación del refuerzo, que es la que responde "cuánto de esto lo estoy
+    // poniendo yo con este control".
+    //
+    // Por `MutableInteractionSource` y no por los callbacks del Slider: la fuente emite Stop también
+    // cuando el gesto se CANCELA (el dedo se va al scroll de la hoja, llega una llamada), mientras
+    // que un flag encendido en `onValueChange` dependería de que `onValueChangeFinished` llegue
+    // siempre — y si un día no llega, el gráfico se queda resaltado para siempre sin que nada lo
+    // apague. Se incluye `pressed` además de `dragged` para que un TAP en el carril, que salta al
+    // valor sin arrastrar, también lo encienda.
+    val bassGainInteraction = remember { MutableInteractionSource() }
+    val bassFreqInteraction = remember { MutableInteractionSource() }
+    val trebleGainInteraction = remember { MutableInteractionSource() }
+    val trebleFreqInteraction = remember { MutableInteractionSource() }
+    // Uno a uno y no en un bucle: son llamadas composables, y en una lambda cada `collect` tendría
+    // que mantener su identidad entre recomposiciones.
+    val bassGainActive by bassGainInteraction.collectIsDraggedAsState()
+    val bassGainPressed by bassGainInteraction.collectIsPressedAsState()
+    val bassFreqActive by bassFreqInteraction.collectIsDraggedAsState()
+    val bassFreqPressed by bassFreqInteraction.collectIsPressedAsState()
+    val trebleGainActive by trebleGainInteraction.collectIsDraggedAsState()
+    val trebleGainPressed by trebleGainInteraction.collectIsPressedAsState()
+    val trebleFreqActive by trebleFreqInteraction.collectIsDraggedAsState()
+    val trebleFreqPressed by trebleFreqInteraction.collectIsPressedAsState()
+    val boostFocused = bassGainActive || bassGainPressed || bassFreqActive || bassFreqPressed ||
+        trebleGainActive || trebleGainPressed || trebleFreqActive || trebleFreqPressed
+
     // Aportación SOLO de los refuerzos: mismas frecuencias y centros, pero con las bandas a cero y
     // sin preamp (el preamp desplaza el conjunto, no es parte de lo que aporta el refuerzo).
     // null cuando no hay ninguno activo, para no dibujar una recta sobre la línea de 0 dB.
-    val boostResponse = remember(bassBoost, trebleBoost, bassFreq, trebleFreq, bandCount) {
+    //
+    // Y null TAMBIÉN cuando coincide con la curva total, que es lo que pasa con las bandas planas y
+    // el preamp a 0: ahí las dos líneas se dibujan una sobre otra y la punteada no responde ya su
+    // pregunta ("cuánto de este pico lo pone el refuerzo"), solo duplica el trazo. Se compara la
+    // rejilla ENTERA en vez de razonar sobre qué entra en cada curva — si algún día el preamp o las
+    // bandas dejan de sumarse así, la comparación sigue diciendo la verdad y la deducción no.
+    val boostResponse = remember(gains, preamp, bassBoost, trebleBoost, bassFreq, trebleFreq, bandCount, response) {
         if (bassBoost < EqualizerAudioProcessor.IDENTITY_EPSILON_DB &&
             trebleBoost < EqualizerAudioProcessor.IDENTITY_EPSILON_DB
         ) {
             null
         } else {
-            EqCurve.response(
+            val curve = EqCurve.response(
                 bandGainsDb = FloatArray(bandCount),
                 frequencies = frequencies,
                 bassBoostDb = bassBoost,
@@ -176,65 +243,60 @@ fun EqualizerSheet(
                 bassBoostFreqHz = bassFreq,
                 trebleBoostFreqHz = trebleFreq
             )
+            val redundant = curve.indices.all { i ->
+                abs(curve[i] - response[i]) < EqualizerAudioProcessor.IDENTITY_EPSILON_DB
+            }
+            if (redundant) null else curve
         }
     }
 
     // Overlay FULL-SCREEN (ya no es bottom sheet): el EQ es denso (gráfico + 5–10 bandas +
     // refuerzos + acciones), así respira y queda consistente con lyrics/cola. El slide-up + el
     // BackHandler los maneja el caller.
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.surface
-    ) {
+    //
+    // Scaffold + `TopAppBar` REAL, como la hoja de la cola y el gestor de descargas. La cabecera era
+    // un Row a mano —herencia de cuando esto sí era un bottom sheet en la 1.0, que nadie migró al
+    // convertirlo en overlay— y por eso su back no caía en el margen del contenido: un `IconButton`
+    // mide 48dp con el glifo de 24 centrado, así que dentro de un contenedor con padding el símbolo
+    // aparece 12dp más adentro que todo lo demás. Esa cuenta la hace `TopAppBar` sola.
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.surface,
+        topBar = {
+            TopAppBar(
+                // Título A SECAS. Debajo vivía `eq_desc` (el aviso de que el EQ desactiva el
+                // offload del DSP): un párrafo permanente en la cabecera de una pantalla que ya
+                // es densa —gráfico, doce sliders, preamp, limitador— y que además explicaba una
+                // consecuencia técnica que no cambia nada de lo que el usuario va a hacer aquí.
+                // Se quita; lo que la pantalla tiene que comunicar en todo momento es la CURVA.
+                title = { Text(stringResource(R.string.eq_title)) },
+                navigationIcon = {
+                    IconButton(onClick = onDismiss) { MaterialSymbol("arrow_back") }
+                },
+                actions = {
+                    Switch(
+                        checked = enabled,
+                        // Al encender pedimos confirmación (posible doble ecualización con un EQ
+                        // del sistema), salvo "No volver a mostrar" ya marcado; al apagar no hay
+                        // conflicto posible → pasa directo.
+                        onCheckedChange = { checked ->
+                            if (checked && !conflictWarningSuppressed) showSystemEqWarning = true
+                            else onEnabledChange(checked)
+                        },
+                        modifier = Modifier.padding(end = TopBarActionEndInset)
+                    )
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
+            )
+        }
+    ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .statusBarsPadding()
-                .navigationBarsPadding()
-                .padding(horizontal = 24.dp)
-                .padding(top = 8.dp, bottom = 24.dp),
+                .padding(innerPadding)
+                .padding(horizontal = ContentMargin)
+                .padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    IconButton(onClick = onDismiss) { MaterialSymbol("arrow_back") }
-                    Spacer(Modifier.width(4.dp))
-                    Column {
-                        Text(
-                            text = stringResource(R.string.eq_title),
-                            style = MaterialTheme.typography.titleLarge
-                        )
-                        // El aviso de que el EQ desactiva el offload (ahorro de batería del DSP)
-                        // baja aquí desde su párrafo propio: es una consecuencia de encender el
-                        // switch que tiene al lado, y el sitio que ocupaba ahora es el gráfico.
-                        Text(
-                            text = stringResource(R.string.eq_desc),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-                Spacer(Modifier.width(12.dp))
-                Switch(
-                    checked = enabled,
-                    // Al encender pedimos confirmación (posible doble ecualización con un EQ
-                    // del sistema), salvo "No volver a mostrar" ya marcado; al apagar no hay
-                    // conflicto posible → pasa directo.
-                    onCheckedChange = { checked ->
-                        if (checked && !conflictWarningSuppressed) showSystemEqWarning = true
-                        else onEnabledChange(checked)
-                    }
-                )
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-
             // Selector de preset (desplegable): colapsa fábrica + personalizados en un solo
             // control. Marca el preset actual (o "Personalizado" si la curva no coincide con
             // ninguno). Los personalizados llevan una X para borrarlos sin aplicarlos.
@@ -251,6 +313,9 @@ fun EqualizerSheet(
                     bandCount = bandCount,
                     gains = gains,
                     customPresets = customPresets,
+                    hiddenPresets = hiddenPresets,
+                    audioRoute = audioRoute,
+                    routeProfilesEnabled = routeProfilesEnabled,
                     enabled = enabled,
                     onApplyPreset = onApplyPreset,
                     onApplyCustomPreset = onApplyCustomPreset,
@@ -272,33 +337,51 @@ fun EqualizerSheet(
             // GRÁFICO: es lo único que muestra el resultado de todo lo demás junto (bandas +
             // refuerzos). Sustituye a la descripción de texto, que decía en palabras lo que ahora
             // se ve. Queda entre el preset y los controles, o sea entre sus dos causas.
-            EqResponseGraph(
-                response = response,
-                boostResponse = boostResponse,
-                headroomDb = headroomDb,
-                cautionDb = HEADROOM_CAUTION_DB,
-                riskDb = HEADROOM_RISK_DB,
-                enabled = enabled
-            )
-
-            // El aviso de headroom solo aparece cuando HAY algo que avisar, y va PEGADO al gráfico
-            // porque explica lo que se está viendo en él. Antes era una tarjeta permanente al
-            // fondo: en estado normal ocupaba sitio para decir "todo bien", y lejos de los
-            // controles que mueven el número. Ahora el estado normal lo comunica el color de la
-            // curva y esto solo se despliega al cruzar un umbral.
-            // Segunda condición: en una ruta con volumen absoluto (Bluetooth) la atenuación
-            // digital del mixer no existe, así que CUALQUIER ganancia positiva puede recortar de
-            // verdad — y sin el limitador no hay nada que lo impida. Ahí el aviso aparece mucho
-            // antes que el umbral normal, porque el umbral normal presupone un margen que en esa
-            // ruta no está.
+            // En una ruta con volumen absoluto (Bluetooth) la atenuación digital del mixer no
+            // existe, así que CUALQUIER ganancia positiva puede recortar de verdad — y sin el
+            // limitador no hay nada que lo impida. Ese aviso aparece mucho antes que el umbral
+            // normal, porque el umbral normal presupone un margen que en esa ruta no está.
             val routeAtRisk = !limiterEnabled && audioRoute.absoluteVolumeLikely && headroomDb > 0f
-            AnimatedVisibility(
-                visible = enabled && (headroomDb >= HEADROOM_CAUTION_DB || routeAtRisk),
-                enter = appExpandFadeIn(),
-                exit = appShrinkFadeOut()
-            ) {
-                Column {
-                    Spacer(modifier = Modifier.height(4.dp))
+            // Saturando: ¿lo causa un refuerzo concreto? Si sí, el aviso lo da SU slider pintado
+            // (ver [BoostSlider]): señalar el control que hay que bajar dice más que un texto que
+            // obliga a deducir cuál de los dos es.
+            val saturating = enabled && headroomDb >= HEADROOM_CAUTION_DB
+            val fault = remember(response, bassBoost, trebleBoost, bassFreq, trebleFreq, saturating) {
+                if (!saturating) BoostFault.NONE
+                else boostAtFault(response, bassBoost, trebleBoost, bassFreq, trebleFreq)
+            }
+            val severeFault = headroomDb >= HEADROOM_RISK_DB && !limiterEnabled
+
+            // El aviso va SUPERPUESTO al gráfico, no debajo, y esa es toda la razón de este Box.
+            //
+            // Colgando del flujo —que es donde estaba— aparecer o desaparecer EMPUJABA todo lo de
+            // abajo… incluidos los sliders. Y como el aviso lo dispara precisamente mover un
+            // slider, el control se escapaba de debajo del dedo justo al cruzar el umbral: el gesto
+            // seguía en el sitio viejo y el slider ya no. Reservarle hueco fijo tampoco valía —es
+            // lo que se quitó en su día: una tarjeta permanente ocupando sitio para no decir nada.
+            //
+            // Encima del gráfico no molesta a nadie: la curva vive en la mitad inferior del lienzo
+            // cuando hay ganancia positiva (que es cuando este aviso existe), así que la banda
+            // superior está libre justo en ese caso.
+            Box {
+                EqResponseGraph(
+                    response = response,
+                    boostResponse = boostResponse,
+                    boostFocused = boostFocused,
+                    headroomDb = headroomDb,
+                    cautionDb = HEADROOM_CAUTION_DB,
+                    riskDb = HEADROOM_RISK_DB,
+                    enabled = enabled
+                )
+                // Solo lo que ningún slider puede contar: la suma de las bandas (no hay un culpable
+                // al que señalar) y la ruta sin margen (no la causa la curva).
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = enabled &&
+                        ((headroomDb >= HEADROOM_CAUTION_DB && fault == BoostFault.NONE) || routeAtRisk),
+                    enter = fadeIn(appEffectsSpec()),
+                    exit = fadeOut(appFastEffectsSpec()),
+                    modifier = Modifier.align(Alignment.TopCenter).padding(8.dp)
+                ) {
                     HeadroomIndicator(
                         headroomDb = headroomDb,
                         enabled = enabled,
@@ -348,7 +431,10 @@ fun EqualizerSheet(
                     value = bassBoost,
                     enabled = enabled,
                     onValueChange = onBassBoostChange,
-                    onValueChangeFinished = onBoostChangeFinished
+                    onValueChangeFinished = onBoostChangeFinished,
+                    atFault = fault == BoostFault.BASS,
+                    severe = severeFault,
+                    interactionSource = bassGainInteraction
                 )
                 FreqSlider(
                     value = bassFreq,
@@ -356,7 +442,8 @@ fun EqualizerSheet(
                     maxHz = EqualizerAudioProcessor.BASS_BOOST_FREQ_MAX_HZ,
                     enabled = enabled,
                     onValueChange = onBassFreqChange,
-                    onValueChangeFinished = onBoostChangeFinished
+                    onValueChangeFinished = onBoostChangeFinished,
+                    interactionSource = bassFreqInteraction
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 BoostSlider(
@@ -364,7 +451,10 @@ fun EqualizerSheet(
                     value = trebleBoost,
                     enabled = enabled,
                     onValueChange = onTrebleBoostChange,
-                    onValueChangeFinished = onBoostChangeFinished
+                    onValueChangeFinished = onBoostChangeFinished,
+                    atFault = fault == BoostFault.TREBLE,
+                    severe = severeFault,
+                    interactionSource = trebleGainInteraction
                 )
                 FreqSlider(
                     value = trebleFreq,
@@ -372,7 +462,8 @@ fun EqualizerSheet(
                     maxHz = EqualizerAudioProcessor.TREBLE_BOOST_FREQ_MAX_HZ,
                     enabled = enabled,
                     onValueChange = onTrebleFreqChange,
-                    onValueChangeFinished = onBoostChangeFinished
+                    onValueChangeFinished = onBoostChangeFinished,
+                    interactionSource = trebleFreqInteraction
                 )
 
                 Spacer(modifier = Modifier.height(SectionGap))
@@ -656,6 +747,26 @@ private val BAND_COUNTS = listOf(5, 10)
 private val PresetRowGap = 8.dp
 
 /**
+ * Margen lateral del contenido: **16dp**, el estándar de M3 y el mismo de la hoja de la cola y de
+ * las listas de la app.
+ *
+ * Es el valor que hace que la cabecera cuadre sin tocar nada: `TopAppBar` deja su icono de
+ * navegación exactamente ahí (caja de 48dp arrancando en 4, glifo de 24 centrado → 16). Con los
+ * 24dp que tenía esta hoja, el back quedaba a 40 y todo lo demás a 24.
+ */
+private val ContentMargin = 16.dp
+
+/**
+ * Cuánto se retrae la acción final de la `TopAppBar` para que su borde caiga en [ContentMargin], en
+ * línea con el contenido de abajo.
+ *
+ * El componente separa sus acciones del borde por `TopAppBarHorizontalPadding`, que es 4dp y es
+ * `internal` en material3 — de ahí que la constante se escriba como la resta y no como un 12 suelto.
+ * Mismo ajuste que hace la barra de la hoja de la cola con su toggle de aleatorio.
+ */
+private val TopBarActionEndInset = ContentMargin - 4.dp
+
+/**
  * Chip de modo de bandas, al lado del preset. Comparte componente y lenguaje con él —el mismo
  * contenedor tonal, el mismo chevron que rota— pero en versión compacta y sin etiqueta.
  *
@@ -691,9 +802,30 @@ private fun BandCountChip(
 }
 
 /**
+ * Icono de la ruta de salida activa. Va como leading icon del selector de preset porque es
+ * justamente ahí donde importa: con los perfiles por ruta activados, lo que el selector muestra ES
+ * el perfil de este dispositivo, y sin el icono no habría forma de saber cuál de ellos estás
+ * mirando cuando la curva cambia sola al conectar unos cascos.
+ */
+private fun routeIcon(route: AudioRoute): String = when (route) {
+    AudioRoute.BLUETOOTH -> "bluetooth"
+    AudioRoute.USB -> "usb"
+    AudioRoute.WIRED -> "headphones"
+    // El altavoz del teléfono: "speaker" en Material Symbols es un altavoz de estantería, que
+    // sugeriría un equipo externo — justo lo contrario de lo que esta ruta significa.
+    AudioRoute.SPEAKER -> "smartphone"
+    AudioRoute.OTHER -> "volume_up"
+}
+
+/**
  * Selector de preset desplegable. Detecta si la curva actual coincide (con tolerancia) con un
  * preset de fábrica o propio para marcarlo; si no, muestra "Personalizado". Los presets propios
  * llevan un icono de borrar que no dispara la aplicación (clic aparte).
+ *
+ * [hiddenPresets] no se lista (ver `MusicPreferences.loadHiddenEqPresets`). El filtrado es SOLO de
+ * presentación: un preset oculto que coincida con la curva actual se sigue mostrando como valor
+ * del selector, porque lo contrario sería mentir — decir "Personalizado" sobre una curva que es
+ * exactamente Rock.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -701,6 +833,9 @@ private fun PresetSelector(
     bandCount: Int,
     gains: List<Float>,
     customPresets: List<EqCustomPreset>,
+    hiddenPresets: Set<String>,
+    audioRoute: AudioRoute,
+    routeProfilesEnabled: Boolean,
     enabled: Boolean,
     onApplyPreset: (FloatArray) -> Unit,
     onApplyCustomPreset: (EqCustomPreset) -> Unit,
@@ -720,6 +855,13 @@ private fun PresetSelector(
         else -> stringResource(R.string.eq_preset_custom)
     }
 
+    val visibleBuiltIn = remember(hiddenPresets) {
+        EqPresets.ALL.filterNot { EqPresets.hideKey(it) in hiddenPresets }
+    }
+    val visibleCustom = remember(customPresets, hiddenPresets) {
+        customPresets.filterNot { it.id in hiddenPresets }
+    }
+
     // Ancla TONAL y no un `TextField` de solo lectura: un campo de texto comunica escritura y
     // arrastra label flotante e indicador inferior, que sobre la superficie del reproductor se
     // leían como un formulario. Ver [TonalDropdownButton].
@@ -728,6 +870,9 @@ private fun PresetSelector(
     // para un dato de una.
     TonalDropdownButton(
         value = currentLabel,
+        // Solo con los perfiles por ruta activados: si no, el icono señalaría un dispositivo que
+        // no cambia nada, y un indicador que no informa de una diferencia es ruido.
+        leadingIcon = if (routeProfilesEnabled) routeIcon(audioRoute) else null,
         enabled = enabled,
         matchAnchorWidth = true,
         fillWidth = true,
@@ -738,7 +883,7 @@ private fun PresetSelector(
         // marca con contenedor propio y morph de forma. El check pasa a `selectedLeadingIcon`
         // en AMBAS listas — antes los de fábrica lo ponían de trailing y los personalizados
         // de leading, así que el mismo estado se señalaba en lados opuestos del mismo menú.
-        EqPresets.ALL.forEachIndexed { index, preset ->
+        visibleBuiltIn.forEachIndexed { index, preset ->
             DropdownMenuItem(
                 selected = builtInMatch == preset,
                 onClick = {
@@ -746,16 +891,22 @@ private fun PresetSelector(
                     dismiss()
                 },
                 text = { Text(stringResource(preset.labelRes)) },
-                shapes = MenuDefaults.itemShape(index = index, count = EqPresets.ALL.size),
+                shapes = MenuDefaults.itemShape(index = index, count = visibleBuiltIn.size),
                 selectedLeadingIcon = { MenuItemIcon("check") },
                 contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
             )
         }
-        if (customPresets.isNotEmpty()) {
+        if (visibleCustom.isNotEmpty()) {
             // Los personalizados son su PROPIO bloque (índices desde 0 otra vez), así que el
             // divisor separa dos grupos con esquinas cerradas en vez de partir uno solo.
-            HorizontalDivider(modifier = Modifier.padding(MenuDefaults.HorizontalDividerPadding))
-            customPresets.forEachIndexed { index, preset ->
+            // El divisor solo tiene sentido si ARRIBA quedó algo: con todos los de fábrica
+            // ocultos abriría el menú con una raya al aire.
+            if (visibleBuiltIn.isNotEmpty()) {
+                HorizontalDivider(
+                    modifier = Modifier.padding(MenuDefaults.HorizontalDividerPadding)
+                )
+            }
+            visibleCustom.forEachIndexed { index, preset ->
                 DropdownMenuItem(
                     selected = customMatch?.id == preset.id,
                     onClick = {
@@ -763,7 +914,7 @@ private fun PresetSelector(
                         dismiss()
                     },
                     text = { Text(preset.name) },
-                    shapes = MenuDefaults.itemShape(index = index, count = customPresets.size),
+                    shapes = MenuDefaults.itemShape(index = index, count = visibleCustom.size),
                     selectedLeadingIcon = { MenuItemIcon("check") },
                     contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding,
                     trailingIcon = {
@@ -782,6 +933,17 @@ private fun PresetSelector(
                     }
                 )
             }
+        }
+        // Se puede ocultar TODO, y entonces el menú no tendría nada dentro: un desplegable que se
+        // abre vacío se lee como un fallo. Prohibir ocultar el último sería una regla arbitraria
+        // que hay que explicar; decir dónde están es más barato y no le quita el control a nadie.
+        if (visibleBuiltIn.isEmpty() && visibleCustom.isEmpty()) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.eq_presets_all_hidden)) },
+                onClick = {},
+                enabled = false,
+                contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+            )
         }
     }
 }
@@ -821,12 +983,34 @@ private fun SavePresetDialog(
     )
 }
 
-// Anchos compartidos por TODOS los sliders de la hoja (bandas y refuerzos): la etiqueta y el
-// valor tienen que medir lo mismo en todos, o los sliders no arrancan ni terminan a la misma
-// altura y la columna se ve torcida. La etiqueta necesita 68dp por "Frecuencia" y el valor 72dp
-// por "16.000 Hz".
+// Anchos compartidos por TODOS los sliders de la hoja (bandas y refuerzos): la etiqueta y el valor
+// tienen que medir lo mismo en todos, o los sliders no arrancan ni terminan a la misma altura y la
+// columna se ve torcida.
+//
+// Los dimensiona el texto MÁS LARGO de cada columna en `labelMedium`: "Frecuencia" (~62dp) y
+// "3,15 kHz" (~52dp), más un pelo de holgura. Ni uno más, y esa es la regla que hay que respetar
+// aquí: como el valor va alineado a la DERECHA, cada dp que sobre en la columna se convierte en
+// hueco VISIBLE delante de la cifra — y lo sufren las filas de ganancia, cuyo "+6.0" es el texto más
+// corto de todos. Estuvieron en 76/80 durante una tarde y el resultado fue justo eso: 45dp de aire
+// entre el icono de aviso y el número.
+//
+// El valor bajó además al pasar la frecuencia a forma compacta (ver [formatFrequency]): mientras el
+// texto más largo fue "16.000 Hz", esta columna no podía medir menos de ~64.
 private val EqLabelWidth = 68.dp
-private val EqValueWidth = 72.dp
+private val EqValueWidth = 56.dp
+
+/**
+ * Hueco del aviso entre el slider y la cifra, reservado en TODAS las filas (ver [EqSliderRow]).
+ *
+ * 32dp es el área táctil del icono. Queda por debajo del mínimo de 48 de M3 a propósito: meter un
+ * `IconButton` completo en una fila de 48 la haría crecer y separaría los sliders entre sí, y este
+ * control no es una acción sino una explicación opcional — lo que informa de verdad (el color del
+ * slider, la cifra teñida, la curva) no depende de acertarle.
+ */
+private val BadgeSlot = 32.dp
+
+/** Glifo del aviso: la talla de un icono secundario, no la de los 24 de una acción. */
+private val BadgeGlyphSize = 20.sp
 
 /**
  * Resolución de los sliders de GANANCIA (bandas, refuerzos, preamp, umbral). Cuantizan por
@@ -891,9 +1075,59 @@ private fun freqStopPosition(hz: Double, stops: List<Double>): Float {
     return (i + ln(hz / stops[i]) / ln(stops[i + 1] / stops[i])).toFloat()
 }
 
+/** Quién está empujando la curva por encima del margen (ver [boostAtFault]). */
+private enum class BoostFault { NONE, BASS, TREBLE }
+
+/**
+ * Cuál de los dos refuerzos causa la saturación, o [BoostFault.NONE] si no la causa ninguno.
+ *
+ * El pico de la curva TOTAL es el dato que importa (es de donde sale el headroom), así que se busca
+ * su posición en la rejilla y se mira a qué refuerzo pertenece esa zona. Dos guardas:
+ *
+ *  - El refuerzo tiene que estar REALMENTE puesto ([EqualizerAudioProcessor.IDENTITY_EPSILON_DB]).
+ *    Si el pico cae cerca de 60 Hz pero el refuerzo de graves está a cero, el culpable es una banda
+ *    y teñir ese slider señalaría a un inocente.
+ *  - La comparación es en distancia LOGARÍTMICA de frecuencia, que es como está trazado el eje y
+ *    como se percibe el tono: en lineal, 10 kHz "gana" siempre por la escala.
+ *
+ * Cuando devuelve NONE el aviso sigue siendo el mensaje de texto: hay saturación pero no la causa
+ * ninguna barra concreta —la suma de las bandas, o una ruta Bluetooth de volumen absoluto— y pintar
+ * un slider ahí sería una acusación falsa.
+ */
+private fun boostAtFault(
+    response: FloatArray,
+    bassBoostDb: Float,
+    trebleBoostDb: Float,
+    bassFreqHz: Double,
+    trebleFreqHz: Double
+): BoostFault {
+    val bassOn = bassBoostDb >= EqualizerAudioProcessor.IDENTITY_EPSILON_DB
+    val trebleOn = trebleBoostDb >= EqualizerAudioProcessor.IDENTITY_EPSILON_DB
+    if (!bassOn && !trebleOn) return BoostFault.NONE
+
+    var peakIndex = 0
+    var peak = Float.NEGATIVE_INFINITY
+    for (i in response.indices) if (response[i] > peak) { peak = response[i]; peakIndex = i }
+    val peakHz = EqCurve.frequencyAt(peakIndex)
+
+    // Distancia en octavas del pico a cada centro; solo compiten los refuerzos activos.
+    fun octavesTo(hz: Double) = abs(ln(peakHz / hz) / LN_2)
+    val bassDistance = if (bassOn) octavesTo(bassFreqHz) else Double.MAX_VALUE
+    val trebleDistance = if (trebleOn) octavesTo(trebleFreqHz) else Double.MAX_VALUE
+    return if (bassDistance <= trebleDistance) BoostFault.BASS else BoostFault.TREBLE
+}
+
+private val LN_2 = ln(2.0)
+
 /**
  * Slider de ganancia de un refuerzo (0..MAX_BOOST_DB). Mismo reparto de anchos que las bandas para
  * que las dos secciones queden alineadas en columna.
+ *
+ * Con [atFault] el slider se pinta en el color de aviso: **es el propio control el que dice que se
+ * está pasando**, en vez de un mensaje aparte que obliga a deducir cuál de los dos bajar. El color
+ * sale de los mismos roles que usaba el mensaje (`error` grave / `tertiary` precaución), así que la
+ * severidad se lee igual esté donde esté, y a su lado aparece el icono de [SaturationBadge] con la
+ * explicación en un tooltip.
  */
 @Composable
 private fun BoostSlider(
@@ -901,12 +1135,36 @@ private fun BoostSlider(
     value: Float,
     enabled: Boolean,
     onValueChange: (Float) -> Unit,
-    onValueChangeFinished: () -> Unit
+    onValueChangeFinished: () -> Unit,
+    atFault: Boolean = false,
+    severe: Boolean = false,
+    /** Propia por slider: compartir una entre varios haría crecer el thumb de todos a la vez. */
+    interactionSource: MutableInteractionSource = remember { MutableInteractionSource() }
 ) {
+    val warnColor = when {
+        !atFault || !enabled -> null
+        severe -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.tertiary
+    }
     EqSliderRow(
         label = stringResource(labelRes),
         readout = String.format(Locale.getDefault(), "%+.1f", value),
-        enabled = enabled
+        enabled = enabled,
+        // La cifra en dB es lo que hay que bajar, así que se tiñe con el slider.
+        readoutColor = warnColor,
+        // Icono en la fila, en el hueco que EqSliderRow reserva. Sustituye a una etiqueta
+        // "Saturando" que colgaba debajo: la palabra ocupaba una línea entera para decir lo que el
+        // color del slider ya decía, y no distinguía los dos grados. El icono sí —`info` contra
+        // `warning`— y el texto pasa al tooltip, donde se lee cuando se pregunta por él.
+        badge = {
+            androidx.compose.animation.AnimatedVisibility(
+                visible = warnColor != null,
+                enter = fadeIn(appEffectsSpec()),
+                exit = fadeOut(appFastEffectsSpec())
+            ) {
+                SaturationBadge(severe = severe, color = warnColor ?: MaterialTheme.colorScheme.tertiary)
+            }
+        }
     ) { modifier ->
         Slider(
             value = value,
@@ -914,8 +1172,63 @@ private fun BoostSlider(
             onValueChangeFinished = onValueChangeFinished,
             valueRange = 0f..EqualizerAudioProcessor.MAX_BOOST_DB,
             enabled = enabled,
+            colors = if (warnColor != null) {
+                SliderDefaults.colors(
+                    thumbColor = warnColor,
+                    activeTrackColor = warnColor
+                )
+            } else SliderDefaults.colors(),
+            interactionSource = interactionSource,
             modifier = modifier
         )
+    }
+}
+
+/**
+ * Aviso de saturación de una fila: un icono con tooltip, en dos grados.
+ *
+ * `info` (precaución) y `warning` relleno (riesgo) son la misma pareja de roles que ya usan el
+ * slider y el gráfico —`tertiary` / `error`—, así que la severidad se lee igual en los tres sitios y
+ * el color no tiene que explicarse dos veces.
+ *
+ * El texto vive en el tooltip y no en pantalla: es una explicación que se consulta, no un estado que
+ * haya que vigilar; lo que hay que vigilar ya lo dicen el color del control y la curva. El tooltip
+ * se abre con el TAP además del long-press que trae `TooltipBox`, porque un icono de 32dp dentro de
+ * una fila de sliders no anuncia por sí solo que hay que mantener pulsado.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SaturationBadge(severe: Boolean, color: Color) {
+    val tooltipState = rememberTooltipState()
+    val scope = rememberCoroutineScope()
+    val description = stringResource(
+        if (severe) R.string.eq_boost_saturating_strong else R.string.eq_boost_saturating_mild
+    )
+    TooltipBox(
+        // El overload SIN posición está deprecado en 1.5.0-alpha24; el vivo pide la preferencia
+        // explícita. `Above` = el comportamiento que daba el viejo, y es el correcto aquí: debajo
+        // del icono está la fila siguiente de sliders, que es justo lo que no conviene tapar.
+        positionProvider = TooltipDefaults.rememberTooltipPositionProvider(TooltipAnchorPosition.Above),
+        tooltip = { PlainTooltip { Text(description) } },
+        state = tooltipState
+    ) {
+        Box(
+            modifier = Modifier
+                .size(BadgeSlot)
+                .clip(CircleShape)
+                .clickable { scope.launch { tooltipState.show() } }
+                .semantics { contentDescription = description },
+            contentAlignment = Alignment.Center
+        ) {
+            MaterialSymbol(
+                icon = if (severe) "warning" else "info",
+                size = BadgeGlyphSize,
+                color = color,
+                // Relleno solo el grave: a este tamaño el peso del glifo es lo que separa "mira
+                // esto" de "estás rompiendo la señal", incluso antes de leer el color.
+                fill = severe
+            )
+        }
     }
 }
 
@@ -1096,7 +1409,9 @@ private fun GainReductionMeter(
             ),
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(EqLabelWidth)
+            // Mínimo y no fijo, igual que en [EqSliderRow]: esta etiqueta es de las largas
+            // ("Reduciendo" / "Reduciría") y es la primera que se saldría con la fuente en grande.
+            modifier = Modifier.widthIn(min = EqLabelWidth)
         )
         Box(
             modifier = Modifier
@@ -1122,7 +1437,7 @@ private fun GainReductionMeter(
             style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
             color = if (gainReductionDb > 0f && active) MaterialTheme.colorScheme.onSurface
             else MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(EqValueWidth),
+            modifier = Modifier.widthIn(min = EqValueWidth),
             textAlign = androidx.compose.ui.text.style.TextAlign.End,
             maxLines = 1
         )
@@ -1162,16 +1477,14 @@ private fun FreqSlider(
     maxHz: Double,
     enabled: Boolean,
     onValueChange: (Double) -> Unit,
-    onValueChangeFinished: () -> Unit
+    onValueChangeFinished: () -> Unit,
+    /** Propia por slider, ver [BoostSlider]. */
+    interactionSource: MutableInteractionSource = remember { MutableInteractionSource() }
 ) {
     val stops = remember(minHz, maxHz) { freqStops(minHz, maxHz) }
     EqSliderRow(
         label = stringResource(R.string.eq_boost_center),
-        // Siempre en Hz enteros: las paradas son valores exactos de la norma y así se leen tal
-        // cual ("6.300 Hz"), sin un ".3 kHz" que redondee lo que el control sí puede clavar. OJO
-        // si algún día un rango baja de 40 Hz: la única parada no entera de la serie es 31,5 y
-        // aquí se leería "32 Hz", con el processor recibiendo 31,5.
-        readout = String.format(Locale.getDefault(), "%,d Hz", value.roundToInt()),
+        readout = formatFrequency(value),
         enabled = enabled
     ) { modifier ->
         Slider(
@@ -1186,10 +1499,57 @@ private fun FreqSlider(
             // `steps` son las marcas INTERMEDIAS: los dos extremos no se cuentan.
             steps = stops.size - 2,
             enabled = enabled,
+            interactionSource = interactionSource,
             modifier = modifier
         )
     }
 }
+
+/**
+ * Frecuencia en forma COMPACTA: "80 Hz", "3,15 kHz", "16 kHz".
+ *
+ * Sustituye a los Hz enteros con separador de millar ("16.000 Hz"). Aquello se eligió para que las
+ * paradas —valores exactos de la ISO 266— se leyeran tal cual, sin un ".3 kHz" que pareciera un
+ * redondeo. Esta versión conserva esa propiedad y quita el motivo de la queja: **no redondea nada**,
+ * porque el número de decimales sale de lo que el valor NECESITA (ver [significantDecimals]), así
+ * que 6.300 se lee "6,3 kHz" y 3.150 se lee "3,15 kHz", exactos los dos.
+ *
+ * Lo que se gana es ancho: la columna del valor la dimensionaba "16.000 Hz", que es el texto más
+ * largo de toda la hoja, y ese exceso se convertía en un hueco delante de las cifras de ganancia
+ * ("+6.0" mide la mitad). Con la forma compacta el máximo pasa a "3,15 kHz".
+ *
+ * De regalo se cierra un gotcha que el formato viejo tenía anotado: la única parada no entera de la
+ * serie es 31,5 Hz y con "%,d Hz" se habría leído "32 Hz" mientras el processor recibía 31,5. La
+ * misma regla de decimales aplica por debajo de 1 kHz, así que ahora se lee "31,5 Hz".
+ */
+private fun formatFrequency(hz: Double): String {
+    val locale = Locale.getDefault()
+    return if (hz >= HZ_PER_KHZ) {
+        val kHz = hz / HZ_PER_KHZ
+        String.format(locale, "%,.${significantDecimals(kHz)}f kHz", kHz)
+    } else {
+        String.format(locale, "%,.${significantDecimals(hz)}f Hz", hz)
+    }
+}
+
+/**
+ * Decimales que hacen falta para escribir [value] sin perder información, hasta un máximo de 2 (que
+ * es lo que pide la parada más fina de la serie, 3,15 kHz).
+ *
+ * La comparación va con tolerancia y no con `==` porque 1,6 no es representable exactamente en
+ * binario: `1.6 * 10` da 16.000000000000002, y una igualdad estricta lo mandaría a dos decimales
+ * para escribir "1,60 kHz".
+ */
+private fun significantDecimals(value: Double): Int = when {
+    abs(value - value.roundToInt()) < FREQ_ROUNDING_EPSILON -> 0
+    abs(value * 10 - (value * 10).roundToInt()) < FREQ_ROUNDING_EPSILON -> 1
+    else -> 2
+}
+
+/** Margen para dar por entero un valor que el binario deja a unos pocos ULP de serlo. */
+private const val FREQ_ROUNDING_EPSILON = 1e-6
+
+private const val HZ_PER_KHZ = 1000.0
 
 /** Cuantiza una ganancia a [GAIN_STEP_DB]. Ver por qué no se usa `steps` en su kdoc. */
 private fun snapGain(db: Float): Float = (db / GAIN_STEP_DB).roundToInt() * GAIN_STEP_DB
@@ -1325,12 +1685,19 @@ private val BandSliderHeight = 150.dp
 /** Separación entre el bloque de bandas y el de refuerzo. */
 private val SectionGap = 24.dp
 
-/** Estructura común de todas las filas: etiqueta, slider elástico y lectura alineada a la derecha. */
+/**
+ * Estructura común de todas las filas: etiqueta, slider elástico, hueco de aviso y lectura alineada
+ * a la derecha.
+ */
 @Composable
 private fun EqSliderRow(
     label: String,
     readout: String,
     enabled: Boolean,
+    /** Color de la cifra en dB; null = el de siempre. Lo usa el aviso de saturación. */
+    readoutColor: Color? = null,
+    /** Aviso de la fila (ver [SaturationBadge]). Vacío en las filas que no avisan de nada. */
+    badge: @Composable () -> Unit = {},
     slider: @Composable (Modifier) -> Unit
 ) {
     Row(
@@ -1341,15 +1708,37 @@ private fun EqSliderRow(
             text = label,
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(EqLabelWidth)
+            // MÍNIMO, no ancho fijo: con la fuente del sistema en grande —o en un idioma con
+            // palabras más largas— un ancho cerrado partiría el texto en dos líneas y la fila
+            // crecería de alto. Así la columna se ensancha solo lo que le falte, y lo que cede es el
+            // slider, que es elástico. En condiciones normales todas las filas miden igual, que es
+            // lo que mantiene los sliders alineados.
+            modifier = Modifier.widthIn(min = EqLabelWidth)
         )
         slider(Modifier.weight(1f))
+        // El hueco se reserva SIEMPRE y en todas las filas, tenga aviso o no. Es la parte
+        // load-bearing: si el icono ocupara sitio solo cuando aparece, el slider se encogería en el
+        // mismo instante en que el aviso salta —que es mientras el dedo lo está arrastrando— y el
+        // thumb se movería por debajo del dedo. Es el mismo defecto por el que el aviso vivía como
+        // etiqueta DEBAJO de la fila. Y en todas porque los sliders de la hoja tienen que empezar y
+        // acabar a la misma altura, o la columna se ve torcida.
+        Box(
+            modifier = Modifier.width(BadgeSlot),
+            contentAlignment = Alignment.Center
+        ) {
+            badge()
+        }
         Text(
             text = readout,
             style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
-            color = if (enabled) MaterialTheme.colorScheme.onSurface
-            else MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(EqValueWidth),
+            color = readoutColor
+                ?: if (enabled) MaterialTheme.colorScheme.onSurface
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+            // Mínimo por el mismo motivo que la etiqueta, y aquí además es lo que permite tener la
+            // columna ajustada: el ancho lo pide "16.000 Hz", pero como es un piso y no un techo, si
+            // algún día no cupiera se ensancha en vez de romperse.
+            maxLines = 1,
+            modifier = Modifier.widthIn(min = EqValueWidth),
             textAlign = androidx.compose.ui.text.style.TextAlign.End
         )
     }
@@ -1446,10 +1835,11 @@ private fun HeadroomIndicator(
     }
 }
 
-private fun formatBandLabel(hz: Float): String = if (hz >= 1000f) {
-    val k = hz / 1000f
-    if (k % 1f == 0f) String.format(Locale.getDefault(), "%.0f kHz", k)
-    else String.format(Locale.getDefault(), "%.1f kHz", k)
-} else {
-    String.format(Locale.getDefault(), "%.0f Hz", hz)
-}
+/**
+ * Etiqueta bajo cada banda. Delega en [formatFrequency] para que la hoja tenga UNA sola forma de
+ * escribir una frecuencia: hasta el 31 jul había aquí una copia con su propia regla —máximo un
+ * decimal y `k % 1f == 0f` para decidirlo, que es la comparación exacta de coma flotante que
+ * [significantDecimals] evita a propósito— y ahora que el centro de los refuerzos se escribe igual,
+ * dos versiones divergentes de lo mismo estarían a la vista una encima de la otra.
+ */
+private fun formatBandLabel(hz: Float): String = formatFrequency(hz.toDouble())

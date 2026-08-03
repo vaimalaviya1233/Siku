@@ -16,6 +16,7 @@ import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
@@ -107,25 +108,29 @@ fun SongOverflowButton(
     isFavorite: Boolean,
     onToggleFavorite: () -> Unit,
     onAddToPlaylist: () -> Unit,
+    // Fondo REAL de la fila (tinte del ítem activo ya compuesto, vía `songRowBackground`): de él se
+    // derivan los colores de la píldora, ver `rememberRowActionColors`.
+    rowBackground: Color,
     modifier: Modifier = Modifier
 ) {
     var showMenu by remember { mutableStateOf(false) }
     val optionsDesc = stringResource(R.string.common_song_options)
+    val colors = rememberRowActionColors(rowBackground)
     Box(modifier = modifier) {
         // Píldora VERTICAL (M3 Expressive) como FilledIconButton real: shape-morph al presionar.
         FilledIconButton(
             onClick = { showMenu = true },
             shapes = IconButtonDefaults.shapes(),
             colors = IconButtonDefaults.filledIconButtonColors(
-                containerColor = colorScheme.secondaryContainer,
-                contentColor = colorScheme.onSecondaryContainer
+                containerColor = colors.container,
+                contentColor = colors.content
             ),
             modifier = Modifier
                 .width(28.dp)
                 .height(44.dp)
                 .semantics { contentDescription = optionsDesc }
         ) {
-            MaterialSymbol("more_vert", size = 18.sp, color = colorScheme.onSecondaryContainer)
+            MaterialSymbol("more_vert", size = 18.sp, color = colors.content)
         }
         // Menú SEGMENTADO (popup + grupo), no el `DropdownMenu` clásico: ver la nota en SortChip.
         DropdownMenuPopup(expanded = showMenu, onDismissRequest = { showMenu = false }) {

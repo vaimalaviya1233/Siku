@@ -67,6 +67,7 @@ internal fun NowPlayingPortrait(
     hazeState: HazeState,
     glassTint: Color,
     sharedTransitionScope: SharedTransitionScope?,
+    artSharedKey: Any?,
     animatedVisibilityScope: AnimatedVisibilityScope?,
     onAlbumArtLongPress: () -> Unit
 ) {
@@ -80,6 +81,7 @@ internal fun NowPlayingPortrait(
             song = song,
             variantColor = variantColor,
             sharedTransitionScope = sharedTransitionScope,
+            artSharedKey = artSharedKey,
             animatedVisibilityScope = animatedVisibilityScope,
             isPlaying = isPlayingOrBuffering,
             onTap = onAlbumArtLongPress,
@@ -245,6 +247,7 @@ internal fun NowPlayingLandscape(
     hazeState: HazeState,
     glassTint: Color,
     sharedTransitionScope: SharedTransitionScope?,
+    artSharedKey: Any?,
     animatedVisibilityScope: AnimatedVisibilityScope?,
     onAlbumArtLongPress: () -> Unit
 ) {
@@ -309,6 +312,7 @@ internal fun NowPlayingLandscape(
                     song = song,
                     variantColor = variantColor,
                     sharedTransitionScope = sharedTransitionScope,
+                    artSharedKey = artSharedKey,
                     animatedVisibilityScope = animatedVisibilityScope,
                     isPlaying = isPlayingOrBuffering,
                     onTap = onAlbumArtLongPress,

@@ -30,6 +30,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -44,8 +45,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.qhana.siku.R
 import com.qhana.siku.data.model.PlaybackState
 import com.qhana.siku.data.util.SnackbarManager
+import com.qhana.siku.ui.components.ALBUM_ART_SHARED_KEY
 import com.qhana.siku.ui.components.AddSongsToPlaylistSheet
 import com.qhana.siku.ui.components.ComponentConfig
+import com.qhana.siku.ui.components.rowArtSharedKey
 import com.qhana.siku.ui.components.EqualizerSheet
 import com.qhana.siku.ui.components.MiniPlayer
 import com.qhana.siku.ui.components.miniPlayerExpandDrag
@@ -91,6 +94,7 @@ fun BoxScope.PlayerOverlay(
     val nowPlayingWavyProgress by playbackViewModel.nowPlayingWavyProgress.collectAsStateWithLifecycle()
     val nowPlayingDetailedFormat by playbackViewModel.nowPlayingDetailedFormat.collectAsStateWithLifecycle()
     val playerGestures by playbackViewModel.playerGestures.collectAsStateWithLifecycle()
+    val miniPlayerRoundedRect by playbackViewModel.miniPlayerRoundedRect.collectAsStateWithLifecycle()
     val lyricsSaveState by playbackViewModel.lyricsSaveState.collectAsStateWithLifecycle()
     val libraryUiState by libraryViewModel.uiState.collectAsStateWithLifecycle()
     val favorites = libraryUiState.favorites
@@ -290,22 +294,25 @@ fun BoxScope.PlayerOverlay(
                         song = song,
                         isPlaying = playbackState == PlaybackState.PLAYING,
                         isBuffering = playbackState == PlaybackState.BUFFERING,
+                        roundedRect = miniPlayerRoundedRect,
                         onPlayPause = { playbackViewModel.playPause() },
                         onNextClick = { playbackViewModel.next() },
                         // `fromPill`: es la ÚNICA apertura en la que la carátula ya está en
                         // pantalla y puede viajar de aquí al reproductor (ver playerOpenedFromPill).
-                        onClick = { appState.openPlayer(fromPill = true) },
+                        onClick = { appState.openPlayer(PlayerArtOrigin.PILL) },
                         // Como FLOWS, no como valor: el tick de posición repinta el relleno de
                         // progreso sin recomponer el mini (ver el kdoc del parámetro).
                         currentPositionFlow = playbackViewModel.currentPosition,
                         durationFlow = playbackViewModel.duration,
-                        // Gateado igual que la otra punta del par (ver la llamada a
-                        // NowPlayingScreen): las dos tienen que declarar el shared element o
-                        // ninguna. Una punta suelta no encuentra pareja y, durante el desmontaje
-                        // de la píldora, se pintaría en el overlay sin motivo.
-                        sharedTransitionScope = sharedTransitionScope.takeIf {
-                            appState.playerOpenedFromPill
-                        },
+                        // SIEMPRE, no solo cuando el origen es la píldora: una punta solo sirve de
+                        // ORIGEN si ya estaba compuesta y MEDIDA antes del gesto, y gatearla por el
+                        // origen la registraba en el mismo frame del tap — sin bounds, sin match.
+                        // Era el bug del arranque en frío (la primera apertura desde la píldora no
+                        // morfaba y las siguientes sí, porque para entonces ya había quedado
+                        // declarada). Su key es única (ver ALBUM_ART_SHARED_KEY), así que mientras
+                        // el reproductor no la pida, la píldora es un shared element solitario e
+                        // inofensivo.
+                        sharedTransitionScope = sharedTransitionScope,
                         animatedVisibilityScope = miniScope,
                         // Margen lateral del spec (el Column ya no lo aplica).
                         modifier = Modifier
@@ -314,7 +321,7 @@ fun BoxScope.PlayerOverlay(
                             // Deslizar hacia arriba abre el reproductor: es el gesto inverso
                             // al de cerrarlo, y sin él la píldora solo respondía al tap.
                             .miniPlayerExpandDrag(playerGestures) {
-                                appState.openPlayer(fromPill = true)
+                                appState.openPlayer(PlayerArtOrigin.PILL)
                             }
                     )
                 }
@@ -334,6 +341,16 @@ fun BoxScope.PlayerOverlay(
     ) {
         val playerScope = this
         val isDarkTheme = isSystemInDarkTheme()
+        // A qué punta se engancha la carátula del reproductor. NO es una preferencia estética: la
+        // píldora y las filas usan familias de key DISTINTAS a propósito (la píldora una constante,
+        // cada fila la suya con el id), porque las dos tienen que estar declaradas de ANTES para
+        // poder servir de origen y a la vez no pisarse. Elegir key aquí es lo que decide cuál de
+        // las dos recibe la portada.
+        val artSharedKey: Any? = when (appState.playerArtOrigin) {
+            PlayerArtOrigin.PILL -> ALBUM_ART_SHARED_KEY
+            PlayerArtOrigin.ROW -> currentSong?.id?.let { rowArtSharedKey(it) }
+            PlayerArtOrigin.NONE -> null
+        }
         // Memoizamos las acciones: si se construyen inline, cada recomposición
         // (posición cada 1s, lyrics, descargas…) crea lambdas nuevas →
         // NowPlayingScreen se recompone entero.
@@ -399,17 +416,21 @@ fun BoxScope.PlayerOverlay(
                 }
             )
         }
+        // Las filas de canción que viven DENTRO del reproductor (la hoja de la cola) no deben
+        // declarar el shared element de su carátula: usarían la misma key por-canción que la fila
+        // de la lista de atrás y que el propio reproductor, y de las puntas de una key solo UNA
+        // puede ser destino. Anular el scope AQUÍ las desactiva todas de una vez; el NowPlaying no
+        // se ve afectado porque recibe el suyo por PARÁMETRO, no por este local.
+        CompositionLocalProvider(LocalAppSharedTransitionScope provides null) {
         NowPlayingScreen(
-            // El shared element de la carátula SOLO cuando se abrió desde la píldora: es la única
-            // apertura en la que la portada ya está en pantalla y tiene de dónde viajar. Abriendo
-            // desde una lista se pasa null y la carátula sube CON el resto del contenido, como una
-            // pieza más del reproductor — que es lo correcto, porque la fila que se tocó sigue ahí
-            // detrás y de ella no sale nada. Ver `MusicAppState.playerOpenedFromPill`.
+            // La carátula del reproductor se engancha a la punta que corresponda ELIGIENDO SU KEY
+            // (ver [artSharedKey]); sin origen no declara shared element y sube con el contenido.
             //
             // OJO: se anula el `sharedTransitionScope`, NO el `animatedVisibilityScope`. Ese
             // segundo alimenta además los gates de "player ya asentado" (reveal de cambio de
             // canción y blur del vidrio); pasarlo null los daría por asentados en pleno slide.
-            sharedTransitionScope = sharedTransitionScope.takeIf { appState.playerOpenedFromPill },
+            sharedTransitionScope = sharedTransitionScope.takeIf { artSharedKey != null },
+            artSharedKey = artSharedKey,
             animatedVisibilityScope = playerScope,
             uiState = nowPlayingUiState,
             playbackState = playbackState,
@@ -436,6 +457,7 @@ fun BoxScope.PlayerOverlay(
             toolbarConfig = playbackViewModel.toolbarConfig.collectAsStateWithLifecycle().value,
             modifier = Modifier.fillMaxSize()
         )
+        } // CompositionLocalProvider(LocalAppSharedTransitionScope provides null)
     }
 
     // Ecualizador: overlay FULL-SCREEN (ya no es ModalBottomSheet) que slide desde abajo, mismo
@@ -469,6 +491,9 @@ fun BoxScope.PlayerOverlay(
                 .collectAsStateWithLifecycle(initialValue = 0f).value,
             audioRoute = playbackViewModel.audioRoute.collectAsStateWithLifecycle().value,
             customPresets = playbackViewModel.customEqPresets.collectAsStateWithLifecycle().value,
+            hiddenPresets = playbackViewModel.hiddenEqPresets.collectAsStateWithLifecycle().value,
+            routeProfilesEnabled =
+                playbackViewModel.eqRouteProfilesEnabled.collectAsStateWithLifecycle().value,
             conflictWarningSuppressed = playbackViewModel.eqConflictWarningSuppressed.collectAsStateWithLifecycle().value,
             onSuppressConflictWarning = { playbackViewModel.suppressEqConflictWarning() },
             onEnabledChange = { playbackViewModel.setEqEnabled(it) },
@@ -522,6 +547,9 @@ fun BoxScope.PlayerOverlay(
             pickerResults.filterNot { it.id in existingIds }
         }
 
+        // Mismo motivo que en la hoja de la cola: sus filas repetirían la key por-canción de las
+        // filas de la lista que hay detrás.
+        CompositionLocalProvider(LocalAppSharedTransitionScope provides null) {
         AddSongsToPlaylistSheet(
             playlistName = sheetPlaylistName,
             candidates = candidates,
@@ -544,6 +572,7 @@ fun BoxScope.PlayerOverlay(
                 appState.showAddSongsSheet = false
             }
         )
+        } // CompositionLocalProvider(LocalAppSharedTransitionScope provides null)
     }
 }
 

@@ -3,6 +3,7 @@ package com.qhana.siku.ui.screens
 import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
@@ -40,6 +41,7 @@ import com.qhana.siku.data.model.PlayerToolbarConfig
 import com.qhana.siku.data.model.ReplayGainMode
 import com.qhana.siku.data.model.ToolbarActionState
 import com.qhana.siku.ui.components.ConnectedChoiceGroup
+import com.qhana.siku.ui.components.EqPresets
 import com.qhana.siku.ui.components.DisconnectOneDriveDialog
 import com.qhana.siku.ui.components.DeviceScanSourceCard
 import com.qhana.siku.ui.components.LocalFoldersSourceCard
@@ -465,6 +467,7 @@ fun SettingsBackupScreen(
 @Composable
 fun SettingsPlaybackScreen(
     onBackClick: () -> Unit,
+    onNavigate: (String) -> Unit,
     viewModel: LibraryViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -564,6 +567,65 @@ fun SettingsPlaybackScreen(
                         onCheckedChange = { viewModel.setUseSystemEq(it) }
                     )
                 }
+
+                // Perfiles por ruta de salida. Van bajo el mismo encabezado que el EQ y NO en una
+                // categoría propia: son una propiedad del ecualizador, no otra función.
+                //
+                // Deshabilitados con el EQ del sistema activo: ahí el ecualizador propio está
+                // apagado, así que no hay curva que recordar por dispositivo. Se muestra en vez de
+                // esconderse, para que la opción no parezca haber desaparecido.
+                val routeProfiles by viewModel.eqRouteProfilesEnabled.collectAsStateWithLifecycle()
+                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.settings_eq_route_profiles),
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = if (uiState.useSystemEq) {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            }
+                        )
+                        Text(
+                            text = stringResource(R.string.settings_eq_route_profiles_desc),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Switch(
+                        checked = routeProfiles && !uiState.useSystemEq,
+                        enabled = !uiState.useSystemEq,
+                        onCheckedChange = { viewModel.setEqRouteProfilesEnabled(it) }
+                    )
+                }
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onNavigate(Screen.SettingsEqPresets.route) }
+                        .padding(vertical = 8.dp)
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.settings_eq_presets),
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                        Text(
+                            text = stringResource(R.string.settings_eq_presets_desc),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(16.dp))
+                    MaterialSymbol("chevron_right", size = 24.sp)
+                }
             }
         }
 
@@ -575,6 +637,124 @@ fun SettingsPlaybackScreen(
             onModeChange = { viewModel.setLyricsSaveMode(it) },
             onFolderChange = { viewModel.setLyricsFolder(it) }
         )
+    }
+}
+
+/**
+ * Qué presets del ecualizador se listan en el selector del reproductor.
+ *
+ * Vive en Ajustes y no en la hoja del EQ a propósito: es una tarea de mantenimiento que se hace
+ * una vez y luego no se vuelve a tocar, mientras que esa hoja es una pantalla de uso constante
+ * donde cada control extra compite con los sliders. Meter ahí una lista de diez interruptores
+ * habría sido pagar todos los días por algo que se usa una tarde.
+ *
+ * Ocultar y borrar son acciones DISTINTAS y por eso están separadas: los de fábrica solo se pueden
+ * ocultar (no se pueden recrear si te arrepentís) y los propios además se pueden borrar. Un icono
+ * de basura sobre "Rock" habría sido una puerta sin vuelta.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsEqPresetsScreen(
+    onBackClick: () -> Unit,
+    viewModel: LibraryViewModel = hiltViewModel()
+) {
+    val hidden by viewModel.hiddenEqPresets.collectAsStateWithLifecycle()
+    val customPresets by viewModel.customEqPresets.collectAsStateWithLifecycle()
+
+    SettingsScaffold(
+        title = stringResource(R.string.settings_eq_presets),
+        onBackClick = onBackClick
+    ) {
+        Surface(
+            shape = RoundedCornerShape(SettingsTokens.BlockCorner),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = stringResource(R.string.settings_eq_presets_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
+
+                EqPresets.ALL.forEach { preset ->
+                    val key = EqPresets.hideKey(preset)
+                    PresetVisibilityRow(
+                        name = stringResource(preset.labelRes),
+                        visible = key !in hidden,
+                        onVisibleChange = { viewModel.setEqPresetHidden(key, !it) },
+                        onDelete = null
+                    )
+                }
+
+                if (customPresets.isNotEmpty()) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+                    Text(
+                        text = stringResource(R.string.settings_eq_presets_own),
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.padding(bottom = 4.dp)
+                    )
+                    customPresets.forEach { preset ->
+                        PresetVisibilityRow(
+                            name = preset.name,
+                            visible = preset.id !in hidden,
+                            onVisibleChange = { viewModel.setEqPresetHidden(preset.id, !it) },
+                            onDelete = { viewModel.deleteEqPreset(preset.id) }
+                        )
+                    }
+                }
+
+                // Solo cuando hay algo que restaurar: un botón permanentemente inútil enseña al
+                // usuario a ignorar esa zona de la pantalla.
+                if (hidden.isNotEmpty()) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+                    TextButton(onClick = { viewModel.restoreAllEqPresets() }) {
+                        Text(stringResource(R.string.settings_eq_presets_restore_all, hidden.size))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Una fila de la gestión de presets. El interruptor dice VISIBLE (no "oculto"): un switch en
+ * posición de encendido tiene que significar que la cosa está, o hay que leer la etiqueta dos
+ * veces para saber qué hace el gesto obvio.
+ */
+@Composable
+private fun PresetVisibilityRow(
+    name: String,
+    visible: Boolean,
+    onVisibleChange: (Boolean) -> Unit,
+    onDelete: (() -> Unit)?
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+    ) {
+        Text(
+            text = name,
+            style = MaterialTheme.typography.bodyLarge,
+            color = if (visible) {
+                MaterialTheme.colorScheme.onSurface
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+            modifier = Modifier.weight(1f)
+        )
+        if (onDelete != null) {
+            IconButton(onClick = onDelete) {
+                MaterialSymbol(
+                    icon = "delete",
+                    size = 20.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Switch(checked = visible, onCheckedChange = onVisibleChange)
     }
 }
 
@@ -935,6 +1115,7 @@ fun SettingsAppearanceScreen(
     val isRegenerating = uiState.isRegeneratingColors
     val nowPlayingSolidBackground = uiState.nowPlayingSolidBackground
     val nowPlayingWavyProgress = uiState.nowPlayingWavyProgress
+    val miniPlayerRoundedRect = uiState.miniPlayerRoundedRect
     val nowPlayingDetailedFormat = uiState.nowPlayingDetailedFormat
 
     // Regenerar es DESTRUCTIVO e irreversible: además de vaciar los colores extraídos —que los
@@ -1005,6 +1186,19 @@ fun SettingsAppearanceScreen(
                         checked = nowPlayingWavyProgress,
                         shape = shape,
                         onCheckedChange = { viewModel.setNowPlayingWavyProgress(it) }
+                    )
+                },
+                // Forma de la barra flotante: píldora (diseño original) o rectángulo redondeado.
+                // Solo afecta al contenedor; la carátula del mini sigue siendo circular porque es
+                // el extremo del shared element hacia el reproductor.
+                { shape ->
+                    SettingsSwitchTile(
+                        icon = "rounded_corner",
+                        title = stringResource(R.string.settings_mini_player_rect),
+                        description = stringResource(R.string.settings_mini_player_rect_desc),
+                        checked = miniPlayerRoundedRect,
+                        shape = shape,
+                        onCheckedChange = { viewModel.setMiniPlayerRoundedRect(it) }
                     )
                 },
                 // Chip de formato: solo el contenedor (FLAC) o la ficha técnica

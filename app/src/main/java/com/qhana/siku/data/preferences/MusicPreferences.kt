@@ -21,6 +21,7 @@ import com.qhana.siku.data.model.ArtistSortOrder
 import com.qhana.siku.data.model.DownloadControlState
 import com.qhana.siku.data.model.DuplicatePolicy
 import com.qhana.siku.data.model.EqCustomPreset
+import com.qhana.siku.data.model.EqSettings
 import com.qhana.siku.data.model.LibraryTabState
 import com.qhana.siku.data.model.LibraryTabsConfig
 import com.qhana.siku.data.model.LyricsSaveMode
@@ -577,8 +578,9 @@ class MusicPreferences(context: Context) {
 
     // --- Presets personalizados del EQ ---
     // Se serializan como un JSON array en una sola clave (org.json, sin Gson → sin regla
-    // ProGuard). Cada preset guarda su curva cruda y el modo de bandas de captura; el nombre
-    // puede contener comas/saltos, por eso NO se usa el encoding delimitado de las ganancias.
+    // ProGuard). Cada preset guarda su configuración COMPLETA ([EqSettings]: curva cruda, modo de
+    // bandas de captura, refuerzos, preamp y limitador); el nombre puede contener comas/saltos,
+    // por eso NO se usa el encoding delimitado de las ganancias.
 
     fun loadCustomEqPresets(): List<EqCustomPreset> =
         parseCustomPresets(cache[KEY_EQ_CUSTOM_PRESETS])
@@ -586,13 +588,7 @@ class MusicPreferences(context: Context) {
     fun saveCustomEqPresets(presets: List<EqCustomPreset>) = update {
         val arr = JSONArray()
         presets.forEach { p ->
-            arr.put(
-                JSONObject()
-                    .put("id", p.id)
-                    .put("name", p.name)
-                    .put("bandCount", p.bandCount)
-                    .put("gains", JSONArray().apply { p.gains.forEach { put(it.toDouble()) } })
-            )
+            arr.put(encodeEqSettings(p.settings).put("id", p.id).put("name", p.name))
         }
         it[KEY_EQ_CUSTOM_PRESETS] = arr.toString()
     }
@@ -607,18 +603,134 @@ class MusicPreferences(context: Context) {
             val arr = JSONArray(raw)
             (0 until arr.length()).map { i ->
                 val o = arr.getJSONObject(i)
-                val g = o.getJSONArray("gains")
                 EqCustomPreset(
                     id = o.getString("id"),
                     name = o.getString("name"),
-                    bandCount = if (o.getInt("bandCount") == 10) 10 else 5,
-                    gains = FloatArray(g.length()) { g.getDouble(it).toFloat() }
+                    settings = decodeEqSettings(o)
                 )
             }
         } catch (_: Exception) {
             emptyList()
         }
     }
+
+    /**
+     * Serializa una config completa del EQ. Los campos nullable se OMITEN cuando son null en vez
+     * de escribir `JSONObject.NULL`: al leer, "ausente" y "null" significan lo mismo (usa el
+     * default del processor), y así un preset guardado antes de que existieran estos campos se lee
+     * exactamente igual que uno nuevo sin ellos.
+     */
+    private fun encodeEqSettings(s: EqSettings): JSONObject {
+        val o = JSONObject()
+            .put("bandCount", s.bandCount)
+            .put("gains", JSONArray().apply { s.gains.forEach { put(it.toDouble()) } })
+            .put("bass", s.bassBoostDb.toDouble())
+            .put("treble", s.trebleBoostDb.toDouble())
+            .put("preamp", s.preampDb.toDouble())
+            .put("lim", s.limiterEnabled)
+            .put("limAuto", s.limiterThresholdAuto)
+        s.bassFreqHz?.let { o.put("bassHz", it) }
+        s.trebleFreqHz?.let { o.put("trebleHz", it) }
+        s.limiterThresholdDb?.let { o.put("limDb", it.toDouble()) }
+        return o
+    }
+
+    /**
+     * Lee una config completa. TODO lo que no sea la curva tiene default, que es lo que hace
+     * retrocompatible el formato: los presets guardados cuando un preset era solo `bandCount` +
+     * `gains` se leen sin refuerzos, sin preamp y con el limitador apagado — o sea exactamente el
+     * sonido que tenían.
+     */
+    private fun decodeEqSettings(o: JSONObject): EqSettings {
+        val g = o.getJSONArray("gains")
+        return EqSettings(
+            bandCount = if (o.getInt("bandCount") == 10) 10 else 5,
+            gains = FloatArray(g.length()) { g.getDouble(it).toFloat() },
+            bassBoostDb = o.optDouble("bass", 0.0).toFloat(),
+            trebleBoostDb = o.optDouble("treble", 0.0).toFloat(),
+            bassFreqHz = if (o.has("bassHz")) o.getDouble("bassHz") else null,
+            trebleFreqHz = if (o.has("trebleHz")) o.getDouble("trebleHz") else null,
+            preampDb = o.optDouble("preamp", 0.0).toFloat(),
+            limiterEnabled = o.optBoolean("lim", false),
+            limiterThresholdDb = if (o.has("limDb")) o.getDouble("limDb").toFloat() else null,
+            limiterThresholdAuto = o.optBoolean("limAuto", true)
+        )
+    }
+
+    // --- Presets ocultos ---
+
+    /**
+     * Ids de los presets que NO se listan en el selector del EQ. Un solo conjunto para los dos
+     * tipos, porque el selector los pinta en una sola lista y el criterio de "no me lo muestres" es
+     * el mismo; conviven sin ambigüedad porque los de fábrica van NAMESPACED (`EqPresets.hideKey`,
+     * prefijo `builtin:`) y los propios son UUIDs.
+     *
+     * Ocultar NO es borrar, y esa es toda la razón de que exista: el preset sigue guardado y se
+     * restaura desde Ajustes. Por eso los de fábrica necesitaron una clave propia — su `labelRes`
+     * es un id de recurso que AAPT/R8 pueden reasignar entre builds, así que persistirlo habría
+     * hecho que una actualización ocultara un preset distinto sin fallar en compilación.
+     */
+    fun loadHiddenEqPresets(): Set<String> = cache[KEY_EQ_HIDDEN_PRESETS] ?: emptySet()
+
+    fun saveHiddenEqPresets(ids: Set<String>) = update { it[KEY_EQ_HIDDEN_PRESETS] = ids }
+
+    val hiddenEqPresetsFlow: Flow<Set<String>> =
+        prefFlow { it[KEY_EQ_HIDDEN_PRESETS] ?: emptySet() }
+
+    // --- Perfil del EQ por ruta de salida ---
+    // Un snapshot de [EqSettings] por CATEGORÍA de ruta (cable, Bluetooth, USB, altavoz…),
+    // serializados juntos en una sola clave: `{"WIRED": {...}, "BLUETOOTH": {...}}`.
+    //
+    // Se guarda el estado REAL del EQ, coincida o no con un preset guardado: al volver a una ruta
+    // vuelve exactamente lo que dejaste, retoques sueltos incluidos. Guardar solo "qué preset
+    // estaba aplicado" perdería sin avisar el trabajo de quien mueve un slider y no lo guarda,
+    // que es el uso normal del ecualizador.
+
+    fun loadEqRouteProfile(routeKey: String): EqSettings? {
+        val raw = cache[KEY_EQ_ROUTE_PROFILES] ?: return null
+        return try {
+            val root = JSONObject(raw)
+            if (!root.has(routeKey)) null else decodeEqSettings(root.getJSONObject(routeKey))
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Read-modify-write atómico: conserva los perfiles de las demás rutas. */
+    fun saveEqRouteProfile(routeKey: String, settings: EqSettings) = update { mutable ->
+        val root = try {
+            JSONObject(mutable[KEY_EQ_ROUTE_PROFILES] ?: "{}")
+        } catch (_: Exception) {
+            JSONObject()
+        }
+        root.put(routeKey, encodeEqSettings(settings))
+        mutable[KEY_EQ_ROUTE_PROFILES] = root.toString()
+    }
+
+    /**
+     * Última ruta cuyo perfil está reflejado en el estado global del EQ. Persistida porque el
+     * proceso muere: sin ella, arrancar con unos cascos distintos a los de la última sesión haría
+     * que el estado actual (que es el de la ruta ANTERIOR) se guardara bajo la ruta nueva,
+     * pisándole su perfil.
+     */
+    fun loadLastEqRoute(): String? = cache[KEY_EQ_LAST_ROUTE]
+
+    fun saveLastEqRoute(routeKey: String) = update { it[KEY_EQ_LAST_ROUTE] = routeKey }
+
+    fun clearLastEqRoute() = update { it.remove(KEY_EQ_LAST_ROUTE) }
+
+    /**
+     * Perfiles por ruta on/off (Ajustes). Apagado, el EQ se comporta como siempre: una sola
+     * configuración global que no cambia al conectar nada.
+     */
+    fun saveEqRouteProfilesEnabled(enabled: Boolean) =
+        update { it[KEY_EQ_ROUTE_PROFILES_ENABLED] = enabled }
+
+    fun loadEqRouteProfilesEnabled(): Boolean = cache[KEY_EQ_ROUTE_PROFILES_ENABLED] ?: false
+
+    /** Lo observa el manager (singleton, sin composición): encenderlo debe surtir efecto en vivo. */
+    val eqRouteProfilesEnabledFlow: Flow<Boolean> =
+        prefFlow { it[KEY_EQ_ROUTE_PROFILES_ENABLED] ?: false }
 
     /**
      * Preferir el ecualizador DEL SISTEMA (MIUI/panel estándar): el botón EQ del NowPlaying
@@ -823,6 +935,23 @@ class MusicPreferences(context: Context) {
         prefFlow { it[KEY_NOW_PLAYING_WAVY] ?: false }
 
     /**
+     * Forma del MiniPlayer: `true` = rectángulo redondeado, `false` = píldora (el diseño actual y
+     * el default, para no cambiarle la app a nadie que ya la tenga instalada).
+     *
+     * Reactivo y no `load` a secas: lo escribe Ajustes (`LibraryViewModel`) y lo lee la capa del
+     * reproductor (`PlaybackViewModel`), que son instancias distintas — el mismo motivo que el
+     * fondo sólido y la barra ondulada.
+     */
+    fun saveMiniPlayerRoundedRect(enabled: Boolean) = update {
+        it[KEY_MINI_PLAYER_ROUNDED_RECT] = enabled
+    }
+
+    fun loadMiniPlayerRoundedRect(): Boolean = cache[KEY_MINI_PLAYER_ROUNDED_RECT] ?: false
+
+    val miniPlayerRoundedRectFlow: Flow<Boolean> =
+        prefFlow { it[KEY_MINI_PLAYER_ROUNDED_RECT] ?: false }
+
+    /**
      * Chip de formato del NowPlaying EXTENDIDO (`FLAC · 16 bit · 44.1 kHz`) en vez de solo el
      * contenedor. Se escribe desde dos sitios —el switch de Ajustes → Apariencia y el tap sobre
      * el propio chip—, de ahí que sea reactivo: son instancias de ViewModel distintas.
@@ -936,6 +1065,11 @@ class MusicPreferences(context: Context) {
         private val KEY_EQ_LIMITER_THRESHOLD = floatPreferencesKey("eq_limiter_threshold")
         private val KEY_EQ_LIMITER_THRESHOLD_AUTO = booleanPreferencesKey("eq_limiter_threshold_auto")
         private val KEY_EQ_CUSTOM_PRESETS = stringPreferencesKey("eq_custom_presets")
+        private val KEY_EQ_HIDDEN_PRESETS = stringSetPreferencesKey("eq_hidden_presets")
+        private val KEY_EQ_ROUTE_PROFILES = stringPreferencesKey("eq_route_profiles")
+        private val KEY_EQ_LAST_ROUTE = stringPreferencesKey("eq_last_route")
+        private val KEY_EQ_ROUTE_PROFILES_ENABLED =
+            booleanPreferencesKey("eq_route_profiles_enabled")
         private val KEY_EQ_CONFLICT_WARNING_SUPPRESSED = booleanPreferencesKey("eq_conflict_warning_suppressed")
         private val KEY_USE_SYSTEM_EQ = booleanPreferencesKey("use_system_eq")
         private val KEY_ARTIST_PHOTOS_METERED = booleanPreferencesKey("artist_photos_metered")
@@ -959,6 +1093,7 @@ class MusicPreferences(context: Context) {
          */
         private const val INITIAL_READ_ATTEMPTS = 3
         private val KEY_NOW_PLAYING_WAVY = booleanPreferencesKey("now_playing_wavy_progress")
+        private val KEY_MINI_PLAYER_ROUNDED_RECT = booleanPreferencesKey("mini_player_rounded_rect")
         private val KEY_PLAYER_GESTURES = booleanPreferencesKey("player_gestures")
 
         /** Los gestos vienen ENCENDIDOS: es el comportamiento que espera cualquiera. */

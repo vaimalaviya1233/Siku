@@ -50,6 +50,8 @@ class PlaybackViewModelTest {
     @RelaxedMockK lateinit var localLyricsReader: com.qhana.siku.data.lyrics.LocalLyricsReader
     @RelaxedMockK lateinit var lyricsWriter: com.qhana.siku.data.lyrics.LyricsWriter
     @RelaxedMockK lateinit var authManager: com.qhana.siku.data.auth.AuthManager
+    @RelaxedMockK lateinit var audioRouteMonitor: com.qhana.siku.player.audio.AudioRouteMonitor
+    @RelaxedMockK lateinit var eqProfileManager: com.qhana.siku.player.audio.EqProfileManager
 
     private lateinit var viewModel: PlaybackViewModel
     private val testDispatcher = UnconfinedTestDispatcher()
@@ -74,6 +76,10 @@ class PlaybackViewModelTest {
         every { musicPreferences.loadKeepScreenOn() } returns false
         every { requestCoordinator.workerStatus } returns MutableStateFlow(WorkerStatus.Idle)
         every { syncManager.activeDownloads } returns MutableStateFlow(emptyList())
+        // El ViewModel colecta los dos en su init: relaxed devolvería null y el colector reventaría.
+        every { audioRouteMonitor.route } returns
+            MutableStateFlow(com.qhana.siku.player.audio.AudioRoute.WIRED)
+        every { eqProfileManager.applied } returns MutableSharedFlow()
 
         viewModel = PlaybackViewModel(
             musicController = musicController,
@@ -94,6 +100,8 @@ class PlaybackViewModelTest {
             snackbarManager = snackbarManager,
             syncManager = syncManager,
             equalizerProcessor = com.qhana.siku.player.audio.EqualizerAudioProcessor(),
+            audioRouteMonitor = audioRouteMonitor,
+            eqProfileManager = eqProfileManager,
             context = context,
             workManager = workManager
         )

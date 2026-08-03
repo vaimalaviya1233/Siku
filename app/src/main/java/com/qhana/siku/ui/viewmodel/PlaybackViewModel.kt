@@ -18,6 +18,7 @@ import com.qhana.siku.data.coordinator.WorkerStatus
 import com.qhana.siku.data.lyrics.FailureReason
 import com.qhana.siku.data.lyrics.LyricsSaveResult
 import com.qhana.siku.data.model.EqCustomPreset
+import com.qhana.siku.data.model.EqSettings
 import com.qhana.siku.data.model.LyricsSaveMode
 import com.qhana.siku.data.model.PlaybackContext
 import com.qhana.siku.data.model.PlaybackErrorInfo
@@ -87,6 +88,7 @@ class PlaybackViewModel @Inject constructor(
     private val syncManager: com.qhana.siku.data.coordinator.SyncManager,
     private val equalizerProcessor: com.qhana.siku.player.audio.EqualizerAudioProcessor,
     private val audioRouteMonitor: com.qhana.siku.player.audio.AudioRouteMonitor,
+    private val eqProfileManager: com.qhana.siku.player.audio.EqProfileManager,
     @ApplicationContext private val context: Context,
     private val workManager: WorkManager
 ) : ViewModel() {
@@ -170,6 +172,11 @@ class PlaybackViewModel @Inject constructor(
     val nowPlayingWavyProgress: StateFlow<Boolean> =
         musicPreferences.nowPlayingWavyProgressFlow
             .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadNowPlayingWavyProgress())
+
+    /** Forma del MiniPlayer: rectángulo redondeado vs píldora (mismo motivo de observación). */
+    val miniPlayerRoundedRect: StateFlow<Boolean> =
+        musicPreferences.miniPlayerRoundedRectFlow
+            .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadMiniPlayerRoundedRect())
 
     /**
      * Ficha técnica en el chip de formato. Se observa del DataStore (no un MutableStateFlow local)
@@ -355,7 +362,7 @@ class PlaybackViewModel @Inject constructor(
     val eqLimiterThresholdDb: StateFlow<Float> = combine(
         eqLimiterThresholdAuto, _eqLimiterThreshold
     ) { auto, manual ->
-        if (auto) EqualizerAudioProcessor.LIMITER_THRESHOLD_MAX_DB else manual
+        EqualizerAudioProcessor.effectiveLimiterThresholdDb(auto, manual)
     }.stateIn(
         viewModelScope,
         SharingStarted.Eagerly,
@@ -571,31 +578,98 @@ class PlaybackViewModel @Inject constructor(
         musicPreferences.customEqPresetsFlow
             .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadCustomEqPresets())
 
-    /** Captura la curva actual (con su modo de bandas) como preset con [name]. */
+    /**
+     * Captura la configuración COMPLETA actual como preset con [name]: curva, refuerzos, preamp y
+     * limitador. Guardar solo las bandas dejaba fuera media pantalla de controles — quien ajusta un
+     * preamp para que su curva no recorte espera que eso forme parte del sonido que guarda.
+     */
     fun saveCurrentAsEqPreset(name: String) {
         val trimmed = name.trim().ifBlank { return }
         val preset = EqCustomPreset(
             id = java.util.UUID.randomUUID().toString(),
             name = trimmed,
-            bandCount = _eqBandCount.value,
-            gains = _eqGains.value.toFloatArray()
+            settings = currentEqSettings()
         )
         musicPreferences.saveCustomEqPresets(customEqPresets.value + preset)
     }
 
+    /** Estado en vivo del EQ como [EqSettings] (lo que se captura en un preset). */
+    private fun currentEqSettings() = EqSettings(
+        bandCount = _eqBandCount.value,
+        gains = _eqGains.value.toFloatArray(),
+        bassBoostDb = _eqBassBoost.value,
+        trebleBoostDb = _eqTrebleBoost.value,
+        bassFreqHz = _eqBassFreq.value,
+        trebleFreqHz = _eqTrebleFreq.value,
+        preampDb = _eqPreamp.value,
+        limiterEnabled = eqLimiterEnabled.value,
+        limiterThresholdDb = _eqLimiterThreshold.value,
+        limiterThresholdAuto = eqLimiterThresholdAuto.value
+    )
+
     fun deleteEqPreset(id: String) {
         musicPreferences.saveCustomEqPresets(customEqPresets.value.filterNot { it.id == id })
+        // Un preset borrado no puede quedar "oculto": si el usuario crea otro, el id es un UUID
+        // nuevo, así que la entrada vieja solo sería basura acumulándose en disco.
+        val hidden = musicPreferences.loadHiddenEqPresets()
+        if (id in hidden) musicPreferences.saveHiddenEqPresets(hidden - id)
     }
 
-    /** Aplica un preset propio remuestreado al modo de bandas actual. */
+    /**
+     * Aplica un preset propio: la curva se remuestrea al modo de bandas ACTUAL (no se cambia el
+     * modo — el preset es una curva, no un estado de pantalla) y el resto de parámetros van tal
+     * cual se guardaron.
+     */
     fun applyCustomEqPreset(preset: EqCustomPreset) {
+        val s = preset.settings
         val gains = EqPresets.resample(
-            preset.gains,
-            EqualizerAudioProcessor.bandsFor(preset.bandCount),
+            s.gains,
+            EqualizerAudioProcessor.bandsFor(s.bandCount),
             _eqBandCount.value
         )
         setEqGains(gains)
+        setEqBassBoost(s.bassBoostDb)
+        setEqTrebleBoost(s.trebleBoostDb)
+        setEqBassFreq(s.bassFreqHz ?: EqualizerAudioProcessor.BASS_BOOST_FREQ_DEFAULT_HZ)
+        setEqTrebleFreq(s.trebleFreqHz ?: EqualizerAudioProcessor.TREBLE_BOOST_FREQ_DEFAULT_HZ)
+        commitEqBoosts()
+        setEqPreamp(s.preampDb)
+        commitEqPreamp()
+        setEqLimiterEnabled(s.limiterEnabled)
+        setEqLimiterThreshold(
+            s.limiterThresholdDb ?: EqualizerAudioProcessor.LIMITER_THRESHOLD_MAX_DB
+        )
+        commitEqLimiterThreshold()
+        setEqLimiterThresholdAuto(s.limiterThresholdAuto)
     }
+
+    // --- Presets ocultos ---
+    // Ocultar NO es borrar: el preset sigue existiendo y se restaura desde Ajustes. Con 20 perfiles
+    // guardados, un selector que los lista todos deja de ser usable, y borrar los de fábrica que no
+    // usás no era una opción — no se pueden recrear.
+
+    val hiddenEqPresets: StateFlow<Set<String>> = musicPreferences.hiddenEqPresetsFlow
+        .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadHiddenEqPresets())
+
+    fun setEqPresetHidden(id: String, hidden: Boolean) {
+        val current = musicPreferences.loadHiddenEqPresets()
+        musicPreferences.saveHiddenEqPresets(if (hidden) current + id else current - id)
+    }
+
+    fun restoreAllEqPresets() = musicPreferences.saveHiddenEqPresets(emptySet())
+
+    // --- Perfiles por ruta de salida ---
+
+    /** Ver [com.qhana.siku.player.audio.EqProfileManager]. */
+    val eqRouteProfilesEnabled: StateFlow<Boolean> = musicPreferences.eqRouteProfilesEnabledFlow
+        .stateIn(
+            viewModelScope,
+            SharingStarted.Eagerly,
+            musicPreferences.loadEqRouteProfilesEnabled()
+        )
+
+    fun setEqRouteProfilesEnabled(enabled: Boolean) =
+        musicPreferences.saveEqRouteProfilesEnabled(enabled)
 
     init {
         // ÚNICO escritor del umbral del processor, venga del slider o del automático (0 dBFS
@@ -603,6 +677,28 @@ class PlaybackViewModel @Inject constructor(
         // pisen (convención 14 aplicada a un parámetro del processor).
         viewModelScope.launch {
             eqLimiterThresholdDb.collect { equalizerProcessor.setLimiterThreshold(it) }
+        }
+        // Resincronización cuando un cambio de RUTA DE SALIDA aplica otro perfil. Los flows de
+        // bandas/refuerzos/preamp son MutableStateFlow locales por necesidad —se escriben en cada
+        // frame de arrastre de un slider, y persistir por frame sería absurdo—, así que no se
+        // enteran de un escritor externo. Sin esto, conectar los cascos con la hoja del EQ abierta
+        // dejaba la curva anterior dibujada sobre un sonido que ya era otro.
+        //
+        // Aquí NO se toca el processor: el manager ya lo hizo. Esto solo pone la UI al día.
+        viewModelScope.launch {
+            eqProfileManager.applied.collect { s ->
+                _eqBandCount.value = s.bandCount
+                _eqGains.value = s.gains.toList()
+                _eqBassBoost.value = s.bassBoostDb
+                _eqTrebleBoost.value = s.trebleBoostDb
+                _eqBassFreq.value = s.bassFreqHz
+                    ?: EqualizerAudioProcessor.BASS_BOOST_FREQ_DEFAULT_HZ
+                _eqTrebleFreq.value = s.trebleFreqHz
+                    ?: EqualizerAudioProcessor.TREBLE_BOOST_FREQ_DEFAULT_HZ
+                _eqPreamp.value = s.preampDb
+                _eqLimiterThreshold.value = s.limiterThresholdDb
+                    ?: EqualizerAudioProcessor.LIMITER_THRESHOLD_MAX_DB
+            }
         }
         musicController.initialize()
         observeCurrentSong()

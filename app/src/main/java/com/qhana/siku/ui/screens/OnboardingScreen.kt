@@ -12,6 +12,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -68,6 +69,7 @@ import com.qhana.siku.ui.theme.EXPRESSIVE_FAST_EFFECTS_MS
 import com.qhana.siku.ui.theme.ExpressiveDefaultEffectsEasing
 import com.qhana.siku.ui.theme.ExpressiveFastEffectsEasing
 import com.qhana.siku.ui.theme.SCREEN_ENTER_MS
+import com.qhana.siku.ui.theme.SCREEN_SLIDE_DIVISOR
 import com.qhana.siku.ui.theme.ScreenEnterEasing
 import androidx.compose.animation.core.tween
 
@@ -202,13 +204,24 @@ fun OnboardingScreen(
 
     AnimatedContent(
         targetState = step,
-        // Avanzar entra desde la derecha y retroceder desde la izquierda: el gesto refleja la
-        // dirección del flujo.
+        // Patrón *forward and backward* del spec, el mismo que el `NavHost`: el botón de "siguiente"
+        // navega entre niveles consecutivos del flujo, así que se comporta igual que abrir un
+        // detalle. Avanzar entra desde la derecha y retroceder desde la izquierda.
+        //
+        // Las DOS caras se desplazan el mismo tercio ([SCREEN_SLIDE_DIVISOR], compartido con la
+        // navegación) y en el mismo sentido: es lo que lo convierte en un shared axis en vez de una
+        // capa tapando a otra. Hasta el 30 jul la saliente solo se DESVANECÍA, sin moverse, así que
+        // el eje lo recorría una sola de las dos.
         transitionSpec = {
             val forward = targetState > initialState
-            (slideInHorizontally(animationSpec = forwardSpatial) { w -> if (forward) w / 3 else -w / 3 } +
-                fadeIn(animationSpec = enterFade))
-                .togetherWith(fadeOut(animationSpec = exitFade))
+            val enterFrom: (Int) -> Int = { w ->
+                if (forward) w / SCREEN_SLIDE_DIVISOR else -w / SCREEN_SLIDE_DIVISOR
+            }
+            val exitTo: (Int) -> Int = { w ->
+                if (forward) -w / SCREEN_SLIDE_DIVISOR else w / SCREEN_SLIDE_DIVISOR
+            }
+            (slideInHorizontally(forwardSpatial, enterFrom) + fadeIn(enterFade))
+                .togetherWith(slideOutHorizontally(forwardSpatial, exitTo) + fadeOut(exitFade))
         },
         label = "onboarding_step"
     ) { currentStep ->

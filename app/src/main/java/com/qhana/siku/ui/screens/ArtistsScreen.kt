@@ -302,7 +302,7 @@ private fun ArtistRow(
                 "play_circle",
                 size = 30.sp,
                 color = colorScheme.primary,
-                fill = false
+                fill = true
             )
         }
     }

@@ -19,6 +19,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import com.qhana.siku.R
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import com.materialkolor.contrast.Contrast
+import com.materialkolor.hct.Hct
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -34,7 +37,7 @@ import com.qhana.siku.ui.theme.appFastEffectsSpec
 
 // ============== MINI PLAYER ==============
 
-// PROGRESO: el mini lo muestra como RELLENO del contenedor (ver [MiniPlayerProgressFillAlpha]).
+// PROGRESO: el mini lo muestra como RELLENO del contenedor (ver [MiniPlayerProgressToneDelta]).
 //
 // Historia, porque es el tercer intento y los dos anteriores se descartaron: hubo una barra de 3dp
 // en el borde inferior que la forma de píldora obligaba a recortar 34dp por lado (a esa altura el
@@ -48,22 +51,84 @@ import com.qhana.siku.ui.theme.appFastEffectsSpec
 // que era la otra objeción de fondo: el mini mide 72dp y no había dónde meter un indicador.
 
 /**
- * Opacidad del relleno de progreso sobre `surfaceContainer`.
+ * Paso de la escala tonal (HCT) propia de la barra: 8 puntos, el mismo salto que M3 usa entre
+ * peldaños de superficie y que `SongListItem.ROW_ACTION_TONE_DELTA` para la píldora de acciones.
+ * Visible como otra superficie sin partir la barra en dos.
  *
- * Es BAJA a propósito y el color es `primary` (no `primaryContainer` ni `secondaryContainer`), por
- * dos restricciones que se cruzan encima de esta misma superficie:
- *  - el botón "siguiente" ES `secondaryContainer`, así que un relleno de esa familia lo borraría
- *    justo en la mitad de la canción en la que el relleno lo alcanza;
- *  - el texto va en blanco (oscuro) o casi negro (claro) según el tema, y no se re-calcula por
- *    encima del relleno: subir la opacidad mueve la luminancia del fondo bajo el título y se come
- *    el contraste de una de las dos mitades.
- *
- * Con `primary` a esta opacidad el tinte hereda el acento del álbum —así que el relleno cambia con
- * la portada, como el resto del reproductor— sin acercarse a ninguno de los dos límites. Subirlo es
- * lo primero que se nota si el efecto queda flojo; el techo lo marca el contraste del título, no el
- * gusto.
+ * Es un DESPLAZAMIENTO DE TONO y no una opacidad de un rol sobre otro, que es lo que había hasta el
+ * 31 jul. Con `TonalSpot` un 16 % de `primary` sobre `primaryContainer` daba justo estos ~8 puntos y
+ * parecía bien elegido, pero la distancia entre dos roles la decide el ESTILO DE PALETA: en "fiel a
+ * la carátula" (`Fidelity`) ambos se pegan al color fuente, así que la mezcla movía el tono un par de
+ * puntos y el progreso desaparecía. Es lo que ya documenta `rememberRowActionColors` —un rol fijo no
+ * garantiza separación—, colado por la puerta del alpha.
  */
-private const val MiniPlayerProgressFillAlpha = 0.16f
+private const val MiniPlayerToneStep = 8.0
+
+/**
+ * Contraste mínimo del contenido de la barra sobre su fondo: 4.5:1, el AA de WCAG para texto pequeño
+ * (`bodySmall` lo es, y el glifo de "siguiente" son trazos de ~2dp, que a efectos de legibilidad se
+ * comportan igual).
+ *
+ * De él sale el color del subtítulo, no al revés: se toma el tono más CERCANO al fondo que todavía
+ * cumple el umbral, así que queda lo más apagado que la accesibilidad permite y la jerarquía contra
+ * el título sale medida en vez de inventada. Sustituye a un alpha a ojo, que es lo que este archivo
+ * ya evitaba con `onSurface`/`onSurfaceVariant` — pares que aquí no valen: son el contenido de la
+ * escala NEUTRA y el contenedor de la barra ya no está en ella.
+ */
+private const val MiniPlayerMinContrast = 4.5
+
+/**
+ * Las tres superficies apiladas de la barra, derivadas del contenedor con UNA sola dirección.
+ *
+ * Que la dirección se decida una vez es la parte load-bearing. Cada capa se derivaba antes por su
+ * cuenta con la regla "aléjate del extremo de la escala", y con un contenedor de tono MEDIO —que es
+ * justo lo que da "fiel a la carátula"— la segunda derivación invertía el sentido y aterrizaba en el
+ * tono del contenedor: fondo 46 → relleno 54 → botón 46, o sea un botón "siguiente" invisible sobre
+ * la mitad no reproducida (visto en device, 31 jul). Apilando en el mismo sentido, el botón queda a
+ * un paso del relleno y a dos del fondo, y como el sentido siempre apunta al CENTRO de la escala, dos
+ * pasos nunca se salen de rango.
+ */
+@Immutable
+private data class MiniPlayerSurfaces(
+    /** Relleno de progreso, y fondo efectivo de la mitad ya reproducida. */
+    val progress: Color,
+    /** Contenedor del botón "siguiente": tiene que verse sobre el fondo Y sobre el relleno. */
+    val buttonContainer: Color,
+    /** Glifo del botón, con el contraste garantizado contra [buttonContainer]. */
+    val buttonContent: Color
+)
+
+@Composable
+private fun rememberMiniPlayerSurfaces(container: Color, onContainer: Color): MiniPlayerSurfaces =
+    remember(container, onContainer) {
+        val base = Hct.fromInt(container.toArgb())
+        // Hacia el centro de la escala: es el único sentido con sitio para DOS pasos.
+        val direction = if (base.tone > MINI_MID_TONE) -1.0 else 1.0
+        fun step(times: Double) = Color(
+            Hct.from(
+                base.hue,
+                base.chroma,
+                (base.tone + direction * MiniPlayerToneStep * times).coerceIn(0.0, 100.0)
+            ).toInt()
+        )
+        val button = step(2.0)
+        MiniPlayerSurfaces(
+            progress = step(1.0),
+            buttonContainer = button,
+            // `ensureContrast` mide en Float; el umbral es el mismo AA que usa el subtítulo.
+            buttonContent = ensureContrast(onContainer, button, MiniPlayerMinContrast.toFloat())
+        )
+    }
+
+/**
+ * Elevación del MiniPlayer: **nivel 4** del spec de M3.
+ *
+ * Sube del nivel 3 (6dp, el del FAB) porque la barra es la superficie MÁS ALTA de la pantalla —
+ * flota por encima de la lista y de la navbar— y en tema claro la sombra es la mitad del trabajo de
+ * despegarla. En oscuro no aporta casi nada (M3 separa por tono, no por sombra): ahí trabaja el
+ * contenedor, ver el porqué de `surfaceContainerHighest` en el cuerpo del componente.
+ */
+private val MiniPlayerElevation = 8.dp
 
 /**
  * Default de los flows de progreso: sin posición ni duración el relleno no se dibuja.
@@ -78,16 +143,15 @@ private const val MiniPlayerProgressFillAlpha = 0.16f
 private val ZeroProgressFlow: StateFlow<Long> = MutableStateFlow(0L)
 
 /**
- * Título y subtítulo del mini. Son los ROLES del esquema, `onSurface`/`onSurfaceVariant`, que es el
- * par de contenido del fondo que hay debajo (`surfaceContainer`).
+ * Título y subtítulo del mini sobre el contenedor teñido de la barra.
+ *
+ * El título es el rol que le corresponde al contenedor (`onPrimaryContainer`) y el subtítulo se
+ * DERIVA de él (ver [rememberMiniPlayerColors]). No son `onSurface`/`onSurfaceVariant`: ese par es
+ * el contenido de la escala neutra, y la barra ya no vive en ella.
  *
  * Sustituyen a un blanco puro y un `#1A1A1A` FIJOS con alpha 0.7/0.6, elegidos por
- * `isSystemInDarkTheme()`. Eran lo único de esta pantalla que no se teñía con la carátula: el fondo
- * del mini sí es un rol del tema, así que el texto quedaba genérico sobre una superficie de color —
- * el mismo defecto que acabábamos de corregir en los iconos, con otra ropa. Y de paso arregla dos
- * cosas más: la jerarquía título/subtítulo la hace el ROL y no un alpha inventado (M3 garantiza el
- * contraste de los dos, que un 0.6 de alpha sobre un fondo tonal no garantiza), y desaparece la
- * consulta al tema del SISTEMA, que no tiene por qué coincidir con el tema de la app (ver
+ * `isSystemInDarkTheme()`. Eran lo único de esta pantalla que no se teñía con la carátula, y
+ * consultaban el tema del SISTEMA, que no tiene por qué coincidir con el de la app (ver
  * `AmbientPlayerActivity`, que lo fuerza oscuro).
  */
 @Immutable
@@ -95,6 +159,41 @@ private data class MiniPlayerColors(
     val titleColor: Color,
     val contentColor: Color
 )
+
+/**
+ * Par título/subtítulo sobre [container], con la jerarquía MEDIDA en vez de un alpha a ojo.
+ *
+ * El título usa el rol tal cual. El subtítulo conserva su matiz y su croma y se le fija el tono más
+ * cercano al fondo que aún cumple [MiniPlayerMinContrast] — el mismo mecanismo con el que la
+ * app resuelve el resto de sus pares derivados (`rememberRowActionColors`, el glifo activo del
+ * toolbar). La dirección la decide el TONO del fondo, no una rama por tema, así que funciona igual
+ * en claro y en oscuro y con cualquier paleta.
+ */
+@Composable
+private fun rememberMiniPlayerColors(container: Color, onContainer: Color): MiniPlayerColors =
+    remember(container, onContainer) {
+        val containerTone = Hct.fromInt(container.toArgb()).tone
+        val onHct = Hct.fromInt(onContainer.toArgb())
+        // `*Unsafe` devuelve un tono fuera de [0,100] cuando el ratio es inalcanzable por ese lado
+        // (un fondo de tono medio no admite 4.5:1 hacia ninguno de los dos extremos). Acotar lo
+        // resuelve solo: el tono se va a 0 o 100, o sea al máximo contraste que ese lado puede dar,
+        // que es exactamente lo que se quería pedir.
+        val subtitleTone = (
+            if (containerTone > MINI_MID_TONE) Contrast.darkerUnsafe(containerTone, MiniPlayerMinContrast)
+            else Contrast.lighterUnsafe(containerTone, MiniPlayerMinContrast)
+        ).coerceIn(0.0, 100.0)
+        MiniPlayerColors(
+            titleColor = onContainer,
+            contentColor = Color(Hct.from(onHct.hue, onHct.chroma, subtitleTone).toInt())
+        )
+    }
+
+/**
+ * Centro de la escala de tono HCT: decide hacia qué lado se alejan del fondo las cosas que se
+ * derivan de él (el relleno de progreso, el subtítulo). Es lo que hace que la barra funcione igual
+ * en tema claro y oscuro sin una sola rama por tema.
+ */
+private const val MINI_MID_TONE = 50.0
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
@@ -106,6 +205,8 @@ fun MiniPlayer(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     isBuffering: Boolean = false,
+    /** Ajustes → Apariencia: rectángulo redondeado en vez de la píldora del diseño original. */
+    roundedRect: Boolean = false,
     /**
      * Posición y duración como FLOWS, igual que el NowPlaying: la posición cambia cada segundo y
      * pasarla como valor recompondría el mini —y con él la carátula y el marquee— en cada tick.
@@ -119,20 +220,49 @@ fun MiniPlayer(
 ) {
     if (song == null) return
 
-    // Colores del texto (título/artista): roles del esquema, ver [MiniPlayerColors].
-    val textColors = MiniPlayerColors(
-        titleColor = MaterialTheme.colorScheme.onSurface,
-        contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+    // Background SÓLIDO teñido con el álbum: `primaryContainer`, o sea que la barra se separa del
+    // contenido por CROMA y no por tono.
+    //
+    // Por qué no un peldaño de la escala neutra, que es lo natural para una superficie flotante: en
+    // esta app la escala está AGOTADA. El mini flota siempre sobre bloques de lista
+    // `surfaceContainerHigh` (tono 92 en claro), y ninguno de los cinco peldaños deja hueco —
+    // `surfaceContainer` queda a 2 puntos por arriba, `surfaceContainerHighest` a 2 por abajo, y
+    // `surface` a 6 pero convirtiendo la barra flotante en la superficie MÁS BAJA de la pantalla.
+    // Se probaron los dos primeros (31 jul, con captura en device) y el mini se perdía igual.
+    //
+    // Antes de eso hubo un `BorderStroke` de 1dp con `outlineVariant`, también descartado: un filo
+    // de tono 80 cruzando por delante de filas y carátulas de colores no se lee como el borde de una
+    // superficie sino como una línea ajena. Los dos intentos fallaron por lo mismo — pedirle a la
+    // escala neutra una distancia que ya no tiene. `primaryContainer` no compite con nada de la
+    // pantalla porque ninguna lista usa ese rol de fondo, y de paso da al reproductor identidad
+    // propia, que es lo que hace cualquier mini-player conocido.
+    val backgroundColor = MaterialTheme.colorScheme.primaryContainer
+
+    // Las otras dos superficies de la barra —relleno de progreso y botón "siguiente"— salen del
+    // contenedor apilando pasos de tono en UNA sola dirección, ver [MiniPlayerSurfaces]. Opacas y
+    // por tono, no por tintes translúcidos: así la separación no depende de qué haya debajo ni de la
+    // distancia que la paleta activa deje entre dos roles.
+    val onContainerColor = MaterialTheme.colorScheme.onPrimaryContainer
+    val surfaces = rememberMiniPlayerSurfaces(backgroundColor, onContainerColor)
+
+    // El texto se mide contra el RELLENO y no contra el contenedor limpio: el relleno acaba pasando
+    // por debajo del título, y como siempre va hacia el centro de la escala es el peor caso para
+    // cualquier contenido. Mismo criterio que `songRowBackground` con el tinte del ítem activo.
+    val textColors = rememberMiniPlayerColors(
+        container = surfaces.progress,
+        onContainer = onContainerColor
     )
 
-    // Background SÓLIDO surfaceContainer (el mismo del ajuste "fondo sólido" del NowPlaying):
-    // superficie plana estable, sin tinte de acento. Es un rol del scheme sembrado con el álbum,
-    // así que el tema lo tiñe al cambiar de canción sin animarlo a mano.
-    val backgroundColor = MaterialTheme.colorScheme.surfaceContainer
-
-    // Píldora completa: el MiniPlayer FLOTA sobre la navbar del home (ya no va edge-to-edge
-    // con fondo plano hasta abajo).
-    val shape = RoundedCornerShape(50)
+    // Forma ELEGIBLE en Ajustes → Apariencia. Por defecto píldora completa: el MiniPlayer FLOTA
+    // sobre la navbar del home (ya no va edge-to-edge con fondo plano hasta abajo).
+    //
+    // La alternativa es el token `extraLarge` de M3 (28dp), no un radio inventado. A 72dp de alto
+    // la píldora tiene 36dp de radio, así que 28 se lee CLARAMENTE como rectángulo redondeado sin
+    // caer en la esquina dura que desentonaría con el resto de contenedores de la app.
+    //
+    // No se anima entre las dos: es una preferencia que se cambia en otra pantalla, así que nadie
+    // ve la transición — animarla solo añadiría un spec que mantener.
+    val shape = if (roundedRect) MaterialTheme.shapes.extraLarge else RoundedCornerShape(50)
 
     // contentDescription se resuelve aquí (contexto @Composable) porque el lambda de semantics {} no lo es.
     val miniPlayerDesc = stringResource(R.string.mini_player_desc, song.title)
@@ -152,13 +282,13 @@ fun MiniPlayer(
         // Contenedor TRANSPARENTE: el tinte animado del álbum se dibuja en el Box interno para que
         // NO reciba el overlay tonal del Card (que teñiría el color según la elevación).
         colors = CardDefaults.cardColors(containerColor = Color.Transparent),
-        // Elevación por la API del Card. 6dp = nivel 3 del spec (el mismo del FAB): un bar flotante
-        // debe LEERSE flotante; el default de Card (1dp) quedaría casi plano y desharía la sombra.
-        elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
+        // Elevación por la API del Card (ver [MiniPlayerElevation]): un bar flotante debe LEERSE
+        // flotante, y el default de Card (1dp) quedaría casi plano.
+        elevation = CardDefaults.cardElevation(defaultElevation = MiniPlayerElevation)
     ) {
         val position = currentPositionFlow.collectAsStateWithLifecycle()
         val duration = durationFlow.collectAsStateWithLifecycle()
-        val fillColor = MaterialTheme.colorScheme.primary.copy(alpha = MiniPlayerProgressFillAlpha)
+        val fillColor = surfaces.progress
 
         Box(
             modifier = Modifier
@@ -174,7 +304,7 @@ fun MiniPlayer(
                     val fraction = (position.value.toFloat() / total).coerceIn(0f, 1f)
                     if (fraction <= 0f) return@drawBehind
                     // Borde derecho RECTO: es lo que se lee como "hasta aquí vamos". Las esquinas
-                    // de la píldora las recorta el Card, que ya clipea a su shape.
+                    // las recorta el Card, que ya clipea a su shape — sea píldora o rectángulo.
                     drawRect(color = fillColor, size = Size(size.width * fraction, size.height))
                 }
         ) {
@@ -185,6 +315,7 @@ fun MiniPlayer(
                 onPlayPause,
                 onNextClick,
                 textColors,
+                surfaces,
                 isBuffering,
                 sharedTransitionScope,
                 animatedVisibilityScope
@@ -201,6 +332,8 @@ private fun MiniPlayerContent(
     onPlayPause: () -> Unit,
     onNextClick: () -> Unit,
     textColors: MiniPlayerColors,
+    /** Superficies derivadas de la barra: de aquí salen los colores del botón "siguiente". */
+    surfaces: MiniPlayerSurfaces,
     isBuffering: Boolean,
     sharedTransitionScope: SharedTransitionScope? = null,
     animatedVisibilityScope: AnimatedVisibilityScope? = null
@@ -213,16 +346,20 @@ private fun MiniPlayerContent(
     // el parpadeo del flapping de isPlaying sin retrasar el estado con un reloj.
     val showAsPlaying = isPlaying || isBuffering
 
-    // Transporte alineado con el NowPlaying: laterales tonales (secondaryContainer) y play
-    // resaltado (primary). Son roles del scheme sembrado con el álbum, así que ya vienen
-    // teñidos por la canción sin animar colores a mano.
+    // Transporte: play resaltado (`primary`, el mismo rol que en el NowPlaying — sobre un fondo
+    // `primaryContainer` es su propio matiz varios tonos más oscuro, así que sigue siendo el control
+    // que salta a la vista) y "siguiente" tonal.
     //
-    // Los pares `on*` van CRUDOS, igual que en el NowPlaying: el mini y el reproductor comparten el
-    // shared element de la carátula, así que se ven uno al lado del otro durante la transición y
-    // cualquier diferencia de tratamiento se leería como un salto de color. Ver el porqué de no
-    // reencuadrarlos junto a `ensureContrast` en PlayerWidgets.kt.
-    val sideContainer = MaterialTheme.colorScheme.secondaryContainer
-    val sideContent = MaterialTheme.colorScheme.onSecondaryContainer
+    // El siguiente ya NO es `secondaryContainer` crudo: ese rol cae en la MISMA banda tonal que el
+    // fondo del mini desde que la barra pasó a `primaryContainer`, o sea el botón desaparecía. Y
+    // tampoco es un derivado con hue/croma de OTRO rol — probado el 31 jul con
+    // `rememberRowActionColors`: el croma lo pone el rol, y con el de `secondary` salía un botón gris
+    // sobre una barra teñida, la única pieza sin color de toda la barra.
+    //
+    // Es el propio contenedor a DOS pasos de tono (ver [MiniPlayerSurfaces]): mismo matiz, mismo
+    // croma, y separado tanto del fondo como del relleno de progreso que le pasa por debajo.
+    val sideContainer = surfaces.buttonContainer
+    val sideContent = surfaces.buttonContent
     val playContainer = MaterialTheme.colorScheme.primary
     val playContent = MaterialTheme.colorScheme.onPrimary
 
@@ -349,7 +486,7 @@ private fun MiniPlayerContent(
         Spacer(modifier = Modifier.width(ComponentConfig.FloatingBarItemGap))
 
         // Botón Siguiente — mismo círculo, en tonal: el par se lee como transporte y el color
-        // (primary vs secondaryContainer) es el que marca cuál es la acción principal.
+        // (`primary` contra un tonal derivado del fondo) marca cuál es la acción principal.
         MiniRoundButton(
             onClick = onNextClick,
             containerColor = sideContainer,
@@ -364,9 +501,15 @@ private fun MiniPlayerContent(
 
 /**
  * Botón REDONDO del MiniPlayer (círculo de [ComponentConfig.MiniPlayerButtonSize]):
- * `FilledIconButton` REAL de M3 Expressive con shape circular FIJA (sin morph). El color del
- * contenedor puede venir animado (play/pause con el acento del álbum). Trae ripple/state-layer,
- * touch target y semántica del componente.
+ * `FilledIconButton` REAL de M3 Expressive. El color del contenedor puede venir animado (play/pause
+ * con el acento del álbum). Trae ripple/state-layer, touch target y semántica del componente.
+ *
+ * **La forma PRESIONADA es la del componente, no la de reposo.** Hasta el 30 jul se pasaba
+ * `pressedShape = CircleShape`, o sea la MISMA que en reposo: con las dos formas iguales no hay nada
+ * que interpolar y el shape-morph de M3 Expressive quedaba anulado en silencio — el botón se
+ * limitaba al ripple. Se notaba al lado del transporte del NowPlaying, cuyos botones sí se deforman
+ * bajo el dedo, que es exactamente lo que reportó el usuario. Dejando que el default decida, el
+ * círculo se achata al presionar y vuelve al soltar, igual que el resto de la app.
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -380,7 +523,7 @@ private fun MiniRoundButton(
 ) {
     FilledIconButton(
         onClick = onClick,
-        shapes = IconButtonDefaults.shapes(shape = CircleShape, pressedShape = CircleShape),
+        shapes = IconButtonDefaults.shapes(shape = CircleShape),
         colors = IconButtonDefaults.filledIconButtonColors(
             containerColor = containerColor,
             contentColor = contentColor

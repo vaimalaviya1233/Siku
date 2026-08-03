@@ -365,6 +365,7 @@ class LibraryViewModel @Inject constructor(
                     replayGainPreamp = musicPreferences.loadReplayGainPreamp(),
                     nowPlayingSolidBackground = musicPreferences.loadNowPlayingSolidBackground(),
                     nowPlayingWavyProgress = musicPreferences.loadNowPlayingWavyProgress(),
+                    miniPlayerRoundedRect = musicPreferences.loadMiniPlayerRoundedRect(),
                     playerGestures = musicPreferences.loadPlayerGestures(),
                     themePaletteStyle = musicPreferences.loadThemePaletteStyle(),
                     useSystemEq = musicPreferences.loadUseSystemEq()
@@ -665,6 +666,55 @@ class LibraryViewModel @Inject constructor(
         if (enabled) musicPreferences.saveEqEnabled(false)
     }
 
+    // --- Ecualizador: perfiles por ruta y presets ocultos ---
+    //
+    // Estos accesos existen TAMBIÉN en PlaybackViewModel, y no son dos verdades: los dos son
+    // fachadas de lectura/escritura sobre MusicPreferences, que sigue siendo el único dueño del
+    // estado (mismo patrón que `useSystemEq`). La hoja del EQ vive en el reproductor y la pantalla
+    // de gestión en Ajustes, y cada una llega con el ViewModel de su lado.
+
+    /** Ver [com.qhana.siku.player.audio.EqProfileManager]. */
+    val eqRouteProfilesEnabled: StateFlow<Boolean> = musicPreferences.eqRouteProfilesEnabledFlow
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            musicPreferences.loadEqRouteProfilesEnabled()
+        )
+
+    fun setEqRouteProfilesEnabled(enabled: Boolean) =
+        musicPreferences.saveEqRouteProfilesEnabled(enabled)
+
+    val hiddenEqPresets: StateFlow<Set<String>> = musicPreferences.hiddenEqPresetsFlow
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            musicPreferences.loadHiddenEqPresets()
+        )
+
+    val customEqPresets: StateFlow<List<com.qhana.siku.data.model.EqCustomPreset>> =
+        musicPreferences.customEqPresetsFlow
+            .stateIn(
+                viewModelScope,
+                SharingStarted.WhileSubscribed(5_000),
+                musicPreferences.loadCustomEqPresets()
+            )
+
+    fun setEqPresetHidden(id: String, hidden: Boolean) {
+        val current = musicPreferences.loadHiddenEqPresets()
+        musicPreferences.saveHiddenEqPresets(if (hidden) current + id else current - id)
+    }
+
+    fun restoreAllEqPresets() = musicPreferences.saveHiddenEqPresets(emptySet())
+
+    /** Borrar SÍ es definitivo (a diferencia de ocultar): solo para presets propios. */
+    fun deleteEqPreset(id: String) {
+        musicPreferences.saveCustomEqPresets(
+            musicPreferences.loadCustomEqPresets().filterNot { it.id == id }
+        )
+        val hidden = musicPreferences.loadHiddenEqPresets()
+        if (id in hidden) musicPreferences.saveHiddenEqPresets(hidden - id)
+    }
+
     // --- Pestañas de la biblioteca (orden + visibilidad) ---
     val libraryTabs: StateFlow<List<com.qhana.siku.data.model.LibraryTabState>> =
         musicPreferences.libraryTabsConfigFlow
@@ -722,6 +772,12 @@ class LibraryViewModel @Inject constructor(
     fun setNowPlayingWavyProgress(enabled: Boolean) {
         _uiState.update { it.copy(playbackSettings = it.playbackSettings.copy(nowPlayingWavyProgress = enabled)) }
         musicPreferences.saveNowPlayingWavyProgress(enabled)
+    }
+
+    /** Forma del MiniPlayer: rectángulo redondeado (true) o píldora (false, el diseño actual). */
+    fun setMiniPlayerRoundedRect(enabled: Boolean) {
+        _uiState.update { it.copy(playbackSettings = it.playbackSettings.copy(miniPlayerRoundedRect = enabled)) }
+        musicPreferences.saveMiniPlayerRoundedRect(enabled)
     }
 
     /**

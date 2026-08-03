@@ -17,6 +17,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -352,6 +353,27 @@ fun MusicPlayerScreen(
     // que tapa el host de abajo) puedan montar su propio SnackbarHost sobre el mismo estado.
     CompositionLocalProvider(LocalSnackbarHostState provides snackbarHostState) {
         SharedTransitionLayout {
+            // Las filas de lista están a ocho pantallas de aquí y necesitan DOS cosas para poder
+            // ser el origen de la carátula del reproductor: el scope compartido y saber si les
+            // toca serlo AHORA. Van por CompositionLocal en vez de por parámetro porque atravesar
+            // todas las firmas intermedias por un detalle de la carátula no compensa.
+            //
+            // Hay fila origen solo mientras el reproductor está ABIERTO y se abrió DESDE una fila;
+            // en cualquier otro caso es null y las filas se comportan como siempre (si no,
+            // ocultarían su carátula sin que nadie la recoja).
+            //
+            // Va en un `State` (ver [LocalArtOriginSongId]) y no como valor suelto: así las filas
+            // lo leen dentro de un `derivedStateOf` y solo recompone la que cambia de veredicto, en
+            // vez de las diez visibles a la vez justo en el frame que arranca la transición.
+            val artOriginSongId = rememberUpdatedState(
+                if (appState.playerExpanded && appState.playerArtOrigin == PlayerArtOrigin.ROW) {
+                    currentSong?.id
+                } else null
+            )
+            ProvideAppSharedTransitionScope(
+                scope = this@SharedTransitionLayout,
+                artOriginSongId = artOriginSongId
+            ) {
             // Box: permite montar el PlayerOverlay como capa flotante SOBRE el NavHost.
             Box(modifier = Modifier.fillMaxSize()) {
                 AppNavHost(
@@ -390,6 +412,7 @@ fun MusicPlayerScreen(
                         )
                 )
             }
+            } // ProvideAppSharedTransitionScope
         }
     }
 }

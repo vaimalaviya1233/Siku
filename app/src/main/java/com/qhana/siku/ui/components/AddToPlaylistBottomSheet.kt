@@ -21,7 +21,10 @@ fun AddToPlaylistBottomSheet(
     onCreateNewPlaylist: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    AppModalSheet(onDismissRequest = onDismiss) {
+        // Elegir una lista (o "crear nueva") cierra la hoja desde dentro: hay que animar la salida
+        // antes de que el caller la desmonte. Ver [LocalSheetCloser].
+        val close = LocalSheetCloser.current
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -38,7 +41,7 @@ fun AddToPlaylistBottomSheet(
                 leadingContent = {
                     MaterialSymbol("add")
                 },
-                modifier = Modifier.clickable(onClick = onCreateNewPlaylist)
+                modifier = Modifier.clickable { close(onCreateNewPlaylist) }
             )
 
             HorizontalDivider()
@@ -55,7 +58,7 @@ fun AddToPlaylistBottomSheet(
                         },
                         modifier = Modifier
                             .animateItem()
-                            .clickable { onPlaylistSelected(playlist.id) }
+                            .clickable { close { onPlaylistSelected(playlist.id) } }
                     )
                 }
             }

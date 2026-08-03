@@ -56,6 +56,24 @@ private val SQUIRCLE_CORNER_RADIUS = 48.dp
 const val ALBUM_ART_SHARED_KEY = "album_art"
 
 /**
+ * Key del shared element de la carátula de UNA FILA de lista. Lleva el id de la canción, al revés
+ * que [ALBUM_ART_SHARED_KEY], y las dos razones son la misma moneda:
+ *
+ * Una punta de shared element solo sirve de ORIGEN si ya estaba compuesta y MEDIDA antes del gesto
+ * — declararla en el mismo frame en que se la necesita la deja sin bounds y no hay match (bug del
+ * 30 jul: la portada aparecía quieta en su destino mientras el reproductor subía). O sea que las
+ * filas tienen que declararla SIEMPRE, no solo cuando les toca ser origen.
+ *
+ * Y si todas las filas visibles declararan la MISMA key habría diez destinos peleándose por ella,
+ * que es el otro error que Compose no perdona. Con el id dentro, cada fila es su propio shared
+ * element solitario —inofensivo mientras nadie lo empareja— y el reproductor elige a cuál se
+ * engancha pidiendo la key de la canción que va a sonar.
+ *
+ * La píldora puede permitirse la key constante porque es ÚNICA: no compite con nadie.
+ */
+fun rowArtSharedKey(songId: String): String = "album_art_row_$songId"
+
+/**
  * Forma de la carátula, común al MiniPlayer y al NowPlaying: morph continuo entre un SQUIRCLE
  * (reproduciendo, progress 0) y un círculo (en pausa, progress 1; el mini lo usa fijo).
  *

@@ -44,6 +44,7 @@ import com.qhana.siku.ui.components.DetailPlayButtons
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.SongItem
 import com.qhana.siku.ui.components.SongOverflowButton
+import com.qhana.siku.ui.components.songRowBackground
 import com.qhana.siku.ui.components.TonalChip
 import com.qhana.siku.ui.components.overSharedElementsModifier
 import com.qhana.siku.ui.components.rememberListItemShape
@@ -186,6 +187,8 @@ fun GenreDetailScreen(
                         items = songs,
                         key = { _, song -> song.id }
                     ) { index, song ->
+                        val isPlaying = currentSong?.id == song.id && playbackState == PlaybackState.PLAYING
+                        val rowBackground = songRowBackground(colorScheme.surfaceContainer, isPlaying)
                         Surface(
                             color = colorScheme.surfaceContainer,
                             shape = rememberListItemShape(index, songs.size),
@@ -196,13 +199,14 @@ fun GenreDetailScreen(
                         ) {
                             SongItem(
                                 song = song,
-                                isPlaying = currentSong?.id == song.id && playbackState == PlaybackState.PLAYING,
+                                isPlaying = isPlaying,
                                 modifier = Modifier.clickable { onPlayAll(songs, index) },
                                 trailingContent = {
                                     SongOverflowButton(
                                         isFavorite = song.id in favorites,
                                         onToggleFavorite = { onToggleFavorite(song.id) },
-                                        onAddToPlaylist = { songIdForPlaylist = song.id }
+                                        onAddToPlaylist = { songIdForPlaylist = song.id },
+                                        rowBackground = rowBackground
                                     )
                                 }
                             )

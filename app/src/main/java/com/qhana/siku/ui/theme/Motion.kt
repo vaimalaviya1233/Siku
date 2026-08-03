@@ -203,13 +203,20 @@ val ExpressiveSlowEffectsEasing = CubicBezierEasing(0.34f, 0.88f, 0.34f, 1.00f)
 const val EXPRESSIVE_SLOW_EFFECTS_MS = 300
 
 /**
- * [ExpressiveDefaultSpatialEasing] **recortado a 1**, para lo que se desplaza a PANTALLA COMPLETA.
+ * [ExpressiveDefaultSpatialEasing] **recortado a 1**, para lo que se desplaza a PANTALLA COMPLETA:
+ * el slide del reproductor y las cuatro transiciones del `NavHost`.
  *
  * El sobrepaso de los tokens spatial es ~1,4 % del recorrido. En un botón eso son 2 px y ES el
  * efecto; en un slide de pantalla completa son ~34 px de la pantalla saliéndose por su borde, o sea
  * una franja de lo que hay detrás asomando por el lado contrario (y en el reproductor, justo la
  * píldora que el slide acaba de tapar). Recortar conserva el TIMING —que es lo que hace que se
- * sienta rápido— y elimina el único efecto secundario que no cabe en una pantalla completa.
+ * sienta rápido— y elimina ese efecto secundario.
+ *
+ * **Aquí el recorte vale y en [ScreenEnterEasing] no valía**, y la diferencia está en un solo
+ * número: el *default* spatial termina en (0.22, **1.00**), así que se pasa y baja hasta el destino
+ * SIN cruzarlo — saturar a 1 solo le quita el exceso. El *fast* termina en (0.21, **0.90**): cruza
+ * por debajo y vuelve, y eso un `coerceAtMost` no lo puede tocar. Por eso las hojas usan una curva
+ * de effects y esto no. Antes de recortar un easing, mirar el segundo punto de control.
  *
  * No aplica a los shared elements: esos viajan en el overlay, no dejan hueco detrás, y su pequeño
  * rebote al aterrizar es justamente lo que los hace ver vivos.
@@ -239,18 +246,36 @@ const val SCREEN_TRANSFORM_MS = EXPRESSIVE_DEFAULT_SPATIAL_MS
 const val SCREEN_ENTER_MS = EXPRESSIVE_FAST_SPATIAL_MS
 
 /**
- * Lo que solo SALE. Más corto que la entrada a propósito: lo que se va no se hace esperar.
+ * Lo que solo SALE. Sigue siendo más corto que la entrada (350) a propósito: lo que se va no se hace
+ * esperar.
  *
- * 200 ms y no los 150 del token *fast*: aquí lo que se mueve es una hoja a pantalla COMPLETA, y a
- * 150 ms un recorrido de esa longitud se lee como un corte en vez de como algo que se va. Las
- * opacidades sí usan el token fast.
+ * **300 ms y no 200**, que es donde estuvo y se leía como un corte: lo que recorre esta duración es
+ * el ALTO COMPLETO de la pantalla, y a esa distancia el ojo necesita ver salir la hoja o parece que
+ * simplemente ha dejado de estar. La escala del token es la misma para un chip de 32 dp que para una
+ * hoja de 2400 px, así que en los recorridos largos hay que subir un peldaño. Las OPACIDADES se
+ * quedan en el token *fast* (150): una hoja debe volverse transparente antes de terminar de bajar, o
+ * se la ve arrastrarse.
  */
-const val SCREEN_EXIT_MS = EXPRESSIVE_DEFAULT_EFFECTS_MS
+const val SCREEN_EXIT_MS = EXPRESSIVE_SLOW_EFFECTS_MS
 
-/** Easing de lo que entra: spatial recortado, por el mismo motivo que [ScreenSlideEasing]. */
-val ScreenEnterEasing = Easing { fraction ->
-    ExpressiveFastSpatialEasing.transform(fraction).coerceAtMost(1f)
-}
+/**
+ * Easing de lo que ENTRA y sale del todo: hojas modales a pantalla completa, cambio de paso del
+ * onboarding, cambio de pestaña del gestor.
+ *
+ * **Es una curva de EFFECTS, no de spatial, y no es un descuido.** Los tres tokens spatial
+ * SOBREPASAN, y el *fast spatial* además **retrocede**: sus puntos de control son
+ * (0.42, 1.67, 0.21, **0.90**) — el segundo está por DEBAJO de 1, así que la curva se pasa del
+ * destino y vuelve desde el otro lado. Eso en un botón es el efecto buscado; en una hoja que ocupa
+ * la pantalla es un rebote, y el usuario lo reportó en las tres del reproductor (letras, cola,
+ * ecualizador). Los tokens de effects son la única familia del spec con todos los puntos de control
+ * ≤ 1: llegan al destino y se quedan.
+ *
+ * **Recortar el spatial NO servía**, y estuvo así medio día: un `coerceAtMost(1f)` satura el
+ * sobrepaso —congelando la animación mientras la curva va por encima de 1— pero no puede hacer nada
+ * con el retroceso posterior, que es justo la parte que se ve como rebote. Salía peor que el
+ * original: mismo rebote, con una parada artificial delante.
+ */
+val ScreenEnterEasing = ExpressiveDefaultEffectsEasing
 
 /** Easing de lo que sale. Effects: no sobrepasa, así que no hace falta recortarlo. */
 val ScreenExitEasing = ExpressiveFastEffectsEasing
@@ -301,48 +326,72 @@ val AppBoundsTransform = BoundsTransform { _, _ ->
 
 // ============================== APARICIÓN VERTICAL ==============================
 
+/*
+ * Los cuatro helpers de abajo animan un TAMAÑO, y por eso todos usan specs de **effects** —los
+ * críticos, sin rebote— aunque lo que cambie sea geometría. No es una excepción caprichosa a la
+ * regla spatial/effects: es la consecuencia de CÓMO se anima un tamaño en Compose.
+ *
+ * `expandVertically`/`expandHorizontally` no mueven un `graphicsLayer`, cambian la MEDIDA del nodo:
+ * cada frame es una pasada de layout que reacomoda a todos los vecinos. Un spring subamortiguado
+ * oscila alrededor del tamaño final antes de asentarse, así que **el rebote multiplica el número de
+ * pasadas caras** — y encima se ve como un temblor en el contenido de al lado, que no es lo mismo
+ * que el "pop" simpático de un botón. Con el banner de sincronización el coste se nota entero: su
+ * alto alimenta el `contentPadding` de la lista, así que cada frame de rebote reacomodaba la
+ * biblioteca. Medido como pérdida de fps en las pestañas de la biblioteca (30 jul), mismo defecto.
+ *
+ * **Regla: un spec que rebota sobre algo que EMPUJA LAYOUT sale caro; sobre un `graphicsLayer`
+ * (posición, escala, alpha) es gratis.**
+ */
+
 /**
  * Aparición de un bloque que EMPUJA al contenido de abajo (banner de sincronización, ficha técnica
  * del formato, secciones que se despliegan): crece en alto y entra por alpha.
  *
- * El alto va por spatial y el alpha por effects, que es la razón de que esto sea una función y no
- * dos parámetros sueltos en cada llamada: son dos specs distintos y es fácil equivocarse.
+ * Existe como función y no como dos parámetros sueltos en cada llamada porque son dos specs con
+ * duraciones distintas y es fácil equivocarse: el alto entra con el token *default* y el alpha
+ * también, para que el bloque no se lea antes de haber terminado de abrirse.
  */
 fun appExpandFadeIn(): EnterTransition =
-    expandVertically(AppMotionScheme.defaultSpatialSpec()) +
+    expandVertically(AppMotionScheme.defaultEffectsSpec()) +
         fadeIn(AppMotionScheme.defaultEffectsSpec())
 
 /** Contrario de [appExpandFadeIn]. Sale con los tokens *fast*: lo que se va no se hace esperar. */
 fun appShrinkFadeOut(): ExitTransition =
-    shrinkVertically(AppMotionScheme.fastSpatialSpec()) +
+    shrinkVertically(AppMotionScheme.fastEffectsSpec()) +
         fadeOut(AppMotionScheme.fastEffectsSpec())
 
 /**
  * Versión horizontal de [appExpandFadeIn], para lo que aparece DENTRO de una fila y desplaza a sus
- * vecinos (el anillo de descarga del toolbar, la etiqueta de una pestaña activa).
+ * vecinos (el anillo de descarga del toolbar).
  *
  * Existe como par aparte y no como parámetro porque elegir mal el eje no es un detalle: un bloque
  * que crece en el eje equivocado empuja el layout hacia donde no debe y se lee como un salto.
  */
 fun appExpandWidthFadeIn(): EnterTransition =
-    expandHorizontally(AppMotionScheme.defaultSpatialSpec()) +
+    expandHorizontally(AppMotionScheme.defaultEffectsSpec()) +
         fadeIn(AppMotionScheme.defaultEffectsSpec())
 
 /** Contrario de [appExpandWidthFadeIn]. */
 fun appShrinkWidthFadeOut(): ExitTransition =
-    shrinkHorizontally(AppMotionScheme.fastSpatialSpec()) +
+    shrinkHorizontally(AppMotionScheme.fastEffectsSpec()) +
         fadeOut(AppMotionScheme.fastEffectsSpec())
 
 // ============================== HOJAS A PANTALLA COMPLETA ==============================
 
 /**
  * Entrada de las hojas propias que ocupan la pantalla y suben desde abajo (ecualizador, letras,
- * cola). No son `ModalBottomSheet` —esos ya traen su propio motion de M3— sino capas montadas con
+ * cola). No son `ModalBottomSheet` —esos van por `AppModalSheet`, que les da el mismo patrón sin
+ * rebote a través del tema— sino capas montadas con
  * `AnimatedVisibility` por encima del player, y por eso necesitan su spec explícito.
  *
- * Transición, no componente: easing + duración. Y del par *enter/exit* y no del *transform*, porque
- * la hoja no deja nada suyo en pantalla al cerrarse — a diferencia del reproductor, cuya carátula
- * persiste en la píldora.
+ * Es el patrón **enter and exit** del spec: introducir un COMPONENTE sobre la UI principal (modal o
+ * no), que es distinto de navegar entre pantallas — y por eso el spec advierte de no usarlo para
+ * jerarquía, donde deslizar el alto completo sobra y deja la relación entre pantallas sin explicar.
+ * Aquí sí aplica: una hoja no es un nivel del grafo, es una superficie que se pone encima.
+ *
+ * Transición, no componente: easing + duración, **nunca springs**. Y del par *enter/exit* y no del
+ * *transform*, porque la hoja no deja nada suyo en pantalla al cerrarse — a diferencia del
+ * reproductor, cuya carátula persiste en la píldora.
  *
  * El movimiento va por un token **spatial** y la opacidad por uno de **effects**, cada uno con SU
  * duración: es lo que hace el spec y no un descuido. La hoja se hace opaca en 200 ms mientras
@@ -361,18 +410,24 @@ fun appSheetExit(): ExitTransition =
 // ============================== NAVEGACIÓN ==============================
 
 /**
- * Divisor del recorrido de la pantalla que se QUEDA DETRÁS: se desplaza `ancho / 3`.
+ * Divisor del recorrido horizontal de AMBAS pantallas: cada una se desplaza `ancho / 3`.
  *
- * El shared axis de Material pide que las dos pantallas se muevan en el mismo eje, no que la de
- * atrás se quede congelada mientras la nueva la tapa. Pero moverla el ancho completo (como la que
- * entra) las convierte en dos hojas independientes y se pierde la jerarquía. Un tercio es el
- * paralaje habitual: se lee que la de atrás cede, sin competir con la que llega.
+ * **Ninguna recorre el ancho completo, y eso es del spec, no una economía**: en el patrón *forward
+ * and backward* de Material, Android acompaña el deslizamiento con un FADE precisamente para no
+ * tener que mover las pantallas de un borde al otro. El desplazamiento comunica la dirección
+ * (adelante / atrás) y la opacidad hace el trabajo de sustituir una por otra; con el ancho completo
+ * el gesto se lee como dos hojas independientes cruzándose y se pierde la jerarquía.
+ *
+ * Que las dos recorran LO MISMO es lo que las convierte en un *shared axis* de verdad: se mueven
+ * como una sola pieza en un eje, en vez de una tapando a la otra. (Hasta el 30 jul la entrante venía
+ * desde `it` —el ancho entero— y solo la saliente cedía un tercio, o sea un paralaje; el kdoc de
+ * entonces daba por bueno el ancho completo para la que llega, que es justo lo que el spec descarta.)
  *
  * Esto es además lo que hace que el **predictive back** tenga algo que enseñar: durante el gesto el
  * sistema recorre la transición hacia atrás, y sin `exitTransition`/`popEnterTransition` declaradas
  * el recorrido de la pantalla saliente es cero — el gesto arrastra una capa sobre un fondo quieto.
  */
-private const val NAV_PARALLAX_DIVISOR = 3
+const val SCREEN_SLIDE_DIVISOR = 3
 
 /*
  * Patrón **shared axis X** del spec: las dos pantallas se desplazan en el mismo eje mientras cruzan
@@ -385,30 +440,32 @@ private const val NAV_PARALLAX_DIVISOR = 3
  * que el usuario lee contenido y no un fantasma deslizándose media pantalla.
  */
 
-/** Entrada al abrir un detalle: llega desde el borde derecho. */
+/** Adelante: la que llega entra desde la derecha, un tercio (ver [SCREEN_SLIDE_DIVISOR]). */
 val appNavForwardEnter: AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition = {
-    slideInHorizontally(tween(SCREEN_TRANSFORM_MS, easing = ScreenSlideEasing)) { it } +
-        fadeIn(tween(EXPRESSIVE_DEFAULT_EFFECTS_MS, easing = ExpressiveDefaultEffectsEasing))
-}
-
-/** La pantalla anterior cede hacia la izquierda (ver [NAV_PARALLAX_DIVISOR]). */
-val appNavForwardExit: AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition = {
-    slideOutHorizontally(tween(SCREEN_TRANSFORM_MS, easing = ScreenSlideEasing)) {
-        -it / NAV_PARALLAX_DIVISOR
-    } + fadeOut(tween(EXPRESSIVE_FAST_EFFECTS_MS, easing = ExpressiveFastEffectsEasing))
-}
-
-/** Vuelta atrás: la pantalla anterior regresa desde su posición cedida. */
-val appNavBackEnter: AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition = {
     slideInHorizontally(tween(SCREEN_TRANSFORM_MS, easing = ScreenSlideEasing)) {
-        -it / NAV_PARALLAX_DIVISOR
+        it / SCREEN_SLIDE_DIVISOR
     } + fadeIn(tween(EXPRESSIVE_DEFAULT_EFFECTS_MS, easing = ExpressiveDefaultEffectsEasing))
 }
 
-/** Vuelta atrás: el detalle se va por donde vino. */
+/** Adelante: la anterior cede hacia la izquierda el MISMO tercio. */
+val appNavForwardExit: AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition = {
+    slideOutHorizontally(tween(SCREEN_TRANSFORM_MS, easing = ScreenSlideEasing)) {
+        -it / SCREEN_SLIDE_DIVISOR
+    } + fadeOut(tween(EXPRESSIVE_FAST_EFFECTS_MS, easing = ExpressiveFastEffectsEasing))
+}
+
+/** Atrás: la anterior regresa desde la izquierda. */
+val appNavBackEnter: AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition = {
+    slideInHorizontally(tween(SCREEN_TRANSFORM_MS, easing = ScreenSlideEasing)) {
+        -it / SCREEN_SLIDE_DIVISOR
+    } + fadeIn(tween(EXPRESSIVE_DEFAULT_EFFECTS_MS, easing = ExpressiveDefaultEffectsEasing))
+}
+
+/** Atrás: el detalle se va hacia la derecha, por donde vino. */
 val appNavBackExit: AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition = {
-    slideOutHorizontally(tween(SCREEN_TRANSFORM_MS, easing = ScreenSlideEasing)) { it } +
-        fadeOut(tween(EXPRESSIVE_FAST_EFFECTS_MS, easing = ExpressiveFastEffectsEasing))
+    slideOutHorizontally(tween(SCREEN_TRANSFORM_MS, easing = ScreenSlideEasing)) {
+        it / SCREEN_SLIDE_DIVISOR
+    } + fadeOut(tween(EXPRESSIVE_FAST_EFFECTS_MS, easing = ExpressiveFastEffectsEasing))
 }
 
 // NO hay par vertical para el NavHost. El único destino con sensación de hoja es el reproductor, y

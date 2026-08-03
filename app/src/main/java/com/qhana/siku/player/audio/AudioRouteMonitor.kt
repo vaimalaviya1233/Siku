@@ -51,9 +51,14 @@ enum class AudioRoute(internal val priority: Int, val absoluteVolumeLikely: Bool
  * Observa la ruta de salida de audio activa.
  *
  * El flow es FRÍO hasta que alguien lo colecta ([SharingStarted.WhileSubscribed]): el callback del
- * sistema solo queda registrado mientras la hoja del ecualizador está abierta, que es el único
- * sitio que lo consume. Un singleton escuchando cambios de dispositivo para siempre sería gasto
- * puro durante la reproducción normal.
+ * sistema solo queda registrado mientras hay quien pregunte. Un singleton escuchando cambios de
+ * dispositivo para siempre sería gasto puro con la app cerrada.
+ *
+ * Lo consumen dos sitios, con vidas distintas a propósito: la hoja del ecualizador (mientras está
+ * abierta, para el aviso de headroom) y [EqProfileManager] (mientras vive el servicio de
+ * reproducción, para restaurar el perfil de la ruta que se conecta). El segundo mantiene el
+ * callback registrado durante toda la reproducción, que es barato — el sistema avisa, aquí no se
+ * consulta nada en bucle.
  */
 @Singleton
 class AudioRouteMonitor @Inject constructor(

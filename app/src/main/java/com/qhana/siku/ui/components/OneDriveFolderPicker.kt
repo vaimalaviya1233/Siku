@@ -20,7 +20,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -110,7 +109,9 @@ fun OneDriveFolderPickerSheet(
     val state by viewModel.state.collectAsStateWithLifecycle()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+    AppModalSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        // Confirmar la carpeta cierra la hoja desde dentro. Ver [LocalSheetCloser].
+        val close = LocalSheetCloser.current
         Column(modifier = Modifier.padding(horizontal = 24.dp).padding(bottom = 24.dp)) {
             Text(
                 text = stringResource(R.string.onedrive_folder_title),
@@ -226,7 +227,7 @@ fun OneDriveFolderPickerSheet(
                     }
                     Spacer(Modifier.width(8.dp))
                 }
-                Button(onClick = { onConfirm(state.path) }, enabled = !state.isLoading) {
+                Button(onClick = { close { onConfirm(state.path) } }, enabled = !state.isLoading) {
                     Text(
                         text = if (state.canGoUp) {
                             stringResource(R.string.onedrive_folder_use, state.crumbs.last().name)

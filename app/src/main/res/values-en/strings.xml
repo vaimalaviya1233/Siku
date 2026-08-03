@@ -384,6 +384,8 @@
     <string name="eq_open_system">System equalizer</string>
     <string name="eq_bands_label">%1$d bands</string>
     <string name="eq_boost_section">Boost</string>
+    <string name="eq_boost_saturating_mild">Mild clipping: may distort at high volume</string>
+    <string name="eq_boost_saturating_strong">Strong clipping: lower this boost or turn on the limiter</string>
     <string name="eq_boost_bass">Bass</string>
     <string name="eq_boost_treble">Treble</string>
     <string name="eq_boost_center">Frequency</string>
@@ -432,6 +434,16 @@
     <string name="settings_eq_header">Equalizer</string>
     <string name="settings_use_system_eq">Use the system equalizer</string>
     <string name="settings_use_system_eq_desc">The player\'s equalizer button opens the system panel (MIUI/manufacturer) instead of the built-in equalizer. Turning this on switches off the built-in one.</string>
+
+    <!-- Per-output EQ profiles and preset management -->
+    <string name="settings_eq_route_profiles">Remember equalizer per device</string>
+    <string name="settings_eq_route_profiles_desc">Keeps separate settings for wired headphones, Bluetooth, USB and the phone speaker. Connecting one restores whatever you last had on it.</string>
+    <string name="settings_eq_presets">Equalizer presets</string>
+    <string name="settings_eq_presets_desc">Choose which ones show up in the picker</string>
+    <string name="settings_eq_presets_hint">Hidden presets are not listed in the equalizer, but they are not deleted: you can bring them back whenever you want.</string>
+    <string name="settings_eq_presets_own">Your presets</string>
+    <string name="settings_eq_presets_restore_all">Show the %1$d hidden ones</string>
+    <string name="eq_presets_all_hidden">All presets are hidden (Settings → Playback)</string>
 
     <!-- ==================== Library tabs ==================== -->
     <string name="settings_tabs_header">Tabs</string>
@@ -594,6 +606,8 @@
     <string name="settings_solid_bg_desc">Uses a solid theme color instead of the album art gradient.</string>
     <string name="settings_wavy_progress">Wavy progress bar</string>
     <string name="settings_wavy_progress_desc">Uses the animated Material 3 wave in the player. The mini player keeps the thin bar.</string>
+    <string name="settings_mini_player_rect">Rectangular mini player</string>
+    <string name="settings_mini_player_rect_desc">Uses rounded corners on the floating bar instead of the pill shape.</string>
     <string name="settings_player_gestures">Player gestures</string>
     <string name="settings_player_gestures_desc">Swipe the album art to change songs, down to close the player and up on the mini player to open it. Double tap the sides of the album art to skip %1$d seconds.</string>
 

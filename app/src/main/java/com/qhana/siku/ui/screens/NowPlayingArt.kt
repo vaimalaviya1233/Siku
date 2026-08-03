@@ -235,6 +235,7 @@ internal fun AlbumArtSection(
     song: Song,
     variantColor: Color,
     sharedTransitionScope: SharedTransitionScope?,
+    artSharedKey: Any?,
     animatedVisibilityScope: AnimatedVisibilityScope?,
     isPlaying: Boolean,
     onTap: () -> Unit,
@@ -291,12 +292,14 @@ internal fun AlbumArtSection(
         contentAlignment = Alignment.Center
     ) {
         val sharedElementModifier =
-            if (sharedTransitionScope != null && animatedVisibilityScope != null) {
+            if (sharedTransitionScope != null && animatedVisibilityScope != null && artSharedKey != null) {
                 with(sharedTransitionScope) {
                     Modifier.sharedElement(
-                        // Key CONSTANTE (ver [ALBUM_ART_SHARED_KEY]): la otra punta es la píldora,
-                        // que durante el tap todavía puede venir de otra canción.
-                        sharedContentState = rememberSharedContentState(key = ALBUM_ART_SHARED_KEY),
+                        // La key la ELIGE quien abrió el reproductor: la constante de la píldora o
+                        // la de la fila tocada (ver `artSharedKey` en PlayerOverlay). Es lo que
+                        // decide de cuál de las dos puntas —ambas declaradas de antes— sale la
+                        // portada.
+                        sharedContentState = rememberSharedContentState(key = artSharedKey),
                         animatedVisibilityScope = animatedVisibilityScope,
                         // Acoplado al slide del player; ver el otro extremo del par en MiniPlayer.
                         boundsTransform = AppBoundsTransform

@@ -58,6 +58,9 @@ class MusicPlaybackService : MediaSessionService() {
     @Inject
     lateinit var equalizerProcessor: com.qhana.siku.player.audio.EqualizerAudioProcessor
 
+    @Inject
+    lateinit var eqProfileManager: com.qhana.siku.player.audio.EqProfileManager
+
     /** Scope del watchdog de offload; se cancela en onDestroy. */
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
@@ -380,14 +383,15 @@ class MusicPlaybackService : MediaSessionService() {
         // 29 jul). Hasta esa fecha aquí se replicaba la fórmula "−pico de la curva" del ViewModel:
         // eso convertía el limitador en un compresor que engancha en cuanto hay curva, que es el
         // mismo "corregir por detrás" que el proyecto ya rechazó dos veces en el preamp — y de paso
-        // era una fórmula DUPLICADA en dos sitios que tenían que coincidir a mano.
+        // era una fórmula DUPLICADA en dos sitios que tenían que coincidir a mano. Ahora hay TRES
+        // escritores de este parámetro (este, el ViewModel y EqProfileManager) y la fórmula vive en
+        // uno solo, que es lo que los mantiene de acuerdo.
         equalizerProcessor.setLimiterThreshold(
-            if (musicPreferences.loadEqLimiterThresholdAuto()) {
-                com.qhana.siku.player.audio.EqualizerAudioProcessor.LIMITER_THRESHOLD_MAX_DB
-            } else {
-                musicPreferences.loadEqLimiterThreshold()
+            com.qhana.siku.player.audio.EqualizerAudioProcessor.effectiveLimiterThresholdDb(
+                auto = musicPreferences.loadEqLimiterThresholdAuto(),
+                manualDb = musicPreferences.loadEqLimiterThreshold()
                     ?: com.qhana.siku.player.audio.EqualizerAudioProcessor.LIMITER_THRESHOLD_MAX_DB
-            }
+            )
         )
 
         // setExtensionRendererMode se quitó: no hay renderers de extensión empaquetados,
@@ -462,6 +466,13 @@ class MusicPlaybackService : MediaSessionService() {
                 .collect { enabled -> applyEqEnabled(enabled) }
         }
 
+        // Perfiles del EQ por ruta de salida. Se engancha AQUÍ y no en el Application: la ruta solo
+        // importa mientras hay reproducción, así que el AudioDeviceCallback del sistema queda
+        // registrado exactamente durante la vida del servicio. Va después de rehidratar el
+        // processor porque el manager puede aplicar un perfil en el acto (si arrancamos con una
+        // ruta distinta a la de la última sesión) y ese valor debe ser el último en escribirse.
+        eqProfileManager.start()
+
         val intent = Intent(this, MainActivity::class.java).apply {
             action = ACTION_SHOW_NOW_PLAYING
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -514,6 +525,7 @@ class MusicPlaybackService : MediaSessionService() {
         appLogger.log("SERVICE", "onDestroy() called")
 
         offloadWatchdogJob?.cancel()
+        eqProfileManager.stop()
         serviceScope.cancel()
         try { this.player?.removeAudioOffloadListener(offloadListener) } catch (_: Exception) {}
 

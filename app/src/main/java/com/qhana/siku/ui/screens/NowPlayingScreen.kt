@@ -131,6 +131,8 @@ fun NowPlayingScreen(
     toolbarConfig: List<ToolbarActionState> = PlayerToolbarConfig.DEFAULT,
     modifier: Modifier = Modifier,
     sharedTransitionScope: SharedTransitionScope? = null,
+    /** Key del shared element de la carátula; null = sin morph (ver PlayerArtOrigin). */
+    artSharedKey: Any? = null,
     animatedVisibilityScope: AnimatedVisibilityScope? = null
 ) {
     val isDarkTheme = isSystemInDarkTheme()
@@ -378,6 +380,7 @@ fun NowPlayingScreen(
                         hazeState = hazeState,
                         glassTint = glassTint,
                         sharedTransitionScope = sharedTransitionScope,
+                        artSharedKey = artSharedKey,
                         animatedVisibilityScope = animatedVisibilityScope,
                         onAlbumArtLongPress = onAlbumArtLongPress
                     )
@@ -420,6 +423,7 @@ fun NowPlayingScreen(
                         hazeState = hazeState,
                         glassTint = glassTint,
                         sharedTransitionScope = sharedTransitionScope,
+                        artSharedKey = artSharedKey,
                         animatedVisibilityScope = animatedVisibilityScope,
                         onAlbumArtLongPress = onAlbumArtLongPress
                     )

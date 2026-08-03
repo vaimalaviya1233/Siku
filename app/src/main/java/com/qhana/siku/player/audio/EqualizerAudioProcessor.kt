@@ -337,6 +337,18 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         const val LIMITER_THRESHOLD_MAX_DB = 0f
 
         /**
+         * Umbral que de verdad se aplica, dado el modo y la posición del slider manual.
+         *
+         * Vive aquí —y no en quien lo usa— porque tiene DOS escritores del mismo parámetro del
+         * processor: `PlaybackViewModel` (mientras hay UI) y `EqProfileManager` (que aplica un
+         * perfil al cambiar la ruta de salida, con la app en segundo plano y sin ViewModel vivo).
+         * Dos escritores son tolerables solo mientras escriban EL MISMO valor, y eso únicamente se
+         * garantiza si la fórmula existe una sola vez (convención 14).
+         */
+        fun effectiveLimiterThresholdDb(auto: Boolean, manualDb: Float): Float =
+            if (auto) LIMITER_THRESHOLD_MAX_DB else manualDb
+
+        /**
          * Lookahead. Es LA diferencia con el limitador que estuvo apagado desde el 20 jul 2026:
          * la reducción se rampa durante los [LIMITER_LOOKAHEAD_SECONDS] ANTERIORES a que el pico
          * salga, así que la ganancia ya llegó a su destino cuando el pico aparece y no hace falta

@@ -264,7 +264,7 @@ private fun PlaylistItem(
                 colors = IconButtonDefaults.iconButtonColors(contentColor = MaterialTheme.colorScheme.primary),
                 modifier = Modifier.size(40.dp)
             ) {
-                MaterialSymbol("play_circle", size = 30.sp, fill = false)
+                MaterialSymbol("play_circle", size = 30.sp, fill = true)
             }
             Spacer(modifier = Modifier.width(4.dp))
             PlaylistItemMenu(onRename = onRename, onDelete = onDelete)

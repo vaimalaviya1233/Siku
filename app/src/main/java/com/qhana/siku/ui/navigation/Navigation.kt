@@ -35,6 +35,11 @@ sealed class Screen(val route: String) {
     data object SettingsTabs : Screen("settings/tabs")
     data object SettingsPlayerBar : Screen("settings/player_bar")
 
+    // Gestión de presets del EQ (ocultar/restaurar/borrar). Cuelga de Reproducción y no del hub:
+    // es mantenimiento del ecualizador, no una categoría de ajustes por sí misma. Fuera de la hoja
+    // del EQ porque esa pantalla es de uso constante y esto se hace una vez.
+    data object SettingsEqPresets : Screen("settings/eq_presets")
+
     data object DownloadManager : Screen("download_manager")
 
     data object PlaylistDetail : Screen("playlist_detail/{playlistId}/{playlistName}") {

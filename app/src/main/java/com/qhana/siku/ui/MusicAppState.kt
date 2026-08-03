@@ -1,13 +1,21 @@
 package com.qhana.siku.ui
 
+import android.view.View
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.Stable
+import androidx.compose.runtime.State
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalView
 import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -24,6 +32,123 @@ import com.qhana.siku.ui.navigation.Screen
  * `hiltViewModel()` dentro de una ruta resolvería al scope del NavBackStackEntry — una
  * instancia nueva por pantalla que no puede ser dueña de estado global.
  */
+/**
+ * De dónde sale la carátula al abrir el reproductor. Son tres coreografías distintas y cada una es
+ * correcta en su caso; lo que no vale es aplicar la de otro, porque un shared element **sin pareja
+ * se pinta en el overlay del `SharedTransitionScope`** —que cuelga de la raíz y NO recibe el
+ * `graphicsLayer` del slide— o sea quieto en su posición final mientras el reproductor sube.
+ */
+enum class PlayerArtOrigin {
+    /**
+     * Sin origen: la carátula sube CON el resto del contenido, como una pieza más de la pantalla.
+     * Es lo correcto cuando lo que disparó la reproducción no enseña la portada (chips del inicio,
+     * deep link de la notificación).
+     */
+    NONE,
+
+    /**
+     * Desde la PÍLDORA (el MiniPlayer): la portada ya está en la barra y viaja de ahí al centro.
+     * *Container transform* clásico — "esta barra se convierte en el reproductor".
+     */
+    PILL,
+
+    /**
+     * Desde la FILA de la canción en una lista. La fila origen es siempre la de la canción ACTIVA
+     * (`MusicController.announceSelection` la fija en el frame del tap), así que no hace falta
+     * pasar ningún id: cada `SongItem` sabe si es el origen preguntando si es la fila que suena.
+     *
+     * La fila **oculta su carátula** mientras dura el viaje, y eso no es un efecto: es lo que la
+     * convierte en ORIGEN. Compose exige que de las dos puntas de una key solo UNA sea destino, y
+     * una fila que se queda visible siempre lo es — con ella visible habría dos destinos y ninguna
+     * animación. Ocultarla es además lo que hace el *container transform* de Material.
+     */
+    ROW
+}
+
+/** Estado vacío por defecto: una instancia estable, para que el local nunca cambie de objeto. */
+private val NoArtOrigin: State<String?> = mutableStateOf(null)
+
+/**
+ * Id de la canción cuya FILA debe comportarse como origen de la carátula ahora mismo (null = ninguna).
+ * Lo publica [com.qhana.siku.ui.MusicPlayerScreen] y lo consume `SongItem`, que está a ocho pantallas
+ * de distancia — pasarlo por parámetro habría obligado a tocar todas las firmas intermedias para un
+ * detalle que solo le importa a la carátula.
+ *
+ * **Es un `State` dentro de un local ESTÁTICO, y no un `Boolean` en uno normal, por rendimiento
+ * medido en el sitio exacto donde dolía.** Con un Boolean, cada fila leía el valor durante su
+ * composición, así que al abrir y al cerrar el reproductor **recomponían TODAS las filas visibles a
+ * la vez** — unas diez, justo en el frame que arranca la transición y en el que la termina, que es
+ * donde el usuario notaba el tirón. Publicando el id en un `State` estable, la fila lo lee dentro de
+ * un `derivedStateOf` y solo recompone aquella cuyo veredicto cambia de verdad: una.
+ */
+val LocalArtOriginSongId = staticCompositionLocalOf { NoArtOrigin }
+
+/**
+ * El [SharedTransitionScope] de la app, publicado por la misma razón que [LocalArtOriginSongId]:
+ * las filas de lista lo necesitan para declarar el shared element de su carátula y están demasiado
+ * abajo como para recibirlo por parámetro.
+ *
+ * **No se lee directamente: se lee con [appSharedTransitionScope]**, que lo anula fuera de la
+ * ventana en la que nació.
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+val LocalAppSharedTransitionScope = compositionLocalOf<SharedTransitionScope?> { null }
+
+/**
+ * La `View` raíz de la ventana donde se montó el [LocalAppSharedTransitionScope]. La publica el
+ * mismo sitio que el scope y solo la consume [appSharedTransitionScope].
+ */
+private val LocalSharedTransitionOwnerView = staticCompositionLocalOf<View?> { null }
+
+/**
+ * El scope compartido, o `null` si quien pregunta vive en OTRA ventana.
+ *
+ * **Un `SharedTransitionScope` no cruza ventanas.** Su overlay y sus medidas cuelgan del árbol de
+ * layout de la ventana donde se declaró el `SharedTransitionLayout`; un `Dialog`, un `Popup` o un
+ * `ModalBottomSheet` crean su PROPIO `AndroidComposeView`, así que un shared element declarado ahí
+ * dentro le entrega coordenadas de otro árbol y Compose lanza
+ * `IllegalArgumentException: layouts are not part of the same hierarchy` — un FC, no una animación
+ * fea. Pasó con el overlay de búsqueda (`ExpandedFullScreenContainedSearchBar` es un diálogo
+ * edge-to-edge y sus resultados son las mismas filas `SongItem` de la biblioteca).
+ *
+ * El gate va AQUÍ, en la lectura, y no en cada ventana que se abra: el local viaja a todas por
+ * construcción, así que confiar en que cada `Dialog`/sheet nuevo se acuerde de anularlo es dejar la
+ * misma trampa armada para la próxima. `LocalView` cambia de valor en cada ventana, que es
+ * exactamente la pregunta que hay que hacer.
+ *
+ * **Ojo, esto NO cubre el otro motivo para anular el scope**: dos listas de la MISMA ventana que
+ * repitan la key por-canción (la hoja de la cola sobre la lista de detrás). Ese caso sigue
+ * necesitando su `CompositionLocalProvider(LocalAppSharedTransitionScope provides null)` explícito
+ * — ver `PlayerOverlay`. Son problemas distintos con soluciones distintas.
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+fun appSharedTransitionScope(): SharedTransitionScope? {
+    val scope = LocalAppSharedTransitionScope.current ?: return null
+    return scope.takeIf { LocalSharedTransitionOwnerView.current === LocalView.current }
+}
+
+/**
+ * Publica el scope compartido junto con la ventana a la que pertenece. Único punto de entrada:
+ * proveer el local a mano dejaría el gate de [appSharedTransitionScope] sin la referencia con la
+ * que comparar y anularía el shared element en TODAS partes (fallo silencioso: las animaciones
+ * simplemente dejarían de ocurrir).
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+fun ProvideAppSharedTransitionScope(
+    scope: SharedTransitionScope,
+    artOriginSongId: State<String?>,
+    content: @Composable () -> Unit
+) {
+    CompositionLocalProvider(
+        LocalAppSharedTransitionScope provides scope,
+        LocalSharedTransitionOwnerView provides LocalView.current,
+        LocalArtOriginSongId provides artOriginSongId,
+        content = content
+    )
+}
+
 @Stable
 class MusicAppState(
     val navController: NavHostController,
@@ -40,32 +165,21 @@ class MusicAppState(
         private set
 
     /**
-     * Si la última apertura del reproductor salió de la PÍLDORA (el MiniPlayer) o de otro sitio
-     * (una canción de una lista, un chip del inicio, la notificación).
-     *
-     * Decide de dónde nace la carátula, y son dos coreografías legítimas y distintas:
-     *  - **Desde la píldora** → *container transform*: la portada YA está en pantalla, dentro de la
-     *    barra, así que viaja de ahí al centro del reproductor como shared element. Es el gesto de
-     *    "esta barra se convierte en el reproductor".
-     *  - **Desde cualquier otro sitio** → la carátula sube CON el resto del contenido, como una
-     *    pieza más del reproductor que entra deslizando. No hay nada de dónde morfar: la fila que
-     *    se tocó SIGUE en pantalla detrás del player, así que nada sale de ella (y por eso tampoco
-     *    puede ser el origen de un shared element: Compose exige que de las dos puntas de una key
-     *    solo UNA sea destino, y una fila que se queda visible nunca deja de serlo).
-     *
-     * Sin esta distinción, abrir desde una lista pintaba la carátula en el overlay del
-     * `SharedTransitionScope` —que cuelga de la raíz y NO recibe el `graphicsLayer` del slide—, o
-     * sea quieta en su posición final mientras el resto del reproductor subía por debajo.
+     * De dónde nace la carátula del reproductor en la última apertura. Ver [PlayerArtOrigin].
      */
-    var playerOpenedFromPill by mutableStateOf(false)
+    var playerArtOrigin by mutableStateOf(PlayerArtOrigin.NONE)
         private set
 
+    /** Atajo de lectura: la carátula viaja desde la píldora. */
+    val playerOpenedFromPill: Boolean get() = playerArtOrigin == PlayerArtOrigin.PILL
+
     /**
-     * Abre el reproductor. [fromPill] SOLO lo pone el MiniPlayer (tap o arrastre hacia arriba);
-     * todo lo demás —listas, chips del inicio, deep link de la notificación— abre sin origen.
+     * Abre el reproductor declarando de DÓNDE sale la carátula (ver [PlayerArtOrigin]). El default
+     * es [PlayerArtOrigin.NONE] a propósito: quien no sepa ofrecer un origen real no debe inventarlo
+     * — un shared element sin pareja se pinta en el overlay y se queda quieto.
      */
-    fun openPlayer(fromPill: Boolean = false) {
-        playerOpenedFromPill = fromPill
+    fun openPlayer(origin: PlayerArtOrigin = PlayerArtOrigin.NONE) {
+        playerArtOrigin = origin
         playerExpanded = true
     }
 

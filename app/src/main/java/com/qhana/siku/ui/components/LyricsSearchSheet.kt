@@ -41,7 +41,9 @@ fun LyricsSearchSheet(
 ) {
     var preview by remember { mutableStateOf<LyricsCandidate?>(null) }
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    AppModalSheet(onDismissRequest = onDismiss) {
+        // Elegir un candidato cierra la hoja desde dentro. Ver [LocalSheetCloser].
+        val close = LocalSheetCloser.current
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -95,7 +97,7 @@ fun LyricsSearchSheet(
                     items(candidates, key = { it.id }) { candidate ->
                         CandidateItem(
                             candidate = candidate,
-                            onClick = { onCandidateSelected(candidate) },
+                            onClick = { close { onCandidateSelected(candidate) } },
                             onLongClick = { preview = candidate },
                             modifier = Modifier.animateItem()
                         )

@@ -428,6 +428,9 @@
     <string name="eq_bands_label">%1$d bandas</string>
     <!-- Refuerzo de graves/agudos: se SUMA a la curva de las bandas -->
     <string name="eq_boost_section">Refuerzo</string>
+    <!-- Tooltip del icono de aviso de la fila del refuerzo, en sus dos grados -->
+    <string name="eq_boost_saturating_mild">Saturación baja: puede recortar a volumen alto</string>
+    <string name="eq_boost_saturating_strong">Saturación fuerte: baja este refuerzo o activa el limitador</string>
     <string name="eq_boost_bass">Graves</string>
     <string name="eq_boost_treble">Agudos</string>
     <string name="eq_boost_center">Frecuencia</string>
@@ -478,6 +481,16 @@
     <string name="settings_eq_header">Ecualizador</string>
     <string name="settings_use_system_eq">Usar ecualizador del sistema</string>
     <string name="settings_use_system_eq_desc">El botón de ecualizador del reproductor abre el panel del sistema (MIUI/fabricante) en vez del ecualizador propio. Al activarlo, el ecualizador propio se apaga.</string>
+
+    <!-- Perfiles del EQ por ruta de salida y gestión de presets -->
+    <string name="settings_eq_route_profiles">Recordar el ecualizador por dispositivo</string>
+    <string name="settings_eq_route_profiles_desc">Guarda por separado lo que dejes puesto con los auriculares con cable, por Bluetooth, por USB y en el altavoz del teléfono. Al conectar uno, vuelve su última configuración.</string>
+    <string name="settings_eq_presets">Presets del ecualizador</string>
+    <string name="settings_eq_presets_desc">Elegir cuáles aparecen en el selector</string>
+    <string name="settings_eq_presets_hint">Los presets ocultos no se listan en el ecualizador, pero no se borran: puedes volver a mostrarlos cuando quieras.</string>
+    <string name="settings_eq_presets_own">Tus presets</string>
+    <string name="settings_eq_presets_restore_all">Mostrar los %1$d ocultos</string>
+    <string name="eq_presets_all_hidden">Todos los presets están ocultos (Ajustes → Reproducción)</string>
 
     <!-- ==================== Pestañas de la biblioteca ==================== -->
     <string name="settings_tabs_header">Pestañas</string>
@@ -647,6 +660,8 @@
     <string name="settings_solid_bg_desc">Usa un color sólido del tema en lugar del degradado de la carátula.</string>
     <string name="settings_wavy_progress">Barra de progreso ondulada</string>
     <string name="settings_wavy_progress_desc">Usa la onda animada de Material 3 en el reproductor. El miniplayer mantiene la barra fina.</string>
+    <string name="settings_mini_player_rect">Miniplayer rectangular</string>
+    <string name="settings_mini_player_rect_desc">Usa esquinas redondeadas en la barra flotante en vez de la forma de píldora.</string>
     <string name="settings_player_gestures">Gestos del reproductor</string>
     <string name="settings_player_gestures_desc">Desliza la carátula para cambiar de canción, hacia abajo para cerrar el reproductor y hacia arriba en el miniplayer para abrirlo. Toca dos veces a los lados de la carátula para saltar %1$d segundos.</string>
 

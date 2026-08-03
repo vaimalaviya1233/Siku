@@ -10,6 +10,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import com.qhana.siku.data.model.PlaybackContext
 import com.qhana.siku.ui.MusicAppState
+import com.qhana.siku.ui.PlayerArtOrigin
 import com.qhana.siku.ui.screens.AlbumDetailScreen
 import com.qhana.siku.ui.screens.ArtistDetailScreen
 import com.qhana.siku.ui.screens.DownloadManagerScreen
@@ -20,6 +21,7 @@ import com.qhana.siku.ui.screens.PlaylistDetailScreen
 import com.qhana.siku.ui.screens.SettingsAppearanceScreen
 import com.qhana.siku.ui.screens.SettingsBackupScreen
 import com.qhana.siku.ui.screens.SettingsDownloadsScreen
+import com.qhana.siku.ui.screens.SettingsEqPresetsScreen
 import com.qhana.siku.ui.screens.SettingsGesturesScreen
 import com.qhana.siku.ui.screens.SettingsPlaybackScreen
 import com.qhana.siku.ui.screens.SettingsPlayerBarScreen
@@ -123,7 +125,7 @@ fun AppNavHost(
                 onArtistClick = { name -> navController.navigate(Screen.ArtistDetail.createRoute(name)) },
                 onAlbumClick = { name -> navController.navigate(Screen.AlbumDetail.createRoute(name)) },
                 onGenreClick = { name -> navController.navigate(Screen.GenreDetail.createRoute(name)) },
-                onNavigateToNowPlaying = { appState.openPlayer() },
+                onNavigateToNowPlaying = { origin -> appState.openPlayer(origin) },
                 onNavigateToSettings = { navController.navigate(Screen.Settings.route) },
                 playbackViewModel = playbackViewModel,
                 // El MISMO LibraryViewModel que reciben los detalles. Antes esta ruta se quedaba
@@ -159,7 +161,7 @@ fun AppNavHost(
                         PlaybackContext.Playlist(playlistId, playlistName, songs.firstOrNull()?.albumArtUri?.toString())
                     )
                     playbackViewModel.playSongs(songs, index)
-                    appState.openPlayer()
+                    appState.openPlayer(PlayerArtOrigin.ROW)
                 },
                 onShufflePlay = { songs ->
                     libraryViewModel.recordContext(
@@ -194,7 +196,7 @@ fun AppNavHost(
                         PlaybackContext.Artist(artistName, songs.firstOrNull()?.albumArtUri?.toString())
                     )
                     playbackViewModel.playSongs(songs, index)
-                    appState.openPlayer()
+                    appState.openPlayer(PlayerArtOrigin.ROW)
                 },
                 onShufflePlay = { songs ->
                     libraryViewModel.recordContext(
@@ -234,7 +236,7 @@ fun AppNavHost(
                         PlaybackContext.Album(albumName, songs.firstOrNull()?.albumArtUri?.toString())
                     )
                     playbackViewModel.playSongs(songs, index)
-                    appState.openPlayer()
+                    appState.openPlayer(PlayerArtOrigin.ROW)
                 },
                 onShufflePlay = { songs ->
                     libraryViewModel.recordContext(
@@ -273,7 +275,7 @@ fun AppNavHost(
                         PlaybackContext.Genre(genreName, songs.firstOrNull()?.albumArtUri?.toString())
                     )
                     playbackViewModel.playSongs(songs, index)
-                    appState.openPlayer()
+                    appState.openPlayer(PlayerArtOrigin.ROW)
                 },
                 onShufflePlay = { songs ->
                     libraryViewModel.recordContext(
@@ -307,7 +309,7 @@ fun AppNavHost(
                 onPlayAll = { songs, index ->
                     libraryViewModel.recordContext(PlaybackContext.Favorites)
                     playbackViewModel.playSongs(songs, index)
-                    appState.openPlayer()
+                    appState.openPlayer(PlayerArtOrigin.ROW)
                 },
                 onShufflePlay = { songs ->
                     libraryViewModel.recordContext(PlaybackContext.Favorites)
@@ -357,8 +359,15 @@ fun AppNavHost(
             route = Screen.SettingsPlayback.route
         ) {
             SettingsPlaybackScreen(
-                onBackClick = { navController.popBackStack() }
+                onBackClick = { navController.popBackStack() },
+                onNavigate = { route -> appState.navigate(route) }
             )
+        }
+
+        composable(
+            route = Screen.SettingsEqPresets.route
+        ) {
+            SettingsEqPresetsScreen(onBackClick = { navController.popBackStack() })
         }
 
         composable(
