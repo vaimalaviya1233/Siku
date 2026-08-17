@@ -45,8 +45,8 @@ import com.qhana.siku.data.model.LibraryTabId
 import com.qhana.siku.data.model.LibraryTabsConfig
 import com.qhana.siku.data.model.PlaybackContext
 import com.qhana.siku.data.model.Song
+import com.qhana.siku.data.util.FuzzyMatch
 import com.qhana.siku.data.model.SongFilter
-import com.qhana.siku.data.repository.ArtworkRepository
 import com.qhana.siku.ui.PlayerArtOrigin
 import com.qhana.siku.ui.components.*
 import com.qhana.siku.ui.viewmodel.BrowseViewModel
@@ -84,11 +84,30 @@ private val SearchViewMotionSpec = spring<Float>(
 )
 
 /**
+ * Coincidencias de [query] ordenadas por relevancia, tolerando erratas (ver [FuzzyMatch]).
+ *
+ * El ORDEN es la mitad del asunto: la lista de origen viene alfabética, así que sin reordenar, una
+ * coincidencia corregida podría aparecer antes que una literal solo por su inicial. Con esto lo que
+ * se escribió tal cual va primero, y detrás lo que se parece.
+ */
+private inline fun <T> List<T>.rankedByRelevance(
+    query: String,
+    crossinline name: (T) -> String
+): List<T> =
+    asSequence()
+        .map { it to FuzzyMatch.score(name(it), query) }
+        .filter { it.second != FuzzyMatch.NO_MATCH }
+        .sortedBy { it.second }
+        .map { it.first }
+        .toList()
+
+/**
  * Escala de partida/llegada del cruce lupa↔flecha del leading icon. El glifo no nace en 0:
  * se encoge lo justo para que el cambio se lea como un relevo y no como un icono que aparece
  * de la nada. Simétrico entrada/salida a propósito.
  */
 private const val IconCrossfadeScale = 0.7f
+
 
 /**
  * Presentación (etiqueta + glifo) de cada pestaña. El ORDEN y la VISIBILIDAD ya no viven aquí:
@@ -113,6 +132,10 @@ private val tabInfo: Map<LibraryTabId, TabInfo> = listOf(
 @Composable
 fun LibraryScreen(
     isLoggedIn: Boolean,
+    // Avatar de cuenta del header: foto de perfil cacheada + inicial (fallback). Ambos null en
+    // solo-local → el botón muestra el engranaje de ajustes.
+    accountPhotoPath: String? = null,
+    accountInitial: String? = null,
     onLogoutClick: () -> Unit,
     onDownloadManagerClick: () -> Unit,
     onPlaylistClick: (Long, String) -> Unit,
@@ -136,12 +159,21 @@ fun LibraryScreen(
     // DataStore o en un singleton (favoritos en memoria, banner, query) se veía distinto según la
     // pantalla. Quitar el default es lo que impide que se cuele otra vez sin darse cuenta.
     libraryViewModel: LibraryViewModel,
+    // Sin default por el MISMO motivo que [libraryViewModel], y no por precaución: este es el
+    // ViewModel del reproductor, o sea el que la Activity entera comparte (el player, la píldora,
+    // el tema). Una segunda instancia aquí no solo duplicaría sus ~17 colectores sobre DataStore:
+    // sus `MutableStateFlow` locales —los del ecualizador, que se escriben en cada frame de
+    // arrastre— dejarían de ser los mismos objetos, que es exactamente el fallo ya documentado en
+    // `PlaybackViewModel.eqLimiterEnabled`. `AppNavHost` ya pasa el correcto; quitar el default es
+    // lo que impide que un llamador futuro se olvide.
+    playbackViewModel: PlaybackViewModel,
     // El banner de progreso de sync lo maneja LibraryViewModel; syncViewModel se usa para el
     // banner PERSISTENTE de descargas pausadas/detenidas (lee flows de singletons).
     syncViewModel: SyncViewModel = hiltViewModel(),
-    playbackViewModel: PlaybackViewModel = hiltViewModel(),
     browseViewModel: BrowseViewModel = hiltViewModel()
 ) {
+    // Sonda (solo debug): cada recomposición del scope de la biblioteca entera.
+    SideEffect { com.qhana.siku.data.util.JankProbe.mark { "LibraryScreen recompuesta" } }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
@@ -173,32 +205,24 @@ fun LibraryScreen(
     // filtrando el paging LIKE. Solo con búsqueda activa en la pestaña Todas.
     val searchQuery = uiState.searchQuery
     val isSearchActive = uiState.showSearch && searchQuery.isNotBlank()
+    // SIN tope de resultados, a propósito. Lo hubo (12) y no compraba nada: estas dos secciones son
+    // `LazyRow` horizontales —el nº de tarjetas no cambia el alto ni empuja a las canciones, y lo
+    // que no se ve no se compone—, así que el límite no era ni de layout ni de rendimiento. Sí
+    // hacía daño: cortaba sobre la lista ALFABÉTICA, de modo que con una búsqueda poco específica
+    // se quedaba con los doce primeros del abecedario y el artista buscado podía no estar entre
+    // ellos. Quien afina la búsqueda ve pocas coincidencias igualmente.
     val searchArtists = remember(artists, searchQuery, isSearchActive) {
         if (!isSearchActive) emptyList()
-        else artists.filter { it.name.contains(searchQuery.trim(), ignoreCase = true) }.take(12)
+        else artists.rankedByRelevance(searchQuery) { it.name }
     }
     val searchAlbums = remember(albums, searchQuery, isSearchActive) {
         if (!isSearchActive) emptyList()
-        else albums.filter { it.name.contains(searchQuery.trim(), ignoreCase = true) }.take(12)
+        else albums.rankedByRelevance(searchQuery) { it.name }
     }
     
     // El MiniPlayer vive ahora en MainActivity; acá solo se necesita el estado para el
     // acento del álbum en reproducción.
     val nowPlayingUiState by playbackViewModel.nowPlayingUiState.collectAsStateWithLifecycle()
-
-    // Acento del álbum en reproducción, calculado una sola vez aquí (LibraryScreen está
-    // siempre vivo) para que no parpadee al cambiar de tab. null = fallback al sistema.
-    //
-    // Se pinta 1:1 (mezclado con la superficie para teñir la fila que suena), NO se usa como seed,
-    // así que el seed crudo de la carátula hay que proyectarlo al tono que contrasta con este tema:
-    // un seed puede ser un rojo de tono 45 que sobre fondo oscuro no se distingue del fondo.
-    val isDarkThemeLib = isSystemInDarkTheme()
-    val playingAccent = remember(nowPlayingUiState.albumColors, isDarkThemeLib) {
-        nowPlayingUiState.albumColors?.let { c ->
-            val seed = if (isDarkThemeLib) c.secondary else c.primary
-            Color(ArtworkRepository.accentForTheme(seed, isDarkThemeLib))
-        }
-    }
 
     // Dialog State
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
@@ -229,54 +253,25 @@ fun LibraryScreen(
     }
 
     // --- SCROLL & APPBAR ---
-    // Va ANTES de la búsqueda: el color de la píldora depende del estado de scroll (ver
-    // headerItemColor).
     // TopBar SIEMPRE visible (pinned): se quitó el enterAlways que la ocultaba al deslizar
     // en "Todas" (y con él la lógica de auto-mostrar al parar el scroll).
     val topAppBarState = rememberTopAppBarState()
     val currentScrollBehavior = TopAppBarDefaults.pinnedScrollBehavior(state = topAppBarState)
 
-    // Separación header/contenido: on-scroll color change del spec (surface at-rest →
-    // surfaceContainer con contenido debajo), HOISTED porque el bloque tintado es
-    // TopBar + fila de tabs y deben virar en sincronía exacta — la misma lógica interna de
-    // SingleRowTopAppBar (umbral binario sobre overlappedFraction + spring DefaultEffects)
-    // aplicada al color compartido. surface NO es negro puro: los tres schemes producen
-    // tone 6 / tone 98, así que at-rest el header se funde con el lienzo (intencional).
-    // CLAVE: el margen bajo las tabs vive DENTRO del área teñida (padding inferior de
-    // LibraryTabsRow), para que la píldora activa respire; sin ese aire quedaba pegada al
-    // corte del bloque. El divider se probó y NO.
-    // contentOffset directo, NO overlappedFraction: sin un TopAppBar componiéndose nadie
-    // fija heightOffsetLimit y la fracción no se computa. El pinned connection acumula
-    // contentOffset igual (y lo resetea al volver al tope), que es la única señal que
-    // necesita el umbral binario.
-    val headerScrolled by remember {
-        derivedStateOf { topAppBarState.contentOffset < -1f }
-    }
-    // Reposo = surface (spec: el header se funde con el fondo hasta que hay contenido
-    // debajo), scrolled = surfaceContainer. El "hueco raro" que se veía en reposo NO era
-    // el color: era el canal de 12dp entre el bloque de tabs y el contenido (hoy 4dp) —
-    // se probó surfaceContainerLow como paliativo y con el gap corregido sobraba.
-    val headerColor by animateColorAsState(
-        targetValue = if (headerScrolled) colorScheme.surfaceContainer else colorScheme.surface,
-        animationSpec = appEffectsSpec(),
-        label = "headerColor"
-    )
-    // Color del contenedor de la píldora de búsqueda, que va SOBRE el bloque. Sube un peldaño con
-    // el bloque para conservar la MISMA distancia tonal en los dos estados. Fijo en
-    // surfaceContainerHigh (el default del componente) se leía bien en reposo —contra surface hay
-    // ~11 puntos de tono— pero al scrollear el bloque pasa a surfaceContainer y la distancia cae a
-    // ~5: la píldora se fundía con el fondo. Las tabs ya no lo usan (no tienen contenedor propio).
-    val headerItemColor by animateColorAsState(
-        targetValue = if (headerScrolled) colorScheme.surfaceContainerHighest
-                      else colorScheme.surfaceContainerHigh,
-        animationSpec = appEffectsSpec(),
-        label = "headerItemColor"
-    )
-    // contentOffset es un acumulador global del nested scroll: al cambiar de página no se
-    // resetea solo, y una pestaña abierta arriba del todo heredaría el tinte del scroll de
-    // la anterior. Trade-off aceptado: una pestaña que quedó scrolleada nace des-tintada
-    // hasta el primer scroll (el fix perfecto exigiría izar los scroll states de las 5 tabs).
-    LaunchedEffect(pagerState.currentPage) { topAppBarState.contentOffset = 0f }
+    // Header FUNDIDO con el fondo SIEMPRE: el mismo color que el `containerColor` del Scaffold
+    // (`surfaceContainerLow`), en reposo Y con contenido debajo. Por decisión de diseño NO hay
+    // cambio de color al scrollear —el top bar es una continuación de la página, no una barra con
+    // identidad propia—; el contenido pasa por debajo del header opaco sin que este se despegue.
+    // (Antes viraba a un contenedor más alto al scrollear para "elevarse"; se quitó.) Es un rol, así
+    // que se adapta a claro/oscuro y a todos los estilos. DEBE seguir igual al fondo del Scaffold: si
+    // divergen, aparece una costura entre el bloque de tabs y la página.
+    val headerColor = colorScheme.surfaceContainerLow
+    // Contenedor de la píldora de búsqueda: un peldaño POR ENCIMA del header
+    // (`surfaceContainerHigh` sobre `surfaceContainerLow`) para leerse como un campo y no fundirse
+    // con él. NEUTRO a propósito: el color fuerte (`secondaryContainer`) es el lenguaje del estado
+    // SELECCIONADO —el tab activo—, y teñir también la búsqueda le robaba ese protagonismo. Constante:
+    // como el header ya no cambia con el scroll, la píldora tampoco necesita animarse para seguirlo.
+    val headerItemColor = colorScheme.surfaceContainerHigh
 
     // --- BÚSQUEDA (search as secondary action / focused search) ---
     // Componente REAL de M3, variante CONTAINED: la lupa de la TopBar es el ancla colapsada y los
@@ -293,10 +288,10 @@ fun LibraryScreen(
         animationSpecForExpand = SearchViewMotionSpec,
         animationSpecForCollapse = SearchViewMotionSpec
     )
-    // El contenedor del input sale del color animado del header (mismo criterio que los botones
-    // inactivos de las tabs), NO del token fijo `SearchBarTokens.ContainerColor`
-    // (surfaceContainerHigh): con la lista scrolleada ese token queda a un peldaño del bloque.
-    // El resto de la paleta (superficie del diálogo expandido incluida) se conserva.
+    // Contenedor del input NEUTRO, del color animado del header (`headerItemColor`), NO del token
+    // fijo `SearchBarTokens.ContainerColor` (surfaceContainerHigh): con la lista scrolleada ese
+    // token queda a un peldaño del bloque. El resto de la paleta (contenido, superficie del diálogo
+    // expandido) se conserva por defecto.
     val searchBarColors = SearchBarDefaults.containedColors(searchBarState).let { base ->
         base.copy(
             inputFieldColors = base.inputFieldColors.copy(
@@ -396,6 +391,8 @@ fun LibraryScreen(
                     !showBackIcon -> Row(verticalAlignment = Alignment.CenterVertically) {
                         LibraryOverflowButton(
                             isLoggedIn = isLoggedIn,
+                            accountPhotoPath = accountPhotoPath,
+                            accountInitial = accountInitial,
                             onSettingsClick = onNavigateToSettings,
                             onLogoutClick = { showLogoutDialog = true }
                         )
@@ -439,7 +436,10 @@ fun LibraryScreen(
             .fillMaxSize()
             .nestedScroll(currentScrollBehavior.nestedScrollConnection),
         contentWindowInsets = WindowInsets(0,0,0,0),
-        containerColor = colorScheme.surface,
+        // Fondo de la biblioteca: `surfaceContainerLow` (un peldaño de tinte sobre `surface`) para
+        // que se note el color del seed en vez de leerse casi blanco en balanceado. DEBE coincidir
+        // con el `headerColor` de REPOSO (el header se funde con el fondo hasta que hay scroll).
+        containerColor = colorScheme.surfaceContainerLow,
         // Sin snackbarHost: el host único vive en MainActivity, ya posicionado sobre el
         // MiniPlayer flotante. Tener otro acá duplicaba el componente y solo mostraba los
         // snackbars pedidos a mano desde esta pantalla, no los del bus.
@@ -479,7 +479,6 @@ fun LibraryScreen(
                         searchAlbums = searchAlbums,
                         libraryViewModel = libraryViewModel,
                         playbackViewModel = playbackViewModel,
-                        playingAccent = playingAccent,
                         onAddToPlaylistRequest = { songIdForPlaylist = it },
                         onCollapseAnd = { action -> scope.launch { searchBarState.animateToCollapsed(); action() } },
                         onNavigateToNowPlaying = onNavigateToNowPlaying,
@@ -630,7 +629,6 @@ fun LibraryScreen(
                                 onAddToPlaylistRequest = { songIdForPlaylist = it },
                                 viewModel = libraryViewModel,
                                 playbackViewModel = playbackViewModel,
-                                playingAccent = playingAccent,
                                 songCount = songCount,
                                 sortOrder = uiState.sortOrderAll,
                                 onSortOrderChange = { libraryViewModel.onSortOrderChanged(it, SongFilter.ALL) },
@@ -669,6 +667,16 @@ fun LibraryScreen(
                                         }
                                     }
                                 },
+                                // Encolar NO es reproducir: no toca el contexto de "seguir
+                                // escuchando" (que describe de dónde salió lo que SUENA) ni abre el
+                                // player. El feedback lo da el snackbar de `addToQueue`.
+                                onAddArtistToQueue = { name ->
+                                    scope.launch {
+                                        playbackViewModel.addToQueue(
+                                            browseViewModel.getArtistSongs(name).first()
+                                        )
+                                    }
+                                },
                                 contentPadding = listInsets,
                                 sharedTransitionScope = sharedTransitionScope,
                                 animatedVisibilityScope = animatedVisibilityScope
@@ -701,6 +709,13 @@ fun LibraryScreen(
                                         }
                                     }
                                 },
+                                onAddAlbumToQueue = { name ->
+                                    scope.launch {
+                                        playbackViewModel.addToQueue(
+                                            browseViewModel.getAlbumSongs(name).first()
+                                        )
+                                    }
+                                },
                                 contentPadding = listInsets,
                                 sharedTransitionScope = sharedTransitionScope,
                                 animatedVisibilityScope = animatedVisibilityScope
@@ -726,6 +741,13 @@ fun LibraryScreen(
                                             )
                                             playbackViewModel.playSongs(genreSongs, 0)
                                         }
+                                    }
+                                },
+                                onAddGenreToQueue = { name ->
+                                    scope.launch {
+                                        playbackViewModel.addToQueue(
+                                            browseViewModel.getGenreSongs(name).first()
+                                        )
                                     }
                                 },
                                 contentPadding = listInsets,
@@ -1265,14 +1287,14 @@ private fun DownloadSummaryBanner(active: Int, completed: Int, total: Int, faile
         Text(
             stringResource(R.string.sync_progress, completed, total, failedText),
             style = MaterialTheme.typography.bodySmall,
-            color = palette.accent.copy(alpha = 0.8f)
+            color = palette.accent.copy(alpha = ACCENT_SECONDARY_ALPHA)
         )
         Spacer(Modifier.height(10.dp))
         // Onda expressive determinada: el progreso "vivo" de la descarga.
         LinearWavyProgressIndicator(
             progress = { if (total > 0) completed.toFloat() / total else 0f },
             color = palette.accent,
-            trackColor = palette.accent.copy(alpha = 0.25f),
+            trackColor = palette.accent.copy(alpha = ACCENT_TRACK_ALPHA),
             modifier = Modifier.fillMaxWidth()
         )
         Spacer(Modifier.height(2.dp))
@@ -1296,7 +1318,7 @@ private fun ErrorBanner(message: String, onRetry: () -> Unit) {
         Text(
             stringResource(R.string.sync_error_retry, message),
             style = MaterialTheme.typography.bodySmall,
-            color = palette.accent.copy(alpha = 0.8f),
+            color = palette.accent.copy(alpha = ACCENT_SECONDARY_ALPHA),
             maxLines = 2
         )
     }
@@ -1333,7 +1355,7 @@ private fun SyncCompleteBanner(newSongs: Int, downloaded: Int, failed: Int, dele
         Text(
             text,
             style = MaterialTheme.typography.bodySmall,
-            color = palette.accent.copy(alpha = 0.8f),
+            color = palette.accent.copy(alpha = ACCENT_SECONDARY_ALPHA),
             maxLines = 1
         )
     }
@@ -1364,7 +1386,7 @@ private fun PrepareProgressBanner(current: Int, total: Int, message: String) {
             Text(
                 stringResource(R.string.sync_progress, current, total, ""),
                 style = MaterialTheme.typography.bodySmall,
-                color = palette.accent.copy(alpha = 0.8f)
+                color = palette.accent.copy(alpha = ACCENT_SECONDARY_ALPHA)
             )
         }
         Spacer(Modifier.height(10.dp))
@@ -1374,13 +1396,13 @@ private fun PrepareProgressBanner(current: Int, total: Int, message: String) {
             LinearWavyProgressIndicator(
                 progress = { current.toFloat() / total },
                 color = palette.accent,
-                trackColor = palette.accent.copy(alpha = 0.25f),
+                trackColor = palette.accent.copy(alpha = ACCENT_TRACK_ALPHA),
                 modifier = Modifier.fillMaxWidth()
             )
         } else {
             LinearWavyProgressIndicator(
                 color = palette.accent,
-                trackColor = palette.accent.copy(alpha = 0.25f),
+                trackColor = palette.accent.copy(alpha = ACCENT_TRACK_ALPHA),
                 modifier = Modifier.fillMaxWidth()
             )
         }
@@ -1408,7 +1430,7 @@ private fun SyncPausedBanner(message: String) {
         Text(
             message,
             style = MaterialTheme.typography.bodySmall,
-            color = palette.accent.copy(alpha = 0.8f),
+            color = palette.accent.copy(alpha = ACCENT_SECONDARY_ALPHA),
             maxLines = 2
         )
     }
@@ -1431,14 +1453,14 @@ private fun ScanProgressBanner(count: Int, message: String) {
         Text(
             if (count > 0) stringResource(R.string.sync_found, count, message) else message,
             style = MaterialTheme.typography.bodySmall,
-            color = palette.accent.copy(alpha = 0.8f),
+            color = palette.accent.copy(alpha = ACCENT_SECONDARY_ALPHA),
             maxLines = 1
         )
         Spacer(Modifier.height(10.dp))
         // Onda expressive indeterminada mientras se recorre el delta.
         LinearWavyProgressIndicator(
             color = palette.accent,
-            trackColor = palette.accent.copy(alpha = 0.25f),
+            trackColor = palette.accent.copy(alpha = ACCENT_TRACK_ALPHA),
             modifier = Modifier.fillMaxWidth()
         )
         Spacer(Modifier.height(2.dp))
@@ -1488,14 +1510,27 @@ private fun LibrarySearchHeader(
 @Composable
 private fun LibraryOverflowButton(
     isLoggedIn: Boolean,
+    accountPhotoPath: String?,
+    accountInitial: String?,
     onSettingsClick: () -> Unit,
     onLogoutClick: () -> Unit
 ) {
     var showOverflowMenu by remember { mutableStateOf(false) }
-    // El botón de nueva lista vive en el FAB contextual (MainActivity), que muta a
-    // "playlist_add" en la pestaña Listas — no duplicarlo aquí.
+    // El botón de nueva lista NO va aquí: vive sobre Favoritos, en la cabecera de la pestaña
+    // Listas (`PlaylistList`). (Estuvo en un FAB contextual, que ya no existe.)
     Box {
-        IconButton(onClick = { showOverflowMenu = true }) { MaterialSymbol("more_vert") }
+        // Con cuenta de Microsoft: AVATAR (foto de perfil o inicial) que abre el MENÚ (Ajustes +
+        // Cerrar sesión). En solo-local no hay cuenta ni logout, así que el único destino es
+        // Ajustes: el botón muestra el engranaje y NAVEGA DIRECTO — abrir un menú de un solo ítem
+        // "Ajustes" (otro engranaje) para llegar a Ajustes era un paso vacío. Sin color explícito:
+        // la píldora es neutra, así que el icono hereda el contenido por defecto del input.
+        IconButton(onClick = { if (isLoggedIn) showOverflowMenu = true else onSettingsClick() }) {
+            if (isLoggedIn) {
+                AccountAvatar(photoPath = accountPhotoPath, initial = accountInitial)
+            } else {
+                MaterialSymbol("settings")
+            }
+        }
         // Menú SEGMENTADO (popup + grupo), no el `DropdownMenu` clásico: ver la nota en SortChip.
         DropdownMenuPopup(
             expanded = showOverflowMenu,
@@ -1541,7 +1576,6 @@ private fun SearchResults(
     searchAlbums: List<AlbumSummary>,
     libraryViewModel: LibraryViewModel,
     playbackViewModel: PlaybackViewModel,
-    playingAccent: Color?,
     onAddToPlaylistRequest: (String) -> Unit,
     onCollapseAnd: (() -> Unit) -> Unit,
     onNavigateToNowPlaying: (PlayerArtOrigin) -> Unit,
@@ -1563,7 +1597,6 @@ private fun SearchResults(
         onAddToPlaylistRequest = { songId -> onCollapseAnd { onAddToPlaylistRequest(songId) } },
         viewModel = libraryViewModel,
         playbackViewModel = playbackViewModel,
-        playingAccent = playingAccent,
         isSearchActive = true,
         searchQuery = searchQuery,
         searchArtists = searchArtists,

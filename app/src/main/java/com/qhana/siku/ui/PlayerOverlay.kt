@@ -1,98 +1,118 @@
 package com.qhana.siku.ui
 
-import android.content.Intent
-import android.media.audiofx.AudioEffect
-import android.widget.Toast
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.Transition
 import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
-import androidx.compose.animation.core.snap
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
-import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.qhana.siku.R
 import com.qhana.siku.data.model.PlaybackState
+import com.qhana.siku.data.util.JankProbe
 import com.qhana.siku.data.util.SnackbarManager
-import com.qhana.siku.ui.components.ALBUM_ART_SHARED_KEY
 import com.qhana.siku.ui.components.AddSongsToPlaylistSheet
 import com.qhana.siku.ui.components.ComponentConfig
-import com.qhana.siku.ui.components.rowArtSharedKey
-import com.qhana.siku.ui.components.EqualizerSheet
 import com.qhana.siku.ui.components.MiniPlayer
-import com.qhana.siku.ui.components.miniPlayerExpandDrag
 import com.qhana.siku.ui.components.SaveLyricsDialog
+import com.qhana.siku.ui.components.miniPlayerExpandDrag
 import com.qhana.siku.ui.navigation.Screen
-import com.qhana.siku.ui.screens.AmbientPlayerActivity
-import com.qhana.siku.ui.screens.NavigationActions
-import com.qhana.siku.ui.screens.NowPlayingScreen
-import com.qhana.siku.ui.screens.PlayerActions
-import com.qhana.siku.ui.theme.SCREEN_TRANSFORM_MS
-import com.qhana.siku.ui.theme.ScreenSlideEasing
-import com.qhana.siku.ui.theme.appSheetEnter
-import com.qhana.siku.ui.theme.appSheetExit
+import com.qhana.siku.ui.theme.appFadeEnter
+import com.qhana.siku.ui.theme.appFadeExit
 import com.qhana.siku.ui.viewmodel.LibraryViewModel
 import com.qhana.siku.ui.viewmodel.PlaybackViewModel
 
 /**
- * Capa de reproductor ÚNICA sobre el NavHost (pill ↔ player), más el FAB contextual y las
- * hojas/diálogos que dispara. Una sola instancia compartida entre home y detalles: al navegar
- * no se recrea (marquee, progreso y animaciones continúan). Expandida, es el NowPlaying a
- * pantalla completa: son DOS CAPAS hermanas —píldora abajo, player encima— y el player entra
- * deslizando mientras la carátula morfa entre ambas como shared element; el NavHost de abajo
- * nunca se entera.
+ * Capa flotante sobre el NavHost: el **`AnimatedContent` píldora ↔ reproductor** más las
+ * hojas/diálogos GLOBALES que sobreviven a la navegación.
  *
- * Receptor [BoxScope]: se monta en el Box raíz, alineada abajo.
+ * **El reproductor a pantalla completa VIVE aquí** (rama Expanded del `AnimatedContent`, contenido en
+ * [NowPlayingLayer]). El motivo es el *container transform*: la barra crece hasta ser el player. Ese
+ * morph exige que sus DOS puntas (píldora y player) vivan en el MISMO `AnimatedContentScope`; cuando
+ * el player era una ruta del NavHost cada punta estaba en un dueño de transición distinto y el
+ * `sharedBounds` no cruzaba (se leía como slide). El estado lo gobierna [MusicAppState.playerExpanded]
+ * (booleano), no la ruta.
+ *
+ * El `AnimatedContent` tiene TRES estados ([PlayerLayerState]): **Expanded** (player a pantalla
+ * completa), **Collapsed** (píldora) y **Hidden** (nada, en rutas sin reproducción o sin canción).
+ * Collapsed↔Expanded es el container transform (lo pinta el `sharedBounds` `PLAYER_CONTAINER_SHARED_KEY`
+ * que declaran el Card de la píldora y la raíz del player); Hidden↔Collapsed es un fundido de la
+ * píldora al cambiar de ruta.
+ *
+ * También aquí, en un nivel estable:
+ *  - Los **diálogos de guardar letra** + su `ActivityResultLauncher` (el permiso del sistema no puede
+ *    colgar de una capa que se desmonta a mitad) y el consentimiento de escritura en nube.
+ *  - La hoja **"añadir canciones"** del detalle de playlist/Favoritos.
+ *
+ * Receptor [BoxScope]: se monta en el Box raíz, sobre el NavHost.
  */
+/**
+ * z de la rama que ENTRA en el container transform de la capa, por encima de la que sale (que queda a
+ * 0, el default). Lo pide la propia API: `KeepUntilTransitionsFinished` retiene la rama saliente y, si
+ * el sentido se invierte a mitad (abrir y cerrar seguido, la rama reutilizada), sin z explícita la
+ * saliente puede pintarse ENCIMA de la entrante. Ordinal, no medida: solo importa que sea mayor que 0.
+ */
+private const val CONTAINER_TARGET_BRANCH_Z = 1f
+
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun BoxScope.PlayerOverlay(
     appState: MusicAppState,
+    /**
+     * Transición de la capa (Hidden/Collapsed/Expanded), creada por `MusicPlayerScreen` con
+     * `updateTransition`. Se recibe hecha porque de ella se deriva también el origen congelado del
+     * morph ([morphOrigin]), que consumen las filas del NavHost — hermanas de esta capa, no hijas.
+     */
+    layerTransition: Transition<PlayerLayerState>,
+    /**
+     * De dónde sale / a dónde vuelve el reproductor, CONGELADO mientras [layerTransition] corre. Es la
+     * ÚNICA fuente para las keys de los shared elements de la capa y para los gates que dependen del
+     * origen; `appState.playerArtOrigin` es la petición y no se lee aquí — ver [rememberPlayerMorphOrigin].
+     */
+    morphOrigin: PlayerMorphOrigin,
+    /**
+     * Paleta de lo que queda DEBAJO del reproductor, retenida mientras [layerTransition] corre (ver
+     * [rememberUnderlayColorScheme]). La PÍLDORA se pinta con ella: al abrir desde una fila con otra
+     * carátula, la barra que se está desvaneciendo no debe cambiar de color a mitad del fundido —
+     * pertenece al mismo mundo que la biblioteca de detrás, no al player que crece.
+     */
+    underlayScheme: ColorScheme,
     playbackViewModel: PlaybackViewModel,
     libraryViewModel: LibraryViewModel,
     snackbarManager: SnackbarManager,
     sharedTransitionScope: SharedTransitionScope
 ) {
-    val context = LocalContext.current
-
     val currentSong by playbackViewModel.currentSong.collectAsStateWithLifecycle()
     val playbackState by playbackViewModel.playbackState.collectAsStateWithLifecycle()
     val nowPlayingUiState by playbackViewModel.nowPlayingUiState.collectAsStateWithLifecycle()
-    val keepScreenOn by playbackViewModel.keepScreenOn.collectAsStateWithLifecycle()
-    val nowPlayingSolidBackground by playbackViewModel.nowPlayingSolidBackground.collectAsStateWithLifecycle()
-    val nowPlayingWavyProgress by playbackViewModel.nowPlayingWavyProgress.collectAsStateWithLifecycle()
-    val nowPlayingDetailedFormat by playbackViewModel.nowPlayingDetailedFormat.collectAsStateWithLifecycle()
     val playerGestures by playbackViewModel.playerGestures.collectAsStateWithLifecycle()
     val miniPlayerRoundedRect by playbackViewModel.miniPlayerRoundedRect.collectAsStateWithLifecycle()
     val lyricsSaveState by playbackViewModel.lyricsSaveState.collectAsStateWithLifecycle()
@@ -105,34 +125,18 @@ fun BoxScope.PlayerOverlay(
     val onFavoritesRoute = currentRoute == Screen.Favorites.route
     // Rutas de lista donde aplica la hoja de "añadir canciones" (botón en el detalle).
     val onAddSongsRoute = onPlaylistDetailRoute || onFavoritesRoute
-    val miniPlayerVisible = when (currentRoute) {
-        // Rutas con capa flotante habilitada; la píldora se cae sola si no hay canción
-        // (el viejo FAB de "añadir canciones" ya no existe: es un botón del detalle).
-        Screen.Library.route, Screen.PlaylistDetail.route, Screen.Favorites.route -> true
-        Screen.ArtistDetail.route, Screen.AlbumDetail.route, Screen.GenreDetail.route -> currentSong != null
-        else -> false
-    }
+
 
     // Si la ruta deja de ser un detalle de lista (back, navegación), la hoja muere con ella.
     LaunchedEffect(onAddSongsRoute) {
         if (!onAddSongsRoute) appState.showAddSongsSheet = false
     }
-    // Atrás cierra el player (se compone DESPUÉS del NavHost para tener prioridad).
-    BackHandler(enabled = appState.playerExpanded) { appState.collapsePlayer() }
-    // Si la ruta actual no muestra reproductor (settings, onboarding…), colapsar. La guarda
-    // `currentRoute != null` es CLAVE: al rotar, currentBackStackEntryAsState emite null un
-    // instante mientras el NavController se restaura → miniPlayerVisible caía a false (rama
-    // else) y este efecto cerraba el NowPlaying restaurado, tirándote al home. Con ruta nula
-    // (transición) no se toca nada; se decide solo cuando hay una ruta real sin reproductor.
-    LaunchedEffect(miniPlayerVisible, currentRoute) {
-        if (currentRoute != null && !miniPlayerVisible) appState.collapsePlayer()
-    }
 
     // --- Guardar la letra en el archivo -------------------------------------------------------
     //
-    // Los tres pasos posibles viven aquí, fuera de la capa del player: si colgaran del
-    // NowPlaying expandido, cerrar el reproductor a mitad del permiso mataría el diálogo y el
-    // guardado quedaría a medias sin que nadie lo cancelara.
+    // Vive aquí, en un nivel estable, y NO dentro de [NowPlayingLayer]: si colgara de la rama Expanded
+    // del `AnimatedContent`, colapsar el reproductor a mitad del permiso del sistema desmontaría el
+    // launcher y el guardado quedaría a medias sin que nadie lo cancelara.
 
     // MediaStore en API 30+: solo la Activity puede lanzar el IntentSender del sistema.
     val systemWriteLauncher = rememberLauncherForActivityResult(
@@ -178,356 +182,142 @@ fun BoxScope.PlayerOverlay(
         )
     }
 
-    // Hoja del ECUALIZADOR PROPIO (5/10 bandas + float): el botón de la barra del NowPlaying
-    // la abre — salvo que en Ajustes se prefiera el EQ del sistema, en cuyo caso el botón
-    // lanza el panel del sistema directamente.
-    var showEqualizerSheet by remember { mutableStateOf(false) }
-    val useSystemEq by playbackViewModel.useSystemEq.collectAsStateWithLifecycle()
-
-    // Ecualizador del sistema (MIUI primero, panel estándar como fallback). El feedback de
-    // fallo va por TOAST, no por el SnackbarManager: se invoca también desde el botón dentro
-    // de EqualizerSheet (ModalBottomSheet = ventana propia encima de la de MainActivity) y
-    // el snackbar del host central quedaría tapado por la hoja; el Toast flota sobre todo.
-    val openSystemEqualizer: () -> Unit = remember {
-        {
-            try {
-                val xiaomiIntent = Intent().apply {
-                    setClassName("com.miui.misound", "com.miui.misound.HeadsetSettingsActivity")
-                }
-                if (xiaomiIntent.resolveActivity(context.packageManager) != null) {
-                    context.startActivity(xiaomiIntent)
-                } else {
-                    val intent = Intent(AudioEffect.ACTION_DISPLAY_AUDIO_EFFECT_CONTROL_PANEL).apply {
-                        putExtra(AudioEffect.EXTRA_AUDIO_SESSION, playbackViewModel.getAudioSessionId())
-                        putExtra(AudioEffect.EXTRA_PACKAGE_NAME, context.packageName)
-                        putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)
-                    }
-                    if (intent.resolveActivity(context.packageManager) != null) {
-                        context.startActivity(intent)
-                    } else {
-                        Toast.makeText(context, R.string.eq_none_available, Toast.LENGTH_SHORT).show()
-                    }
-                }
-            } catch (e: Exception) {
-                Toast.makeText(context, R.string.eq_open_error, Toast.LENGTH_SHORT).show()
+    // --- La CAPA del reproductor: AnimatedContent píldora ↔ player -----------------------------
+    //
+    // Un SOLO `AnimatedContent` con las dos puntas del container transform: eso es lo que las hace
+    // COEXISTIR en el mismo `AnimatedContentScope` y hace NATIVO el morph (ver el KDoc de la función).
+    // Collapsed↔Expanded lo pinta el `sharedBounds` de contenedor (Card de la píldora + raíz del
+    // player); la rama saliente vive lo que el bounds tarda en asentar (`KeepUntilTransitionsFinished`,
+    // ver el `transitionSpec`: sin ella la rama moriría en el acto y el shared element no tendría
+    // punta; con un fade a pantalla completa costaba un `saveLayer` por frame), y la píldora se funde
+    // en Hidden↔Collapsed con `appFadeEnter/Exit`. Las áreas VACÍAS de la capa no llevan `pointerInput`
+    // ni fondo, así que los toques pasan al NavHost de abajo (solo la píldora y el player expandido
+    // interceptan).
+    //
+    // La `Transition` la POSEE `MusicPlayerScreen` (`updateTransition` sobre el estado de la capa) y
+    // aquí solo se recorre: es la misma de la que se deriva el origen CONGELADO del morph, así que
+    // "qué fila se oculta", "con qué key declara el player" y "qué rama entra/sale" salen de un único
+    // estado, en el mismo frame.
+    layerTransition.AnimatedContent(
+        transitionSpec = {
+            // Collapsed↔Expanded = container transform: el que ENTRA es SÓLIDO (la superficie del
+            // player nunca se ve transparente, solo crece), el que SALE se disuelve encima y vive
+            // hasta que el bounds asienta. Hidden↔Collapsed = fundido normal de la píldora al cambiar
+            // de ruta.
+            //
+            // **Con la condición del ORIGEN**: el `EnterTransition.None` solo es correcto cuando hay una
+            // superficie de la que crecer (píldora o fila). Abriendo desde un chip del inicio o desde
+            // la notificación no hay ninguna, así que el player aparecía DE GOLPE — sin morph y sin
+            // fundido, que es el único caso en que "sólido" no significa nada.
+            val hasOriginSurface = morphOrigin.kind != PlayerArtOrigin.NONE
+            val containerMorph = hasOriginSurface && (
+                (initialState == PlayerLayerState.Collapsed && targetState == PlayerLayerState.Expanded) ||
+                (initialState == PlayerLayerState.Expanded && targetState == PlayerLayerState.Collapsed)
+            )
+            // La rama saliente NO se funde: `KeepUntilTransitionsFinished` la mantiene viva hasta que
+            // TODAS las transiciones del AnimatedContent terminan —el bounds del `sharedBounds`
+            // incluido—, o sea exactamente lo que dura el morph, por construcción y sin ninguna
+            // duración elegida a mano. Antes era un `fadeOut` de la rama, y eso costaba caro donde no
+            // se veía: la rama es una Box a pantalla completa, y un alfa sobre ella obliga a HWUI a un
+            // `saveLayer` offscreen de la pantalla ENTERA en cada frame del morph (medido con atrace:
+            // "alpha caused saveLayer 1080x2400" en cada frame del cierre) — el RenderThread pasaba de
+            // 2-3 a 5-8 ms/frame y el scroll que arrancaba en esa cola perdía frames. Lo que SÍ se funde
+            // es el CONTENIDO de la superficie que morfa (`appContainerContentExit*`), que es lo que se
+            // ve. Ver el KDoc de la función sobre `targetContentZIndex`.
+            JankProbe.note { "AnimatedContent spec: $initialState→$targetState morph=$containerMorph origen=${morphOrigin.kind}" }
+            if (containerMorph) {
+                (EnterTransition.None togetherWith ExitTransition.KeepUntilTransitionsFinished)
+                    .apply { targetContentZIndex = CONTAINER_TARGET_BRANCH_Z }
+            } else appFadeEnter() togetherWith appFadeExit()
+        },
+        modifier = Modifier.fillMaxSize()
+    ) { state ->
+        // El scope de ESTE AnimatedContent es el `animatedVisibilityScope` de las dos puntas del
+        // shared element; se captura antes de entrar en Box/Column (que lo sombrearían con su receptor).
+        val layerScope = this
+        // Sonda: vida de cada rama del AnimatedContent (compuesta/descompuesta) y su transición.
+        DisposableEffect(state) {
+            JankProbe.note { "rama $state COMPUESTA" }
+            onDispose { JankProbe.note { "rama $state DESCOMPUESTA" } }
+        }
+        SideEffect {
+            JankProbe.note {
+                "rama $state: ${layerScope.transition.currentState}→${layerScope.transition.targetState}"
             }
         }
-    }
+        when (state) {
+            PlayerLayerState.Expanded -> Box(Modifier.fillMaxSize()) {
+                // (Aquí hubo, del 16 al 17 ago, la punta player de un shared element solo-sombra con
+                // `RemeasureToBounds`. La sombra de la píldora ya no viaja — ver `pillShadow` en
+                // MiniPlayer.kt: al arrancar el cierre pintaba un blur de pantalla entera por frame.)
+                NowPlayingLayer(
+                    appState = appState,
+                    morphOrigin = morphOrigin,
+                    playbackViewModel = playbackViewModel,
+                    libraryViewModel = libraryViewModel,
+                    snackbarManager = snackbarManager,
+                    sharedTransitionScope = sharedTransitionScope,
+                    animatedVisibilityScope = layerScope,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
 
-    // Player y píldora son DOS CAPAS HERMANAS del Box raíz, no dos ramas de un `AnimatedContent`.
-    // Ese es el punto de todo el bloque: el orden de dibujo lo fija la ESTRUCTURA (la píldora se
-    // declara primero, el player después, así que el player está encima por construcción) y no
-    // una negociación de la transición. Con `AnimatedContent` el z-order salía del
-    // `targetContentZIndex` del contenido que ENTRA, de modo que al cerrar la píldora se pintaba
-    // por delante del player que todavía bajaba y se materializaba SOBRE él —el bug— y cualquier
-    // arreglo por ahí seguía siendo negociado: bastaba interrumpir una apertura para que los
-    // índices empataran y volviera a ganar el entrante.
-    //
-    // La píldora no se anima a sí misma en esta transición: el player la TAPA al subir y la
-    // DESTAPA al bajar. Lo único que hace su `AnimatedVisibility` interno es decidir cuándo está
-    // MONTADA, y eso importa por dos motivos que no son estéticos: montada bajo el player seguiría
-    // recibiendo toques en las zonas donde el reproductor no consume ninguno, y seguiría existiendo
-    // para TalkBack detrás de una pantalla completa.
-    val playerVisible = appState.playerExpanded && currentSong != null
-
-    // --- Capa 1: la PÍLDORA -------------------------------------------------------------------
-    //
-    // Dos `AnimatedVisibility` anidados porque son dos preguntas distintas: el de fuera es
-    // "¿esta ruta tiene reproductor?" (entra y sale deslizando al navegar) y el de dentro es
-    // "¿está el player encima?".
-    AnimatedVisibility(
-        visible = miniPlayerVisible,
-        // Specs del MotionScheme y no los defaults de `AnimatedVisibility`: esos son springs de
-        // compose-animation (`StiffnessMediumLow`), ajenos al tema.
-        enter = appSheetEnter(),
-        exit = appSheetExit(),
-        modifier = Modifier.align(Alignment.BottomCenter)
-    ) {
-        AnimatedVisibility(
-            // Aparece ENTERA y de inmediato: al cerrar ya está en su sitio detrás del player,
-            // que la va descubriendo conforme baja.
-            enter = EnterTransition.None,
-            // Al abrir se queda quieta y opaca hasta que el slide terminó de taparla, y recién
-            // ahí se desmonta (`snap` DIFERIDO, no un fade). Desmontarla antes dejaría su franja
-            // vacía los frames que el player tarda en llegar hasta ella.
-            exit = fadeOut(snap(delayMillis = PLAYER_SLIDE_MS)),
-            visible = !playerVisible
-        ) {
-            // Scope de ESTA capa: es el que empareja la carátula del mini con la del player como
-            // shared element. Antes ambos lados colgaban del scope único del `AnimatedContent`;
-            // ahora cada capa aporta el suyo, que es el patrón normal entre destinos de un
-            // NavHost. Se nombra porque hay dos `AnimatedVisibility` anidados y `this@…` sería
-            // ambiguo de leer.
-            val miniScope = this
-
-            // Capa flotante del bottom: solo el MiniPlayer a TODO EL ANCHO (ya no hay FAB
-            // encima). Sin padding lateral en el Column: el MiniPlayer recibe su margen
-            // explícito, alineando al borde sin offsets.
-            Column(
-                horizontalAlignment = Alignment.End,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .padding(top = 10.dp, bottom = ComponentConfig.FloatingBarBottomMargin)
-            ) {
-                // Ya NO hay FAB flotante: "crear lista" es un botón sobre Favoritos
-                // (PlaylistList) y "añadir canciones" es un botón redondo junto al aleatorio
-                // en el detalle (DetailPlayButtons). La capa flotante es solo el MiniPlayer.
-
-                // MiniPlayer a todo el ancho.
-                //
-                // La VISIBILIDAD la decide `currentSong`: solo es null sin sesión (arranque
-                // antes del restore) o tras stop(), y en ambos casos la píldora NO debe
-                // mostrarse (retenerla dejaba una píldora fantasma tras logout).
-                //
-                // Los DATOS salen de `nowPlayingUiState.song`, que es la fila de Room y no el
-                // objeto que el reproductor cargó al empezar a sonar. `currentSong` se queda
-                // congelado en lo que había entonces, así que todo lo que la BD escriba después
-                // sobre el tema en curso —carátula reparada, colores, letras, la descarga que
-                // termina— lo veía el NowPlaying y no el mini. Se compara el id para no pintar
-                // los datos del tema anterior en el instante en que cambia la canción.
+            // La píldora va bajo la paleta RETENIDA, igual que el NavHost: pertenece al mundo de
+            // debajo del reproductor (ver el KDoc de `underlayScheme`).
+            PlayerLayerState.Collapsed -> MaterialTheme(colorScheme = underlayScheme) { Box(Modifier.fillMaxSize()) {
+                // La VISIBILIDAD la decide `currentSong` (solo null sin sesión o tras stop()). Los DATOS
+                // salen de `nowPlayingUiState.song` (fila de Room, con carátula/colores/letras/descarga
+                // al día), cayendo a `currentSong` mientras el id no coincide (instante del cambio).
                 val song = currentSong?.let { current ->
                     nowPlayingUiState.song?.takeIf { it.id == current.id } ?: current
                 }
                 if (song != null) {
-                    MiniPlayer(
-                        song = song,
-                        isPlaying = playbackState == PlaybackState.PLAYING,
-                        isBuffering = playbackState == PlaybackState.BUFFERING,
-                        roundedRect = miniPlayerRoundedRect,
-                        onPlayPause = { playbackViewModel.playPause() },
-                        onNextClick = { playbackViewModel.next() },
-                        // `fromPill`: es la ÚNICA apertura en la que la carátula ya está en
-                        // pantalla y puede viajar de aquí al reproductor (ver playerOpenedFromPill).
-                        onClick = { appState.openPlayer(PlayerArtOrigin.PILL) },
-                        // Como FLOWS, no como valor: el tick de posición repinta el relleno de
-                        // progreso sin recomponer el mini (ver el kdoc del parámetro).
-                        currentPositionFlow = playbackViewModel.currentPosition,
-                        durationFlow = playbackViewModel.duration,
-                        // SIEMPRE, no solo cuando el origen es la píldora: una punta solo sirve de
-                        // ORIGEN si ya estaba compuesta y MEDIDA antes del gesto, y gatearla por el
-                        // origen la registraba en el mismo frame del tap — sin bounds, sin match.
-                        // Era el bug del arranque en frío (la primera apertura desde la píldora no
-                        // morfaba y las siguientes sí, porque para entonces ya había quedado
-                        // declarada). Su key es única (ver ALBUM_ART_SHARED_KEY), así que mientras
-                        // el reproductor no la pida, la píldora es un shared element solitario e
-                        // inofensivo.
-                        sharedTransitionScope = sharedTransitionScope,
-                        animatedVisibilityScope = miniScope,
-                        // Margen lateral del spec (el Column ya no lo aplica).
+                    Column(
+                        horizontalAlignment = Alignment.End,
                         modifier = Modifier
+                            .align(Alignment.BottomCenter)
                             .fillMaxWidth()
-                            .padding(horizontal = ComponentConfig.FloatingBarSideMargin)
-                            // Deslizar hacia arriba abre el reproductor: es el gesto inverso
-                            // al de cerrarlo, y sin él la píldora solo respondía al tap.
-                            .miniPlayerExpandDrag(playerGestures) {
-                                appState.openPlayer(PlayerArtOrigin.PILL)
-                            }
-                    )
-                }
-            }
-        }
-    }
-
-    // --- Capa 2: el PLAYER --------------------------------------------------------------------
-    //
-    // Declarado DESPUÉS de la píldora = dibujado encima, siempre. Ocupa la pantalla entera y
-    // sube/baja deslizando; la carátula morfa como shared element en paralelo.
-    AnimatedVisibility(
-        visible = playerVisible,
-        enter = slideInVertically(tween(PLAYER_SLIDE_MS, easing = ScreenSlideEasing)) { it },
-        exit = slideOutVertically(tween(PLAYER_SLIDE_MS, easing = ScreenSlideEasing)) { it },
-        modifier = Modifier.fillMaxSize()
-    ) {
-        val playerScope = this
-        val isDarkTheme = isSystemInDarkTheme()
-        // A qué punta se engancha la carátula del reproductor. NO es una preferencia estética: la
-        // píldora y las filas usan familias de key DISTINTAS a propósito (la píldora una constante,
-        // cada fila la suya con el id), porque las dos tienen que estar declaradas de ANTES para
-        // poder servir de origen y a la vez no pisarse. Elegir key aquí es lo que decide cuál de
-        // las dos recibe la portada.
-        val artSharedKey: Any? = when (appState.playerArtOrigin) {
-            PlayerArtOrigin.PILL -> ALBUM_ART_SHARED_KEY
-            PlayerArtOrigin.ROW -> currentSong?.id?.let { rowArtSharedKey(it) }
-            PlayerArtOrigin.NONE -> null
-        }
-        // Memoizamos las acciones: si se construyen inline, cada recomposición
-        // (posición cada 1s, lyrics, descargas…) crea lambdas nuevas →
-        // NowPlayingScreen se recompone entero.
-        val playerActions = remember(playbackViewModel, libraryViewModel, context, currentSong?.id, useSystemEq) {
-            PlayerActions(
-                onPlayPause = { playbackViewModel.playPause() },
-                onNext = { playbackViewModel.next() },
-                onPrevious = { playbackViewModel.previous() },
-                onSeek = { playbackViewModel.seekTo(it) },
-                onSeekBy = { playbackViewModel.seekBy(it) },
-                onShuffleToggle = { playbackViewModel.toggleShuffle() },
-                onRepeatToggle = { playbackViewModel.toggleRepeatMode() },
-                onSkipToIndex = { playbackViewModel.skipToIndex(it) },
-                onReorder = { from, to -> playbackViewModel.reorderQueue(from, to) },
-                onRemoveFromQueue = { playbackViewModel.removeFromQueue(it) },
-                onSaveQueueAsPlaylist = { playbackViewModel.saveQueueAsPlaylist(it) },
-                onToggleFavorite = { currentSong?.let { libraryViewModel.toggleFavorite(it.id) } },
-                onToggleDownload = { playbackViewModel.toggleDownload() },
-                onToggleKeepScreenOn = { playbackViewModel.toggleKeepScreenOn() },
-                onOpenEqualizer = {
-                    if (useSystemEq) openSystemEqualizer() else showEqualizerSheet = true
-                },
-                onFetchLyrics = { force -> playbackViewModel.fetchLyrics(force) },
-                onSearchLyricsManually = { playbackViewModel.searchLyricsCandidates() },
-                onSaveLyrics = { playbackViewModel.requestSaveLyrics() },
-                onSelectLyricsCandidate = { candidate ->
-                    playbackViewModel.selectLyricsFromCandidate(candidate)
-                    snackbarManager.show(context.getString(R.string.lyrics_refresh_updated))
-                },
-                onDismissLyricsSearch = { playbackViewModel.dismissLyricsSearch() },
-                onUpdatePosition = { playbackViewModel.updatePosition() },
-                onAddToPlaylist = { playlistId, songId -> libraryViewModel.addSongToPlaylist(playlistId, songId) },
-                // El diálogo de crear lista del NowPlaying solo se abre desde la hoja
-                // "agregar a lista" de la canción en curso: la lista nueva nace con ella
-                // (antes se creaba vacía y la canción se perdía).
-                onCreatePlaylist = { name ->
-                    libraryViewModel.createPlaylist(name) { id ->
-                        currentSong?.id?.let { songId -> libraryViewModel.addSongToPlaylist(id, songId) }
+                            .navigationBarsPadding()
+                            .padding(top = 10.dp, bottom = ComponentConfig.FloatingBarBottomMargin)
+                    ) {
+                        MiniPlayer(
+                            song = song,
+                            isPlaying = playbackState == PlaybackState.PLAYING,
+                            isBuffering = playbackState == PlaybackState.BUFFERING,
+                            roundedRect = miniPlayerRoundedRect,
+                            onPlayPause = { playbackViewModel.playPause() },
+                            onNextClick = { playbackViewModel.next() },
+                            // La carátula ya está en pantalla y viaja al player (container transform).
+                            onClick = { appState.openPlayer(PlayerArtOrigin.PILL) },
+                            // Como FLOWS: el tick de posición repinta el progreso sin recomponer el mini.
+                            currentPositionFlow = playbackViewModel.currentPosition,
+                            durationFlow = playbackViewModel.duration,
+                            // Solo con origen PÍLDORA hay alguien esperando la portada al otro lado; ver
+                            // el KDoc del parámetro. Desde una fila o un chip el mini se limita a
+                            // desvanecerse con la suya puesta.
+                            artTravelsToPlayer = morphOrigin.kind == PlayerArtOrigin.PILL,
+                            sharedTransitionScope = sharedTransitionScope,
+                            animatedVisibilityScope = layerScope,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = ComponentConfig.FloatingBarSideMargin)
+                                // Deslizar hacia arriba abre el reproductor (gesto inverso al de cerrar).
+                                .miniPlayerExpandDrag(playerGestures) {
+                                    appState.openPlayer(PlayerArtOrigin.PILL)
+                                }
+                        )
                     }
-                },
-                onStartSleepTimer = { minutes, finishSong -> playbackViewModel.startSleepTimer(minutes, finishSong) },
-                onCancelSleepTimer = { playbackViewModel.cancelSleepTimer() }
-            )
-        }
-        val navigationActions = remember(playbackViewModel, appState, context, isDarkTheme) {
-            NavigationActions(
-                onBackClick = { appState.collapsePlayer() },
-                onLaunchAmbientMode = { timeout ->
-                    context.startActivity(Intent(context, AmbientPlayerActivity::class.java).apply {
-                        putExtra(AmbientPlayerActivity.EXTRA_TIMEOUT_MINUTES, timeout)
-                    })
-                },
-                onShowDebugInfo = { playbackViewModel.showDebugInfo(isDarkTheme) },
-                onClearDebugInfo = { playbackViewModel.clearDebugInfo() },
-                onSelectColor = { color -> playbackViewModel.overrideSongColor(color, isDarkTheme) },
-                onArtistClick = { name ->
-                    appState.collapsePlayer()
-                    appState.navigateToArtist(name)
-                },
-                onAlbumClick = { name ->
-                    appState.collapsePlayer()
-                    appState.navigateToAlbum(name)
                 }
-            )
+            } }
+
+            // Sin píldora ni player: un Box vacío sin fondo → deja pasar los toques al NavHost.
+            PlayerLayerState.Hidden -> Box(Modifier.fillMaxSize())
         }
-        // Las filas de canción que viven DENTRO del reproductor (la hoja de la cola) no deben
-        // declarar el shared element de su carátula: usarían la misma key por-canción que la fila
-        // de la lista de atrás y que el propio reproductor, y de las puntas de una key solo UNA
-        // puede ser destino. Anular el scope AQUÍ las desactiva todas de una vez; el NowPlaying no
-        // se ve afectado porque recibe el suyo por PARÁMETRO, no por este local.
-        CompositionLocalProvider(LocalAppSharedTransitionScope provides null) {
-        NowPlayingScreen(
-            // La carátula del reproductor se engancha a la punta que corresponda ELIGIENDO SU KEY
-            // (ver [artSharedKey]); sin origen no declara shared element y sube con el contenido.
-            //
-            // OJO: se anula el `sharedTransitionScope`, NO el `animatedVisibilityScope`. Ese
-            // segundo alimenta además los gates de "player ya asentado" (reveal de cambio de
-            // canción y blur del vidrio); pasarlo null los daría por asentados en pleno slide.
-            sharedTransitionScope = sharedTransitionScope.takeIf { artSharedKey != null },
-            artSharedKey = artSharedKey,
-            animatedVisibilityScope = playerScope,
-            uiState = nowPlayingUiState,
-            playbackState = playbackState,
-            currentPositionFlow = playbackViewModel.currentPosition,
-            durationFlow = playbackViewModel.duration,
-            bufferedPositionFlow = playbackViewModel.bufferedPosition,
-            isShuffleEnabled = playbackViewModel.isShuffleEnabled.collectAsStateWithLifecycle().value,
-            repeatMode = playbackViewModel.repeatMode.collectAsStateWithLifecycle().value,
-            playlist = playbackViewModel.playlist.collectAsStateWithLifecycle().value,
-            currentIndex = playbackViewModel.currentIndex.collectAsStateWithLifecycle().value,
-            isFavorite = currentSong?.let { it.id in favorites } ?: false,
-            keepScreenOn = keepScreenOn,
-            solidBackground = nowPlayingSolidBackground,
-            wavyProgress = nowPlayingWavyProgress,
-            detailedFormat = nowPlayingDetailedFormat,
-            onToggleDetailedFormat = playbackViewModel::toggleDetailedFormat,
-            gesturesEnabled = playerGestures,
-            playlists = libraryUiState.playlists,
-            sleepTimer = playbackViewModel.sleepTimer.collectAsStateWithLifecycle().value,
-            eqEnabled = playbackViewModel.eqEnabled.collectAsStateWithLifecycle().value,
-            isSavingLyrics = lyricsSaveState.isSaving,
-            playerActions = playerActions,
-            navigationActions = navigationActions,
-            toolbarConfig = playbackViewModel.toolbarConfig.collectAsStateWithLifecycle().value,
-            modifier = Modifier.fillMaxSize()
-        )
-        } // CompositionLocalProvider(LocalAppSharedTransitionScope provides null)
     }
 
-    // Ecualizador: overlay FULL-SCREEN (ya no es ModalBottomSheet) que slide desde abajo, mismo
-    // patrón que lyrics/cola. Vive FUERA de la capa del player para sobrevivir a su colapso.
-    // BackHandler para el back del sistema (el header también tiene su flecha).
-    androidx.activity.compose.BackHandler(enabled = showEqualizerSheet) { showEqualizerSheet = false }
-    AnimatedVisibility(
-        visible = showEqualizerSheet,
-        enter = appSheetEnter(),
-        exit = appSheetExit()
-    ) {
-        EqualizerSheet(
-            enabled = playbackViewModel.eqEnabled.collectAsStateWithLifecycle().value,
-            bandCount = playbackViewModel.eqBandCount.collectAsStateWithLifecycle().value,
-            gains = playbackViewModel.eqGains.collectAsStateWithLifecycle().value,
-            bassBoost = playbackViewModel.eqBassBoost.collectAsStateWithLifecycle().value,
-            trebleBoost = playbackViewModel.eqTrebleBoost.collectAsStateWithLifecycle().value,
-            bassFreq = playbackViewModel.eqBassFreq.collectAsStateWithLifecycle().value,
-            trebleFreq = playbackViewModel.eqTrebleFreq.collectAsStateWithLifecycle().value,
-            headroomDb = playbackViewModel.eqHeadroomDb.collectAsStateWithLifecycle().value,
-            preamp = playbackViewModel.eqPreamp.collectAsStateWithLifecycle().value,
-            suggestedPreampDb = playbackViewModel.eqSuggestedPreampDb.collectAsStateWithLifecycle().value,
-            limiterEnabled = playbackViewModel.eqLimiterEnabled.collectAsStateWithLifecycle().value,
-            // El EFECTIVO (en automático lo calcula el ViewModel a partir del pico de la curva),
-            // no el manual: es el que el limitador está usando de verdad.
-            limiterThresholdDb = playbackViewModel.eqLimiterThresholdDb.collectAsStateWithLifecycle().value,
-            limiterThresholdAuto = playbackViewModel.eqLimiterThresholdAuto.collectAsStateWithLifecycle().value,
-            // Flow FRÍO muestreado: solo corre mientras esta hoja está compuesta, que es
-            // justamente cuando el medidor se ve.
-            gainReductionDb = playbackViewModel.eqGainReductionDb
-                .collectAsStateWithLifecycle(initialValue = 0f).value,
-            audioRoute = playbackViewModel.audioRoute.collectAsStateWithLifecycle().value,
-            customPresets = playbackViewModel.customEqPresets.collectAsStateWithLifecycle().value,
-            hiddenPresets = playbackViewModel.hiddenEqPresets.collectAsStateWithLifecycle().value,
-            routeProfilesEnabled =
-                playbackViewModel.eqRouteProfilesEnabled.collectAsStateWithLifecycle().value,
-            conflictWarningSuppressed = playbackViewModel.eqConflictWarningSuppressed.collectAsStateWithLifecycle().value,
-            onSuppressConflictWarning = { playbackViewModel.suppressEqConflictWarning() },
-            onEnabledChange = { playbackViewModel.setEqEnabled(it) },
-            onBandCountChange = { playbackViewModel.setEqBandCount(it) },
-            onApplyPreset = { playbackViewModel.setEqGains(it) },
-            onApplyCustomPreset = { playbackViewModel.applyCustomEqPreset(it) },
-            onSaveCurrentAsPreset = { playbackViewModel.saveCurrentAsEqPreset(it) },
-            onDeleteCustomPreset = { playbackViewModel.deleteEqPreset(it) },
-            onBandChange = { band, db -> playbackViewModel.setEqBand(band, db) },
-            onBandChangeFinished = { playbackViewModel.commitEqGains() },
-            onBassBoostChange = { playbackViewModel.setEqBassBoost(it) },
-            onTrebleBoostChange = { playbackViewModel.setEqTrebleBoost(it) },
-            onBassFreqChange = { playbackViewModel.setEqBassFreq(it) },
-            onTrebleFreqChange = { playbackViewModel.setEqTrebleFreq(it) },
-            onBoostChangeFinished = { playbackViewModel.commitEqBoosts() },
-            onPreampChange = { playbackViewModel.setEqPreamp(it) },
-            onPreampChangeFinished = { playbackViewModel.commitEqPreamp() },
-            onLimiterEnabledChange = { playbackViewModel.setEqLimiterEnabled(it) },
-            onLimiterThresholdChange = { playbackViewModel.setEqLimiterThreshold(it) },
-            onLimiterThresholdChangeFinished = { playbackViewModel.commitEqLimiterThreshold() },
-            onLimiterThresholdAutoChange = { playbackViewModel.setEqLimiterThresholdAuto(it) },
-            onReset = { playbackViewModel.resetEq() },
-            onOpenSystemEq = openSystemEqualizer,
-            onDismiss = { showEqualizerSheet = false }
-        )
-    }
-
-    // --- Hojas/diálogos disparados por el FAB (estado en MusicAppState) ---
-
-    // (El "crear lista" ya no vive en el FAB: es un botón en PlaylistList con su propio
-    // CreatePlaylistDialog vía LibraryScreen.showCreatePlaylistDialog.)
-
-    // Selector "añadir canciones": en una playlist el id/nombre salen de la ruta activa;
-    // en Favoritos el destino es la lista fija.
+    // --- Hoja "añadir canciones" (estado en MusicAppState) ------------------------------------
+    // Vive aquí, y no en la pantalla que la abre, porque su estado tiene que sobrevivir a la
+    // navegación: la dispara un botón del detalle, pero se pinta sobre toda la app.
     val sheetPlaylistId = if (onPlaylistDetailRoute) navBackStackEntry?.arguments
         ?.getString(Screen.PlaylistDetail.ARG_PLAYLIST_ID)?.toLongOrNull() else null
     if (appState.showAddSongsSheet && (sheetPlaylistId != null || onFavoritesRoute)) {
@@ -550,52 +340,27 @@ fun BoxScope.PlayerOverlay(
         // Mismo motivo que en la hoja de la cola: sus filas repetirían la key por-canción de las
         // filas de la lista que hay detrás.
         CompositionLocalProvider(LocalAppSharedTransitionScope provides null) {
-        AddSongsToPlaylistSheet(
-            playlistName = sheetPlaylistName,
-            candidates = candidates,
-            query = pickerQuery,
-            // Con búsqueda activa y cero resultados el mensaje debe ser "ningún
-            // resultado", no "no hay canciones que añadir".
-            hasSongsAvailable = pickerQuery.isNotBlank() || candidates.isNotEmpty(),
-            onQueryChange = { libraryViewModel.setSongPickerQuery(it) },
-            onConfirm = { ids ->
-                if (sheetPlaylistId != null) {
-                    libraryViewModel.addSongsToPlaylist(sheetPlaylistId, ids)
-                } else {
-                    libraryViewModel.addSongsToFavorites(ids)
+            AddSongsToPlaylistSheet(
+                playlistName = sheetPlaylistName,
+                candidates = candidates,
+                query = pickerQuery,
+                // Con búsqueda activa y cero resultados el mensaje debe ser "ningún resultado".
+                hasSongsAvailable = pickerQuery.isNotBlank() || candidates.isNotEmpty(),
+                onQueryChange = { libraryViewModel.setSongPickerQuery(it) },
+                onConfirm = { ids ->
+                    if (sheetPlaylistId != null) {
+                        libraryViewModel.addSongsToPlaylist(sheetPlaylistId, ids)
+                    } else {
+                        libraryViewModel.addSongsToFavorites(ids)
+                    }
+                    libraryViewModel.setSongPickerQuery("")
+                    appState.showAddSongsSheet = false
+                },
+                onDismiss = {
+                    libraryViewModel.setSongPickerQuery("")
+                    appState.showAddSongsSheet = false
                 }
-                libraryViewModel.setSongPickerQuery("")
-                appState.showAddSongsSheet = false
-            },
-            onDismiss = {
-                libraryViewModel.setSongPickerQuery("")
-                appState.showAddSongsSheet = false
-            }
-        )
-        } // CompositionLocalProvider(LocalAppSharedTransitionScope provides null)
+            )
+        }
     }
 }
-
-// --- Coreografía píldora ↔ player (ver las dos capas de PlayerOverlay) ---
-
-/**
- * Recorrido del player al abrir y al cerrar. Va con [SCREEN_TRANSFORM_MS] y [ScreenSlideEasing],
- * o sea el token *default spatial* del motion Expressive (500 ms nominales).
- *
- * **El acople con la carátula es obligatorio y está medido**: la portada viaja como shared element
- * mientras esta capa se desplaza, y si asienta antes que el slide se queda quieta en su posición
- * final mientras el resto del reproductor sigue subiendo por debajo — que es literalmente el
- * "la carátula no sube con el resto del contenido, simplemente aparece" que reportó el usuario.
- * Los dos extremos usan por tanto la misma curva y duración (ver `AppBoundsTransform`).
- *
- * Que 500 ms nominales NO se sientan lentos es cosa de la curva, y es el motivo de que este
- * archivo pasara por 450/`FastOutSlowIn` y por 500/`Emphasized` antes de llegar aquí: el token
- * spatial sobrepasa y asienta, así que despacha el 99,6 % del recorrido en 175 ms. `Emphasized`
- * —la curva del M3 anterior a Expressive— gastaba la mitad del tiempo en el último 13 %, y ESO
- * era lo que se leía como pereza.
- *
- * Sigue siendo un tween y no un spring del `MotionScheme` por la razón mecánica de siempre: la
- * píldora espera exactamente este tiempo antes de desmontarse (`snap(delayMillis = …)`) y un
- * spring no tiene duración nominal que ofrecerle.
- */
-private const val PLAYER_SLIDE_MS = SCREEN_TRANSFORM_MS

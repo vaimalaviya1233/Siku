@@ -38,7 +38,9 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
-import com.qhana.siku.data.model.PlaybackState
+import coil3.request.ImageRequest
+import coil3.request.crossfade
+import androidx.compose.ui.platform.LocalContext
 import com.qhana.siku.data.model.Playlist
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.ui.components.AddToPlaylistBottomSheet
@@ -49,6 +51,7 @@ import com.qhana.siku.ui.components.CreatePlaylistDialog
 import com.qhana.siku.ui.components.DetailPlayButtons
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.SongItem
+import com.qhana.siku.ui.components.SongRowContainer
 import com.qhana.siku.ui.components.SongOverflowButton
 import com.qhana.siku.ui.components.songRowBackground
 import com.qhana.siku.ui.components.TonalChip
@@ -61,6 +64,7 @@ import kotlinx.coroutines.launch
 
 import com.qhana.siku.ui.theme.appEffectsSpec
 import com.qhana.siku.ui.theme.AppBoundsTransform
+import com.qhana.siku.ui.theme.DetailContentTheme
 
 /**
  * Ancho de cada álbum del carrusel. Algo más que los 140dp que llevaba con la tarjeta vieja:
@@ -76,12 +80,15 @@ private val ArtistAlbumCardWidth = 168.dp
  * ([DetailPlayButtons]), carrusel horizontal de álbumes con quick-play y lista de
  * canciones en tarjetas segmentadas con overflow (favoritos / añadir a lista).
  */
-@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
+@OptIn(
+    ExperimentalMaterial3Api::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+    ExperimentalSharedTransitionApi::class
+)
 @Composable
 fun ArtistDetailScreen(
     artistName: String,
     currentSong: Song?,
-    playbackState: PlaybackState,
     favorites: Set<String>,
     playlists: List<Playlist>,
     onBackClick: () -> Unit,
@@ -89,6 +96,9 @@ fun ArtistDetailScreen(
     onPlayAll: (List<Song>, Int) -> Unit,
     onShufflePlay: (List<Song>) -> Unit,
     onToggleFavorite: (String) -> Unit,
+    onAddToQueue: (Song) -> Unit,
+    /** Encolar TODAS las canciones del artista, desde la botonera de la cabecera. */
+    onAddAllToQueue: (List<Song>) -> Unit,
     onAddSongToPlaylist: (Long, String) -> Unit,
     /** Crear lista nueva; [pendingSongId] = canción del flujo "agregar a lista" que debe nacer dentro. */
     onCreatePlaylist: (name: String, pendingSongId: String?) -> Unit,
@@ -116,6 +126,17 @@ fun ArtistDetailScreen(
     // Fetch perezoso de la foto al entrar (idempotente, con TTL y rate-limit en el repo).
     LaunchedEffect(artistName) { viewModel.onArtistShown(artistName) }
 
+    // Imagen del header, calculada UNA vez y usada para las dos cosas: pintarla y seedear el tema
+    // local de la pantalla. Es la cascada de siempre —foto de Deezer → carátula de alguno de sus
+    // álbumes— y el color tiene que salir de la que gane, no de la foto a secas: con "ninguno de
+    // estos" en el picker el header enseña una carátula, y un tema que la ignorase pintaría un
+    // acento sin relación con lo que se ve.
+    val headerImageUrl = artistInfo?.imageUrl ?: albums.firstNotNullOfOrNull { it.albumArtUri }
+    // La foto puede LLEGAR TARDE (la baja el backfill de Deezer con la pantalla ya abierta), de ahí
+    // que el seed sea un flow y no un valor calculado una vez.
+    LaunchedEffect(headerImageUrl) { viewModel.requestArtistSeed(headerImageUrl) }
+    val artistSeed by viewModel.artistSeed.collectAsStateWithLifecycle()
+
     // Quick-play de un álbum del carrusel: obtiene sus canciones y reproduce (navega al player).
     val playAlbum: (String) -> Unit = { albumName ->
         scope.launch {
@@ -124,12 +145,18 @@ fun ArtistDetailScreen(
         }
     }
 
+    // Encolar un álbum del carrusel. Misma resolución perezosa que [playAlbum]: la tarjeta solo
+    // conoce el NOMBRE del álbum, las canciones se piden al pulsar.
+    val queueAlbum: (String) -> Unit = { albumName ->
+        scope.launch { onAddAllToQueue(viewModel.getAlbumSongs(albumName).first()) }
+    }
+
     // TopBar mínima al scrollear: fondo que se funde + título con transición tipo
     // SHARED ELEMENT (réplica del morph de carátula MiniPlayer→NowPlaying): un único
     // Text viaja y ESCALA desde el nombre grande del header hasta el hueco de la topbar,
     // interpolando entre ambas posiciones medidas, conducido por el offset de scroll.
     val listState = rememberLazyListState()
-    val titleFadePx = with(LocalDensity.current) { 300.dp.toPx() }
+    val titleFadePx = with(LocalDensity.current) { ComponentConfig.DetailTitleFadeRange.toPx() }
     val rawTitleFraction by remember {
         derivedStateOf {
             if (listState.firstVisibleItemIndex > 0) 1f
@@ -160,6 +187,14 @@ fun ArtistDetailScreen(
     var headerTitleHeight by remember { mutableIntStateOf(0) }
     var barTitleAnchor by remember { mutableStateOf(Offset.Zero) }
 
+    // Estado compartido de la FOTO del header, HOISTADO: la cabecera lo usa para su `sharedBounds`
+    // y el título/topbar para saber si elevarse al overlay (solo si la foto morfa de verdad, o sea
+    // si venimos de la pestaña Artistas — ver `overSharedElementsModifier`).
+    val headerImageSharedState = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
+        with(sharedTransitionScope) { rememberSharedContentState(key = "artist_image_$artistName") }
+    } else null
+
+    DetailContentTheme(artistSeed) {
     Scaffold(
         modifier = modifier,
         contentWindowInsets = WindowInsets(0, 0, 0, 0)
@@ -185,11 +220,12 @@ fun ArtistDetailScreen(
                     // paso intermedio existe porque el usuario puede DECIDIR que no tenga foto
                     // ("ninguno de estos" en el picker) cuando Deezer solo ofrece homónimos, y
                     // un header con el icono genérico se lee como un fallo de carga.
-                    imageUrl = artistInfo?.imageUrl ?: albums.firstNotNullOfOrNull { it.albumArtUri },
+                    imageUrl = headerImageUrl,
                     albumCount = albums.size,
                     songCount = songs.size,
                     sharedTransitionScope = sharedTransitionScope,
                     animatedVisibilityScope = animatedVisibilityScope,
+                    headerImageSharedState = headerImageSharedState,
                     // El nombre del header es un PLACEHOLDER invisible que solo aporta
                     // layout y su posición: el texto real lo dibuja el título viajero.
                     onTitlePositioned = { pos, height ->
@@ -203,6 +239,7 @@ fun ArtistDetailScreen(
                 DetailPlayButtons(
                     onPlayAll = { if (songs.isNotEmpty()) onPlayAll(songs, 0) },
                     onShuffle = { if (songs.isNotEmpty()) onShufflePlay(songs) },
+                    onAddToQueue = { onAddAllToQueue(songs) },
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp)
                 )
             }
@@ -228,6 +265,7 @@ fun ArtistDetailScreen(
                                 showArtist = false,
                                 onClick = { onAlbumClick(album.name) },
                                 onPlayClick = { playAlbum(album.name) },
+                                onAddToQueue = { queueAlbum(album.name) },
                                 modifier = Modifier
                                     .animateItem()
                                     .width(ArtistAlbumCardWidth)
@@ -265,29 +303,42 @@ fun ArtistDetailScreen(
                     items = songs,
                     key = { _, song -> song.id }
                 ) { index, song ->
-                    val isPlaying = currentSong?.id == song.id && playbackState == PlaybackState.PLAYING
+                    // La canción actual, esté sonando o en PAUSA: mismo criterio que la cola y la
+                    // lista de canciones (el resaltado marca "cargada", no "reproduciendo ahora").
+                    val isPlaying = currentSong?.id == song.id
                     val rowBackground = songRowBackground(colorScheme.surfaceContainer, isPlaying)
-                    Surface(
-                        color = colorScheme.surfaceContainer,
-                        shape = rememberListItemShape(index, songs.size),
+                    // Punta ORIGEN del container transform hacia el reproductor: la fila crece hasta
+                    // ser el player. Fuera del envoltorio va lo que la coloca en la lista; dentro, la
+                    // superficie que morfa (ver [SongRowContainer]).
+                    SongRowContainer(
+                        songId = song.id,
                         modifier = Modifier
                             .animateItem()
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 1.dp)
                     ) {
-                        SongItem(
-                            song = song,
-                            isPlaying = isPlaying,
-                            modifier = Modifier.clickable { onPlayAll(songs, index) },
-                            trailingContent = {
-                                SongOverflowButton(
-                                    isFavorite = song.id in favorites,
-                                    onToggleFavorite = { onToggleFavorite(song.id) },
-                                    onAddToPlaylist = { songIdForPlaylist = song.id },
-                                    rowBackground = rowBackground
-                                )
-                            }
-                        )
+                        Surface(
+                            color = colorScheme.surfaceContainer,
+                            // isActive: el ítem en reproducción usa la forma redondeada (16 dp), igual
+                            // que en la cola y la lista de canciones, en vez de la esquina agrupada.
+                            shape = rememberListItemShape(index, songs.size, isActive = isPlaying),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            SongItem(
+                                song = song,
+                                isPlaying = isPlaying,
+                                modifier = Modifier.clickable { onPlayAll(songs, index) },
+                                trailingContent = {
+                                    SongOverflowButton(
+                                        isFavorite = song.id in favorites,
+                                        onToggleFavorite = { onToggleFavorite(song.id) },
+                                        onAddToPlaylist = { songIdForPlaylist = song.id },
+                                        onAddToQueue = { onAddToQueue(song) },
+                                        rowBackground = rowBackground
+                                    )
+                                }
+                            )
+                        }
                     }
                 }
             } else {
@@ -301,7 +352,7 @@ fun ArtistDetailScreen(
                         MaterialSymbol(
                             "artist",
                             size = 64.sp,
-                            color = colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            color = colorScheme.outline
                         )
                         Spacer(modifier = Modifier.height(16.dp))
                         Text(
@@ -323,7 +374,7 @@ fun ArtistDetailScreen(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
-                .then(overSharedElementsModifier(sharedTransitionScope, animatedVisibilityScope))
+                .then(overSharedElementsModifier(sharedTransitionScope, animatedVisibilityScope, headerImageSharedState))
                 .background(colorScheme.surface.copy(alpha = topBarAlpha))
         ) {
             Row(
@@ -376,7 +427,7 @@ fun ArtistDetailScreen(
                 .fillMaxWidth()
                 .padding(end = 40.dp)
                 // Encima de la foto voladora del overlay o aparecía de golpe (ver Álbum).
-                .then(overSharedElementsModifier(sharedTransitionScope, animatedVisibilityScope))
+                .then(overSharedElementsModifier(sharedTransitionScope, animatedVisibilityScope, headerImageSharedState))
                 .graphicsLayer {
                     val f = FastOutSlowInEasing.transform(topBarAlpha)
                     // titleMedium (16sp) / displaySmall (36sp)
@@ -439,6 +490,7 @@ fun ArtistDetailScreen(
             }
         )
     }
+    } // DetailContentTheme
 }
 
 @OptIn(ExperimentalSharedTransitionApi::class)
@@ -450,14 +502,16 @@ private fun ArtistImmersiveHeader(
     songCount: Int,
     sharedTransitionScope: SharedTransitionScope? = null,
     animatedVisibilityScope: AnimatedVisibilityScope? = null,
+    // HOISTADO desde el parent (mismo objeto que gatea la elevación del título).
+    headerImageSharedState: SharedTransitionScope.SharedContentState? = null,
     onTitlePositioned: (Offset, Int) -> Unit = { _, _ -> }
 ) {
     // La foto llega volando desde la fila de la pestaña Artistas (sharedBounds: el
     // contenido difiere — thumb chico vs foto grande — y así cross-fadea).
-    val sharedModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
+    val sharedModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null && headerImageSharedState != null) {
         with(sharedTransitionScope) {
             Modifier.sharedBounds(
-                sharedContentState = rememberSharedContentState(key = "artist_image_$artistName"),
+                sharedContentState = headerImageSharedState,
                 animatedVisibilityScope = animatedVisibilityScope,
                 // Spring del tema en vez del default de la API (ver AppBoundsTransform).
                 boundsTransform = AppBoundsTransform
@@ -467,12 +521,27 @@ private fun ArtistImmersiveHeader(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(380.dp)
+            .height(ComponentConfig.DetailHeaderHeight)
             .then(sharedModifier)
     ) {
         if (imageUrl != null) {
+            val context = LocalContext.current
+            val request = remember(imageUrl, artistName) {
+                ImageRequest.Builder(context)
+                    .data(imageUrl)
+                    // Placeholder = la MISMA foto que ya cargó la fila de la pestaña Artistas (misma
+                    // key de memoria, ver [artistPhotoCacheKey]). Al abrir, el header enseña al
+                    // instante ese thumb ya decodificado y solo cambia a la versión grande cuando
+                    // termina de bajar — se acaba el parpadeo de "vuelve a hacer fetch". Son dos
+                    // resoluciones de Deezer (fila = pictureMedium, header = pictureXl), así que el
+                    // binario grande SÍ se baja, pero por DETRÁS del placeholder. El thumb lleva
+                    // forma cookie; al recortarse (Crop) a un header ancho solo se ve su centro opaco.
+                    .placeholderMemoryCacheKey(artistPhotoCacheKey(artistName))
+                    .crossfade(200)
+                    .build()
+            }
             AsyncImage(
-                model = imageUrl,
+                model = request,
                 contentDescription = stringResource(R.string.artist_photo_desc, artistName),
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.matchParentSize()
@@ -488,13 +557,20 @@ private fun ArtistImmersiveHeader(
             }
         }
 
-        // Scrim inferior: funde la foto con el fondo de la pantalla y da contraste al texto.
+        // Scrim inferior REFORZADO: funde la foto con el fondo y —clave— deja el título apoyado
+        // sobre `surface` CASI SÓLIDO, no sobre la imagen. Así el `onSurface` del nombre contrasta
+        // SIEMPRE, sea la foto clara u oscura (y se adapta a tema claro/oscuro por el propio rol).
+        // El scrim viejo (0.4→surface) solo llegaba a ~0.73·surface donde EMPIEZA el texto, y una
+        // foto clara tapaba la parte alta de las letras. La imagen sigue inmersiva en el 70 % de
+        // arriba con su fade suave; solo el 15 % inferior (la banda del título) queda sólido.
         Box(
             modifier = Modifier
                 .matchParentSize()
                 .background(
                     Brush.verticalGradient(
-                        0.4f to Color.Transparent,
+                        0.3f to Color.Transparent,
+                        0.7f to colorScheme.surface.copy(alpha = 0.5f),
+                        0.85f to colorScheme.surface,
                         1f to colorScheme.surface
                     )
                 )

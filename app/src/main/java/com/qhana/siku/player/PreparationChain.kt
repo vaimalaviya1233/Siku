@@ -26,7 +26,8 @@ interface PreparationStep {
 
     sealed class StepResult {
         object Continue : StepResult()
-        data class Error(val message: String) : StepResult()
+        /** El texto del error va como recurso, no como String: se localiza en la UI (ver showPlaybackError). */
+        data class Error(@androidx.annotation.StringRes val messageRes: Int) : StepResult()
         object Abort : StepResult() // Éxito inmediato o parada controlada
     }
 }
@@ -98,7 +99,7 @@ class UrlRefreshStep(
             val remoteId = song.remoteId
             if (remoteId == null) {
                 Log.w("UrlRefreshStep", "Song ${song.id} needs URL but has no remoteId (path='${song.path.take(30)}')")
-                return PreparationStep.StepResult.Error("Remote song without sync ID")
+                return PreparationStep.StepResult.Error(com.qhana.siku.R.string.error_song_not_synced)
             }
             // El registro rutea a la fuente correcta y encapsula la caché de URL.
             val freshUrl = sourceRegistry.resolveDownloadUrl(song)
@@ -107,7 +108,7 @@ class UrlRefreshStep(
                 musicRepository.updateSongUrl(song.id, freshUrl)
                 context.urlRefreshed = true
             } else {
-                return PreparationStep.StepResult.Error("No se pudo obtener enlace de descarga")
+                return PreparationStep.StepResult.Error(com.qhana.siku.R.string.error_download_link_failed)
             }
         }
         

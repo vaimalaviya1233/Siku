@@ -32,46 +32,126 @@ import kotlin.math.min
 private val SQUIRCLE_CORNER_RADIUS = 48.dp
 
 /**
- * Key del shared element de la carátula entre la píldora y el reproductor.
+ * Key de la carátula compartida entre la píldora y el reproductor. **Acompaña** al container
+ * transform ([PLAYER_CONTAINER_SHARED_KEY]) en vez de competir con él, que es lo que la distingue de
+ * la versión que se eliminó el 15 ago.
  *
- * **Es CONSTANTE, y no puede llevar el id de la canción.** Lo llevó hasta el 30 jul
- * (`"album_art_${song.id}"`) y ese era el bug de "la carátula ya está ahí desde que el NowPlaying
- * aparece desde abajo": al abrir una canción DISTINTA desde una lista, la píldora todavía mostraba
- * la anterior, así que las dos puntas del par pedían keys DIFERENTES y no había match posible. Sin
- * match no hay animación de bounds, y como un shared element se pinta en el overlay del
- * `SharedTransitionScope` —que cuelga de la raíz y NO recibe el `graphicsLayer` del slide— la
- * portada aparecía clavada en su posición final mientras el resto del reproductor subía por debajo.
- * El síntoma sobrevivió a acoplar las duraciones porque nunca fue un problema de tiempo: no había
- * nada que animar.
+ * **Por qué vuelve** (16 ago): el container transform anima el CONTENEDOR y la portada existe en las
+ * dos puntas, así que es un elemento compartido de libro. Sin ella, la portada quedaba a merced del
+ * `resizeMode` del contenedor, y ninguna de las dos opciones sirve para una imagen que tiene que
+ * cruzar la pantalla: escalada con el resto llega al sitio equivocado, y re-medida colapsa (es el
+ * único `weight(1f)` de la columna, así que absorbe TODA la holgura del layout y se queda en cero
+ * durante los primeros dos tercios del morph — la "doble animación" del 16 ago).
  *
- * Lo que el shared element representa es **la superficie de la carátula**, un elemento persistente
- * de la UI que existe en los dos sitios, no la portada de un tema concreto. Que la imagen de dentro
- * cambie es asunto del contenido (y de `announceSelection`, que pone la nueva en la píldora en el
- * mismo frame del tap para que lo que viaja sea ya la portada correcta).
+ * **Cómo acompaña sin competir**: es un `sharedElement` ANIDADO dentro del `sharedBounds` del
+ * contenedor, así que Compose lo eleva al overlay con SUS propios bounds interpolados y lo dibuja UNA
+ * sola vez, al margen de la escala del padre. Es el patrón que la propia API espera (una imagen
+ * compartida dentro de un contenedor compartido). El intento del 15 ago lo descartó por
+ * "competir con el contenedor"; lo que competía en realidad era el `ContentScale.Crop` del padre, que
+ * con dos superficies del mismo ancho da factor 1 y convertía el morph entero en una traslación.
  *
- * Con la key fija, además, la punta de origen SIEMPRE está compuesta y medida antes de que el
- * player se expanda — un elemento creado y marcado como saliente en el mismo frame no tiene bounds
- * previos que ofrecer como origen.
+ * Es **constante y NO lleva el id de la canción**, al revés que [rowArtSharedKey]: las dos puntas
+ * pueden estar mostrando temas distintos en el frame del tap (bug del 30 jul — la píldora aún tenía
+ * la portada anterior, cada punta pedía una key diferente, no había match, y sin match no hay
+ * animación sino un salto). Aquí no hace falta el id porque la píldora es ÚNICA: no hay diez
+ * candidatas peleándose por la key, que es el motivo por el que las filas sí lo llevan.
  */
-const val ALBUM_ART_SHARED_KEY = "album_art"
+const val PLAYER_ART_SHARED_KEY = "player_art"
 
 /**
- * Key del shared element de la carátula de UNA FILA de lista. Lleva el id de la canción, al revés
- * que [ALBUM_ART_SHARED_KEY], y las dos razones son la misma moneda:
+ * Key de la carátula de UNA FILA de lista, la que viaja hasta el centro del reproductor cuando éste
+ * se abre tocando una canción. Es un `sharedElement` **anidado** dentro del container transform de la
+ * fila ([rowContainerSharedKey]), el mismo reparto que la píldora y su portada: el contenedor escala,
+ * la portada viaja.
  *
- * Una punta de shared element solo sirve de ORIGEN si ya estaba compuesta y MEDIDA antes del gesto
- * — declararla en el mismo frame en que se la necesita la deja sin bounds y no hay match (bug del
- * 30 jul: la portada aparecía quieta en su destino mientras el reproductor subía). O sea que las
- * filas tienen que declararla SIEMPRE, no solo cuando les toca ser origen.
- *
- * Y si todas las filas visibles declararan la MISMA key habría diez destinos peleándose por ella,
- * que es el otro error que Compose no perdona. Con el id dentro, cada fila es su propio shared
- * element solitario —inofensivo mientras nadie lo empareja— y el reproductor elige a cuál se
- * engancha pidiendo la key de la canción que va a sonar.
- *
- * La píldora puede permitirse la key constante porque es ÚNICA: no compite con nadie.
+ * Lleva el id de la canción porque es lo que le dice al reproductor DE QUÉ FILA sale: la fila que
+ * participa declara su punta con su propia key y el player pide la key de la canción que va a sonar
+ * (`NowPlayingLayer.artSharedKey`). Hasta el 16 ago era además una necesidad: una punta solo sirve de
+ * ORIGEN si ya estaba compuesta y colocada antes de que aparezca su pareja (bug del 30 jul: la portada
+ * aparecía quieta en su destino mientras el reproductor subía), así que TODAS las filas visibles
+ * declaraban la suya siempre y con una key común habría habido diez destinos peleándose. Ahora solo
+ * declara la fila con papel (`ContainerOriginRole`), preparada un frame antes; la key por canción
+ * sigue siendo lo que identifica la pareja.
  */
 fun rowArtSharedKey(songId: String): String = "album_art_row_$songId"
+
+/**
+ * Key del **container transform** de una FILA de canción hacia el reproductor: la superficie de la
+ * fila crece hasta ser el player, con su portada viajando anidada ([rowArtSharedKey]).
+ *
+ * Es la misma coreografía que [PLAYER_CONTAINER_SHARED_KEY] con otra punta de origen, así que
+ * comparte toda su configuración (`scaleToBounds(Fit)`, [com.qhana.siku.ui.theme.AppContainerBoundsTransform],
+ * el z-order de [CONTAINER_SHADOW_OVERLAY_Z]); lo único propio es de dónde sale.
+ *
+ * Lleva el id **por el mismo motivo que [rowArtSharedKey]**: identifica de qué fila sale el player.
+ * La familia es distinta de la de la portada porque son dos elementos compartidos ANIDADOS, no uno:
+ * el contenedor escala, la portada viaja.
+ */
+fun rowContainerSharedKey(songId: String): String = "row_container_$songId"
+
+/**
+ * Key del **container transform** píldora ↔ reproductor: la superficie de la barra CRECE hasta ser el
+ * player al abrir y se CONTRAE al cerrar. Es el patrón que Material define para "un contenedor se
+ * convierte en una pantalla" (card/list item/FAB → detalle), y el de la referencia de M3 Expressive.
+ *
+ * **Las dos reglas del patrón, sacadas de los docs de Material, porque las dos se incumplieron en el
+ * primer intento (15 ago) y por eso no funcionaba:**
+ *
+ *  1. *"Neither the incoming nor outgoing screens slide during a container transform."* — la pantalla
+ *     del player NO se desliza; el único que mueve algo es el contenedor. Sumar el slide del NavHost
+ *     hacía que se pelearan dos animaciones por lo mismo.
+ *  2. *"Content is swapped rather than transitioned spatially."* — los contenidos se INTERCAMBIAN con
+ *     un cruce de opacidad mientras ESCALAN con su contenedor; no viajan de una punta a la otra. La
+ *     ÚNICA excepción es la portada ([PLAYER_ART_SHARED_KEY]), que existe en las dos puntas y sí
+ *     viaja, anidada como `sharedElement` dentro de este `sharedBounds`.
+ *
+ * **El `ContentScale` del `scaleToBounds` es la pieza que hace o rompe el patrón**, y costó tres
+ * intentos: tiene que ser `Fit` (el MENOR de los dos ratios) para que el contenido se achique con su
+ * contenedor. `Crop` toma el MAYOR, y como las dos superficies comparten ancho eso vale 1 en la punta
+ * del player — o sea el contenido no encogía nada y el morph se leía como un slide, dejando restos a
+ * tamaño completo sobre la píldora al cerrar.
+ *
+ * Esta key es la de la PÍLDORA. La otra superficie que hace el mismo morph es la fila de canción
+ * ([rowContainerSharedKey]); desde un chip o la notificación no hay superficie de origen en pantalla
+ * y el reproductor entra fundiéndose.
+ */
+const val PLAYER_CONTAINER_SHARED_KEY = "player_container"
+
+/**
+ * ## La escala de z del morph, de abajo arriba
+ *
+ * Todo lo que participa en un container transform se dibuja en el **overlay** del
+ * `SharedTransitionScope`, que va ENCIMA del árbol entero. Por eso el orden entre ellos no lo decide
+ * la jerarquía de composición sino este `zIndexInOverlay`, y por eso los cuatro valores viven juntos:
+ * son una sola escala y solo tienen sentido comparados entre sí.
+ *
+ *  1. **superficie ENTRANTE** ([CONTAINER_SURFACE_OVERLAY_Z_ENTERING], 0) — crece sólida por debajo.
+ *  2. **superficie SALIENTE** ([CONTAINER_SURFACE_OVERLAY_Z_EXITING], 1) — se disuelve encima de la
+ *     que entra, que es lo que hace que abrir y cerrar se vean iguales.
+ *  3. **portada** ([CONTAINER_ART_OVERLAY_Z], 2) — por encima de todo, porque es lo único que VIAJA
+ *     de una superficie a la otra en vez de escalar con una de ellas.
+ *
+ * Los nombres son de CONTENEDOR y no del player porque la escala la comparten todos los container
+ * transform de la app —píldora, fila de canción y (más adelante) tarjetas—: son la misma coreografía
+ * con distinta punta de origen, y tener una escala por origen sería garantizar que se desincronicen.
+ *
+ * La SOMBRA de la píldora NO está en la escala porque ya no viaja: hubo un shared element solo-sombra
+ * (`RemeasureToBounds`, z −1) del 16 al 17 ago y se quitó porque pintar un desenfoque al tamaño
+ * interpolado costaba un blur de pantalla entera por frame al arrancar el cierre — ver `pillShadow` en
+ * MiniPlayer.kt. Ahora se dibuja en su sitio, bajo el overlay, y solo se funde.
+ *
+ * El contenido de cada superficie no aparece en la escala porque no se ordena por su cuenta: va
+ * DENTRO de su contenedor (`scaleToBounds` escala el nodo entero) y hereda su z. Sacarlo fuera obliga
+ * a darle un z propio, y a que sea RELATIVO al de su superficie — se probó el 16 ago y se descartó
+ * junto con el resto de esa variante.
+ */
+const val CONTAINER_SURFACE_OVERLAY_Z_ENTERING = 0f
+
+/** Ver la escala completa en [CONTAINER_SURFACE_OVERLAY_Z_ENTERING]. */
+const val CONTAINER_SURFACE_OVERLAY_Z_EXITING = 1f
+
+/** Ver la escala completa en [CONTAINER_SURFACE_OVERLAY_Z_ENTERING]. */
+const val CONTAINER_ART_OVERLAY_Z = 2f
 
 /**
  * Forma de la carátula, común al MiniPlayer y al NowPlaying: morph continuo entre un SQUIRCLE

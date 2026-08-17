@@ -22,8 +22,17 @@ class MusicRepository @Inject constructor(
 ) : IMusicRepository {
 
     // --- Song ---
-    override fun getSongsPaging(query: String, sortOrder: SortOrder, sourceFilters: Set<SongSourceFilter>): Flow<PagingData<Song>> =
-        songRepository.getSongsPaging(query, sortOrder, sourceFilters)
+    override fun getSongsPaging(
+        query: String,
+        sortOrder: SortOrder,
+        sourceFilters: Set<SongSourceFilter>,
+        approximateIds: List<String>
+    ): Flow<PagingData<Song>> =
+        songRepository.getSongsPaging(query, sortOrder, sourceFilters, approximateIds)
+    override suspend fun findApproximateSongIds(query: String): List<String> =
+        songRepository.findApproximateSongIds(query)
+    override suspend fun countSongsMatching(query: String, sourceFilters: Set<SongSourceFilter>): Int =
+        songRepository.countSongsMatching(query, sourceFilters)
     override suspend fun getSongsSnapshot(query: String, sortOrder: SortOrder, sourceFilters: Set<SongSourceFilter>): List<Song> =
         songRepository.getSongsSnapshot(query, sortOrder, sourceFilters)
     override fun getRecentlyPlayed(limit: Int): Flow<List<Song>> = songRepository.getRecentlyPlayed(limit)
@@ -97,6 +106,8 @@ class MusicRepository @Inject constructor(
         songRepository.getSongsWithPendingArtwork(localOnly)
     override suspend fun markArtworkAttempted(songIds: List<String>) =
         songRepository.markArtworkAttempted(songIds)
+    override suspend fun markLightTagsAttempted(songIds: List<String>) =
+        songRepository.markLightTagsAttempted(songIds)
     override suspend fun clearArtworkAttempted(songIds: List<String>) =
         songRepository.clearArtworkAttempted(songIds)
     override suspend fun getReferencedArtUris(): Set<String> = songRepository.getReferencedArtUris()

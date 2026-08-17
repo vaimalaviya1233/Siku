@@ -702,6 +702,8 @@ private fun OnboardingPrimaryButton(label: String, enabled: Boolean, onClick: ()
             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
         )
         Spacer(modifier = Modifier.width(8.dp))
-        MaterialSymbol("arrow_forward", size = 22.sp, color = MaterialTheme.colorScheme.onPrimary)
+        // Sin color explícito: hereda el LocalContentColor del Button, que se atenúa solo cuando
+        // está deshabilitado (con onPrimary fijo, la flecha seguía brillante sobre el texto gris).
+        MaterialSymbol("arrow_forward", size = 22.sp)
     }
 }

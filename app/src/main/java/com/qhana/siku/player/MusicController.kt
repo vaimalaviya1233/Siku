@@ -24,6 +24,7 @@ import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.model.SourceType
 import com.qhana.siku.data.remote.OneDriveResolvingDataSourceFactory
 import com.qhana.siku.data.util.AppLogger
+import com.qhana.siku.data.util.JankProbe
 import com.qhana.siku.data.util.LogLevel
 import com.qhana.siku.player.manager.PlaylistManager
 import com.qhana.siku.player.manager.SessionStateManager
@@ -611,6 +612,7 @@ class MusicController @Inject constructor(
                 // ANTES de tocar `_currentPosition`: ninguna de las ramas de abajo movería el
                 // audio —no hay seek que hacer— pero la posición se reseteaba a 0 igual, así que
                 // la barra saltaba al inicio mientras la canción seguía sonando tan tranquila.
+                JankProbe.mark { "playAt: inSync=$queueInSync cola=${songs.size} idx=$index" }
                 if (queueInSync && controller.currentMediaItemIndex == index && startPosition == 0L) {
                     if (autoPlay && !controller.isPlaying) controller.play()
                     updatePlaybackState()
@@ -630,8 +632,10 @@ class MusicController @Inject constructor(
                     }
                     val mediaItems = songs.map { it.toMediaItem() }
                     controller.setMediaItems(mediaItems, index, startPosition)
+                    JankProbe.mark { "playAt: setMediaItems(${mediaItems.size}) hecho" }
                 } else if (controller.currentMediaItemIndex != index || startPosition > 0) {
                     controller.seekTo(index, startPosition)
+                    JankProbe.mark { "playAt: seekTo hecho" }
                 }
                 controller.prepare()
                 applyReplayGain(song)
@@ -655,8 +659,9 @@ class MusicController @Inject constructor(
                 // PlaybackViewModel) decide retry/skip. Saltar de canción aquí además
                 // competía con esa decisión (doble skip / skip durante un retry).
                 updatePlaybackState()
+                // El detalle de la excepción ya se logueó; al usuario, mensaje localizado genérico.
                 _playbackError.tryEmit(
-                    PlaybackErrorInfo(-1, e.message ?: context.getString(R.string.error_playback_load), song.id)
+                    PlaybackErrorInfo(-1, context.getString(R.string.error_playback_load), song.id)
                 )
             }
         }
@@ -664,13 +669,24 @@ class MusicController @Inject constructor(
 
     // === Gestión de Playlist ===
 
-    fun setPlaylistAndPlay(songs: List<Song>, startIndex: Int = 0) {
+    /**
+     * [startPosition] y [autoPlay] existen para RESTAURAR una cola tal y como estaba, no para
+     * reproducir algo nuevo: los usa el "deshacer" de vaciar la cola, que tiene que devolver
+     * también el punto de la canción y si estaba sonando o en pausa. Con los defaults (0 y `true`)
+     * se comporta como siempre, que es lo que quiere cualquier "reproducir esto".
+     */
+    fun setPlaylistAndPlay(
+        songs: List<Song>,
+        startIndex: Int = 0,
+        startPosition: Long = 0,
+        autoPlay: Boolean = true
+    ) {
         if (songs.isEmpty()) return
         val safeIndex = startIndex.coerceIn(0, songs.lastIndex)
         songs.getOrNull(safeIndex)?.let { syncManager.prioritizeSong(it.id) }
         songCacheManager.cacheSongs(songs)
         playlistManager.setPlaylist(songs, safeIndex)
-        playAt(safeIndex)
+        playAt(safeIndex, startPosition, autoPlay)
         saveSessionState()
     }
 
@@ -974,6 +990,53 @@ class MusicController @Inject constructor(
         saveSessionState()
     }
 
+    /**
+     * Encola [songs] al FINAL de la cola actual. Dos casos:
+     *  - **Cola vacía** (nada sonando): no hay a qué "añadir", así que equivale a reproducir esos
+     *    temas ([setPlaylistAndPlay] arranca la cola).
+     *  - **Cola con contenido**: anexa detrás de todo, saltando lo que ya está por id (el id es la
+     *    clave única de la cola). Replica el anexado en la cola nativa de ExoPlayer para que
+     *    `next()`/`seekToNextMediaItem` los alcancen, y persiste la sesión.
+     *
+     * Devuelve cuántas se añadieron de verdad (0 = todas estaban ya en la cola).
+     */
+    fun addToQueue(songs: List<Song>): Int {
+        if (songs.isEmpty()) return 0
+
+        // Cola vacía: no hay dónde "encolar" — arranca la reproducción con estos temas.
+        if (playlistManager.getCurrentPlaylist().isEmpty()) {
+            setPlaylistAndPlay(songs)
+            return songs.size
+        }
+
+        val added = playlistManager.addToQueue(songs)
+        if (added.isEmpty()) return 0
+
+        songCacheManager.cacheSongs(added)
+
+        // Espejo en ExoPlayer (regla de oro: toda mutación de PlaylistManager se replica en la cola
+        // nativa). Se anexa al final, así que no toca el item en curso ni corta el audio.
+        val controller = mediaController
+        if (controller != null && controller.isConnected) {
+            val sizeAfter = playlistManager.getCurrentPlaylist().size
+            if (controller.mediaItemCount == sizeAfter - added.size) {
+                controller.addMediaItems(added.map { it.toMediaItem() })
+            } else {
+                // Cola nativa desincronizada con la lógica: recargarla entera ya actualizada,
+                // conservando posición y sin cortar (misma técnica que la rama equivalente de
+                // [toggleShuffle]).
+                playAt(
+                    playlistManager.currentIndex.value,
+                    startPosition = controller.currentPosition,
+                    autoPlay = controller.isPlaying
+                )
+            }
+        }
+
+        saveSessionState()
+        return added.size
+    }
+
     fun reorderQueue(from: Int, to: Int) {
         val currentId = _currentSong.value?.id
         playlistManager.moveItem(from, to, currentId)
@@ -1087,6 +1150,7 @@ class MusicController @Inject constructor(
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
+            JankProbe.mark { "player state=$playbackState (2=BUFFERING 3=READY)" }
             if (playbackState == Player.STATE_ENDED) {
                 // Con cola nativa, REPEAT_MODE_ONE lo maneja el Player; aquí solo
                 // atendemos el caso de final de cola sin repeat.
@@ -1118,6 +1182,7 @@ class MusicController @Inject constructor(
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            JankProbe.mark { "onMediaItemTransition reason=$reason" }
             // Sincronizar estado interno con la cola nativa del Player.
             // Esta es la fuente de verdad ahora: cambios por end-of-song, notificación,
             // auto-advance, etc. son capturados aquí.
@@ -1132,6 +1197,20 @@ class MusicController @Inject constructor(
             // El búfer del tema anterior no dice nada del nuevo: se pone a cero y el primer
             // tick lo vuelve a llenar (ver [bufferedPosition]).
             _bufferedPosition.value = 0L
+
+            // La POSICIÓN tampoco, y hasta ahora se quedaba con la del tema anterior. El bucle
+            // que la refresca (`MusicPlayerScreen`) es un `delay(1000)` de FASE LIBRE, sin
+            // relación con los eventos del player, así que en un auto-avance el título, la
+            // carátula y el color del álbum cambiaban en ESTE frame mientras el anillo del mini
+            // (y la barra del NowPlaying) seguían enseñando el final de la canción anterior
+            // hasta el siguiente tick: hasta un segundo de desfase, el que reportó el usuario.
+            //
+            // No lo tapaba ninguno de los dos caminos que sí escriben posición: `playAt` no
+            // participa en un auto-avance (la cola entera vive en ExoPlayer) y `STATE_READY` no
+            // se vuelve a emitir cuando el item siguiente ya estaba bufferizado, que es el caso
+            // normal. Se LEE del controller en vez de escribir 0 porque un cambio de item
+            // también puede aterrizar en mitad de la pista (repeat-one, seek entre items).
+            _currentPosition.value = controller.currentPosition.coerceAtLeast(0L)
 
             // Empieza un item (otro, o el mismo con repeat-one): su escucha vuelve a estar por
             // contar. Ver [playRecordedForSongId].
@@ -1149,6 +1228,15 @@ class MusicController @Inject constructor(
                 _currentSong.value = song
                 applyReplayGain(song)
             }
+
+            // La duración es el DENOMINADOR de la fracción que pinta el anillo y la barra, así
+            // que arrastrar la del tema anterior desplaza el progreso aunque la posición ya sea
+            // correcta: tras una canción larga, una corta arrancaría con el arco casi vacío y al
+            // revés se pasaría de vuelta. `controller.duration` puede ser TIME_UNSET si el item
+            // todavía no está preparado (streaming), y por eso `updateDurationSafe` ignora lo que
+            // no sea positivo; en ese caso vale la de la BD, que ya está en la mano y es la misma
+            // que la UI lleva enseñando en la lista.
+            updateDurationSafe(controller.duration.takeIf { it > 0 } ?: song?.duration ?: 0L)
 
             syncManager.prioritizeSong(songId)
 
@@ -1251,10 +1339,12 @@ class MusicController @Inject constructor(
 
                     // Otros errores - emite y deja decidir al recovery
                     else -> {
+                        // El `error.message` de ExoPlayer es texto técnico en inglés; al usuario le
+                        // llega un mensaje genérico localizado (el detalle ya se logueó arriba).
                         _playbackError.tryEmit(
                             PlaybackErrorInfo(
                                 error.errorCode,
-                                error.message ?: context.getString(R.string.error_playback_generic),
+                                context.getString(R.string.error_playback_generic),
                                 failedSongId
                             )
                         )

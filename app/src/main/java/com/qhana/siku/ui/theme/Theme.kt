@@ -25,6 +25,7 @@ import com.materialkolor.dynamiccolor.ColorSpec
 import com.materialkolor.hct.Hct
 import com.materialkolor.rememberDynamicColorScheme
 import com.qhana.siku.data.repository.ArtworkRepository
+import com.qhana.siku.data.util.JankProbe
 import com.qhana.siku.ui.components.ensureContrast
 
 // ============== FALLBACK COLORS (NEUTRAL / BLUE ACCENT) ==============
@@ -106,7 +107,8 @@ fun MusicPlayerTheme(
     // shapes. Ahí el cambio de acento ya lo coreografían los reveals cookie del NowPlaying (que
     // congelan el acento viejo y barren el nuevo con una ventana por graphicsLayer, sin recomponer
     // por frame), así que el fundido global era redundante además de caro. MainActivity pasa
-    // `!playerExpanded`.
+    // `!playerExpanded && sin fila en preparación` (el frame ANTERIOR a expandir desde una fila
+    // también cuenta: el seed ya cambió y un fundido arrancando ahí recompondría todo dos veces).
     animateColors: Boolean = true,
     content: @Composable () -> Unit
 ) {
@@ -120,9 +122,9 @@ fun MusicPlayerTheme(
     // a mano se salta. Se probó intervenir también en claro (28 jul) y todo lo que salió de ahí
     // fueron problemas nuevos: el play gris de croma 9.3, el botón oscuro con el glifo oscuro, y
     // una ventana de tonos que había que recalibrar a ojo. Revertido a propósito.
-    val vividPrimary = remember(seedColor, darkTheme, monochrome, vividAccent) {
+    val vividAccents = remember(seedColor, darkTheme, monochrome, vividAccent) {
         if (seedColor == null || monochrome || !vividAccent || !darkTheme) null
-        else { scheme: ColorScheme -> scheme.withVividPrimary(seedColor) }
+        else { scheme: ColorScheme -> scheme.withVividPrimary(seedColor).withVividSecondary(seedColor) }
     }
 
     val colorScheme = when {
@@ -131,7 +133,7 @@ fun MusicPlayerTheme(
             isDark = darkTheme,
             isAmoled = false,
             style = if (monochrome) PaletteStyle.Monochrome else paletteStyle,
-            modifyColorScheme = vividPrimary,
+            modifyColorScheme = vividAccents,
             // Color spec de M3 EXPRESSIVE. El default de MaterialKolor sigue siendo `SPEC_2021`
             // (`ColorSpec.SpecVersion.Default`), que es el Material You de 2021: ahí el tono de
             // cada rol es una CONSTANTE — `primary` vale 80 en oscuro y 40 en claro pase lo que
@@ -147,10 +149,12 @@ fun MusicPlayerTheme(
             // en 80 en oscuro: el spec habilita el color vivo, pero quien lo pide es el estilo.
             specVersion = ColorSpec.SpecVersion.SPEC_2025
         ).animatedScheme(
-            // `snap()` y no "no llamar animatedScheme": así los 31 `animateColorAsState` conservan
-            // su identidad en la composición y el conmutar `animateColors` en caliente (abrir o
-            // cerrar el player) no reinicia ninguna animación en vuelo.
-            spec = if (animateColors) AppMotionScheme.slowEffectsSpec() else snap()
+            // Un solo camino, con o sin fundido: así los 31 `animateColorAsState` conservan su
+            // identidad en la composición y conmutar `animateColors` en caliente (abrir o cerrar
+            // el player) no reinicia ninguna animación en vuelo. Con `animate = false` el color
+            // final llega EN EL FRAME DEL TAP y no en el siguiente — ver el KDoc de la función.
+            spec = AppMotionScheme.slowEffectsSpec(),
+            animate = animateColors
         )
         dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
             val context = LocalContext.current
@@ -234,6 +238,90 @@ fun rememberAccentPreview(seedArgb: Int): Color {
     ).primary
 }
 
+// --- Tema propio de una pantalla de detalle ---
+
+/**
+ * Reemplaza el `ColorScheme` en el subárbol de una pantalla que tiene su PROPIA imagen dominante
+ * (detalle de artista o de álbum), generándolo desde [seedArgb] en vez de heredar el del tema
+ * global —que sale de la canción en reproducción—.
+ *
+ * El motivo es de coherencia visual: estas pantallas están dominadas por su header inmersivo
+ * edge-to-edge, y que el acento de sus botones venga de OTRA imagen (la que suena, que puede no
+ * tener nada que ver) se lee como un descuido. Con esto, la pantalla entera —fondo, tarjetas,
+ * textos y controles— se deriva de lo que el usuario está mirando.
+ *
+ * ## Lo que NO cubre, y es correcto que no lo cubra
+ *
+ * El **MiniPlayer no hereda** este tema: vive en `PlayerOverlay`, hermano del `NavHost` bajo el
+ * `MusicPlayerTheme` global, así que conserva el acento de lo que suena. Es deliberado — el
+ * reproductor es su propia entidad y viaja con su color por toda la app.
+ *
+ * ## El color viaja CON la carátula
+ *
+ * **El seed nunca está listo en el primer frame**: en el álbum llega con el flow de canciones de
+ * Room y en el artista, con la extracción de la foto. Aplicarlo de golpe en cuanto aparece pinta la
+ * pantalla de un color y la repinta de otro dos frames después — el "cambia de golpe el color de
+ * todo" al abrir el detalle.
+ *
+ * Se funde con [AppScreenColorSpec], que comparte duración con [AppBoundsTransform]: el color
+ * termina de cambiar **exactamente cuando la carátula aterriza en el header**, porque son la misma
+ * cosa para quien mira — el color SALE de esa portada. Que el fundido arranque uno o dos frames
+ * después del gesto no se nota; que acabe en otro momento que la imagen, sí.
+ *
+ * No hay ninguna espera previa: se probó retrasar el cambio hasta que la entrada terminase y es
+ * peor de dos maneras — deja el color moviéndose sobre una pantalla ya quieta, y para saber cuándo
+ * empezar hay que inventarse un intervalo, que es justo lo que la convención 13 prohíbe.
+ *
+ * [seedArgb] nulo significa "esta pantalla no tiene de dónde sacar color": se reinstala el tema
+ * global tal cual. Es el caso del artista sin foto NI carátulas.
+ */
+@Composable
+fun DetailContentTheme(seedArgb: Int?, content: @Composable () -> Unit) {
+    val generation = LocalThemeGeneration.current
+    val globalScheme = MaterialTheme.colorScheme
+
+    // Misma guardia que el tema global: una imagen sin croma no debe inventarse un matiz. El
+    // umbral vive en ArtworkRepository para que extracción y consumo no puedan discrepar.
+    val monochrome = seedArgb != null && ArtworkRepository.isAchromatic(seedArgb)
+    val seed = seedArgb?.let { Color(it) }
+
+    // Misma razón que en [MusicPlayerTheme] y [rememberAccentPreview]: la lambda entra en las
+    // claves del `remember` interno de MaterialKolor, y una nueva por recomposición tiraría el
+    // esquema cacheado en cada frame.
+    val vividAccents = remember(seed, generation, monochrome) {
+        if (seed == null || monochrome || !generation.vividAccent || !generation.isDark) null
+        else { scheme: ColorScheme -> scheme.withVividPrimary(seed).withVividSecondary(seed) }
+    }
+
+    // El estilo, el tema claro/oscuro y el acento vivo salen de [LocalThemeGeneration] — el mismo
+    // sitio del que los lee la previsualización del selector de color. Reconstruir aquí la llamada
+    // a MaterialKolor con preferencias releídas por nuestra cuenta sería la tercera copia de esa
+    // construcción, y la primera en separarse del resto sin que nada fallara.
+    val scheme = if (seed != null) {
+        rememberDynamicColorScheme(
+            seedColor = seed,
+            isDark = generation.isDark,
+            isAmoled = false,
+            style = if (monochrome) PaletteStyle.Monochrome else generation.paletteStyle,
+            modifyColorScheme = vividAccents,
+            specVersion = ColorSpec.SpecVersion.SPEC_2025
+        )
+    } else globalScheme
+
+    // `MaterialTheme` se monta SIEMPRE, también sin seed (donde reinstala el esquema global tal
+    // cual). Es lo que mantiene la ESTRUCTURA de la composición estable, y no es cosmético: con un
+    // `if (seed == null) { content() } else { MaterialTheme { content() } }`, las dos ramas son
+    // grupos distintos, así que en el frame en que llega el seed Compose DESCARTA el árbol entero
+    // de la pantalla y lo vuelve a componer — perdiendo el estado recordado dentro y pagando un
+    // tirón justo cuando la pantalla acaba de asentarse. Y el seed SIEMPRE llega tarde.
+    //
+    // Solo se pasa el colorScheme: los otros tres parámetros heredan del tema actual por defecto
+    // (`MaterialTheme.shapes` / `.typography` / `.motionScheme`), así que el motion Expressive y la
+    // tipografía de marca siguen siendo los mismos. `LocalThemeGeneration` tampoco se toca — no
+    // cambia cómo se genera un esquema, solo desde qué seed.
+    MaterialTheme(colorScheme = scheme.animatedScheme(AppScreenColorSpec), content = content)
+}
+
 // --- Acento vivo (reencuadre tonal de `primary`) ---
 
 /**
@@ -257,6 +345,36 @@ private const val VIVID_TONE_MAX = 90.0
 
 /** Contraste mínimo del contenido sobre el acento reencuadrado (AA de texto). */
 private const val ON_PRIMARY_MIN_CONTRAST = 4.5f
+
+/**
+ * Croma del acento SECUNDARIO respecto al primario. `secondary` colorea artista/álbum del NowPlaying
+ * (y el estado activo del aleatorio, el favorito): sin avivar, MaterialKolor lo deja casi gris en
+ * carátulas de croma bajo, que es el defecto que motivó esto. Se le da el mismo tono de máximo croma
+ * que a `primary` pero con el croma acotado a esta fracción del suyo, para que el rol siga siendo
+ * SUBORDINADO —un acento más suave que el título— en vez de un duplicado exacto de `primary`.
+ */
+private const val SECONDARY_CHROMA_FACTOR = 0.75
+
+/**
+ * Tono, dentro de la ventana legible [VIVID_TONE_MIN]..[VIVID_TONE_MAX], donde [hue] admite MÁS croma
+ * en el gamut sRGB. Se sondea con un croma imposible ([CHROMA_PROBE]) para leer el techo real en cada
+ * tono. Compartido por [withVividPrimary] y [withVividSecondary] — el mismo tono para los dos acentos
+ * los mantiene coherentes en luminosidad, distinguiéndose solo por el croma.
+ */
+private fun bestVividTone(hue: Double): Double {
+    var bestTone = VIVID_TONE_MIN
+    var bestChroma = -1.0
+    var tone = VIVID_TONE_MIN
+    while (tone <= VIVID_TONE_MAX) {
+        val available = Hct.from(hue, CHROMA_PROBE, tone).chroma
+        if (available > bestChroma) {
+            bestChroma = available
+            bestTone = tone
+        }
+        tone += TONE_STEP
+    }
+    return bestTone
+}
 
 /**
  * Reencuadra `primary` (y su `onPrimary`) al tono donde el MATIZ del álbum alcanza su croma
@@ -290,17 +408,7 @@ private fun ColorScheme.withVividPrimary(seed: Color): ColorScheme {
 
     // Tono donde ESTE matiz admite más color. Se sondea con un croma imposible para leer el techo
     // real del gamut en cada tono; el color final se construye después con el croma del seed.
-    var bestTone = VIVID_TONE_MIN
-    var bestChroma = -1.0
-    var tone = VIVID_TONE_MIN
-    while (tone <= VIVID_TONE_MAX) {
-        val available = Hct.from(seedHct.hue, CHROMA_PROBE, tone).chroma
-        if (available > bestChroma) {
-            bestChroma = available
-            bestTone = tone
-        }
-        tone += TONE_STEP
-    }
+    val bestTone = bestVividTone(seedHct.hue)
 
     // Croma: NUNCA por debajo del que el esquema ya le había dado a este rol. `primary` aquí es
     // todavía el original (`modifyColorScheme` corre al final), así que su croma es el de la
@@ -323,13 +431,73 @@ private fun ColorScheme.withVividPrimary(seed: Color): ColorScheme {
 }
 
 /**
+ * Aviva `secondary` (y repone su `onSecondary`) con el mismo criterio que [withVividPrimary]: el tono
+ * de máximo croma del matiz del álbum, en vez del que le clava el color spec. **Solo en tema oscuro**
+ * (ver la condición en [MusicPlayerTheme]), y **DESPUÉS** de [withVividPrimary] en la cadena, porque
+ * lee el `primary` ya avivado para acotarse por debajo de él.
+ *
+ * El problema es el mismo que el de `primary` pero un escalón más callado: `secondary` colorea el
+ * artista y el álbum del NowPlaying, el estado activo del aleatorio de la cola y la píldora de
+ * favorito, y en una carátula de croma bajo MaterialKolor lo entregaba casi gris. La diferencia con
+ * `primary` es a propósito: el croma se acota a [SECONDARY_CHROMA_FACTOR] del suyo para que estos
+ * elementos sigan siendo un acento SUBORDINADO al título, no un segundo `primary`. La jerarquía entre
+ * el título (primary) y los labels (secondary) sobrevive; lo que se recupera es que dejen de ser grises.
+ *
+ * No toca nada si el seed es acromático, igual que [withVividPrimary]: sin matiz no hay croma que
+ * maximizar (el caso B&N ya va por `Monochrome`, y un gris elegido a mano no debe teñirse).
+ */
+private fun ColorScheme.withVividSecondary(seed: Color): ColorScheme {
+    if (ArtworkRepository.isAchromatic(seed.toArgb())) return this
+    val seedHct = Hct.fromInt(seed.toArgb())
+    val bestTone = bestVividTone(seedHct.hue)
+
+    // Suelo: el croma que el esquema ya le daba a `secondary` (nunca lo empeoramos). Objetivo: una
+    // fracción del croma del ACENTO PRIMARIO ya avivado —no del seed crudo—, así el techo de secondary
+    // sube y baja con el del título y la relación entre ambos es estable sea cual sea la portada.
+    val primaryChroma = Hct.fromInt(primary.toArgb()).chroma
+    val targetChroma = maxOf(
+        Hct.fromInt(secondary.toArgb()).chroma,
+        primaryChroma * SECONDARY_CHROMA_FACTOR
+    )
+    val vivid = Color(Hct.from(seedHct.hue, targetChroma, bestTone).toInt())
+    return copy(
+        secondary = vivid,
+        onSecondary = ensureContrast(onSecondary, vivid, ON_PRIMARY_MIN_CONTRAST)
+    )
+}
+
+/**
  * Anima la transición entre ColorSchemes (al cambiar de canción cambia el seed) para que
  * el cambio de acento global sea suave en toda la app, en lugar de un salto brusco.
  *
  * OJO con el precio: `LocalColorScheme` de material3 es un composition local ESTÁTICO, así que
  * cada frame de este fundido recompone TODO lo que hay bajo el `MaterialTheme`, sin skipping.
  * Por eso existe `animateColors` en [MusicPlayerTheme]: con el reproductor abierto el fundido
- * se sustituye por un `snap` (una sola recomposición) y la coreografía la ponen los reveals.
+ * se sustituye por el color final EN EL ACTO y la coreografía la ponen los reveals.
+ *
+ * ## Dos propiedades que NO se pueden romper, las dos medidas en las fuentes de material3
+ *
+ * **1. Devuelve la MISMA instancia mientras ningún color cambie.** `ColorScheme` no tiene
+ * `equals` y `MaterialTheme.Values.equals` compara el esquema por IDENTIDAD, así que para el local
+ * estático "instancia nueva" = "tema nuevo" = recomponer la app entera, tengan los 48 colores el
+ * valor que tengan. Esta función devolvía `copy(...)` —una instancia nueva— en CADA recomposición,
+ * y `MusicPlayerTheme` recompone cada vez que se abre o se cierra el reproductor (cambia
+ * `animateColors`), o sea que **abrir el player costaba una recomposición del árbol completo con
+ * los colores IDÉNTICOS**, justo en el frame que arranca el container transform. Comparar contra la
+ * última instancia emitida y devolverla si nada cambió es lo que convierte "solo el tema" en
+ * "solo cuando el tema cambia de verdad".
+ *
+ * **2. Sin animar, el color final llega en el MISMO frame, no en el siguiente.** La versión anterior
+ * usaba `snap()` como spec, y un snap NO es instantáneo: `animateColorAsState` encola el objetivo
+ * en un canal, la corrutina lo recoge, `animateTo` pide un `withFrameNanos` para fijar el tiempo de
+ * inicio y recién en ESE callback escribe el valor — o sea la recomposición del árbol caía un frame
+ * DESPUÉS del tap, con la animación de apertura ya en marcha (los specs de Compose avanzan por
+ * tiempo, así que un frame largo hace que el morph dé su primer paso ya avanzado: el tirón). Ahora
+ * con `animate = false` se devuelve el objetivo directamente y la recomposición cae en el frame del
+ * tap, ANTES de que la capa se expanda. Los `animateColorAsState` se siguen llamando aunque no se
+ * lea su valor: así conservan su identidad en la composición y convergen solos al objetivo (con
+ * `snap`), y al volver a activar el fundido arrancan desde el color que se está viendo, no desde
+ * uno viejo.
  */
 // OptIn: `slowEffectsSpec()` es API experimental del MotionScheme.
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
@@ -346,12 +514,20 @@ private fun ColorScheme.animatedScheme(
     // propósito: el morph es SPATIAL y tiene otra física por definición (rebota), así que la
     // coincidencia exacta no era sostenible sin clavar los dos números a mano. Con el token, el
     // color cierra algo antes que el morph.
-    spec: AnimationSpec<Color> = AppMotionScheme.slowEffectsSpec()
+    spec: AnimationSpec<Color> = AppMotionScheme.slowEffectsSpec(),
+    /** `false` = el objetivo en el acto (ver la propiedad 2 del KDoc). */
+    animate: Boolean = true
 ): ColorScheme {
+    // Última instancia emitida (ver la propiedad 1). Contenedor plano y no `mutableStateOf`: es una
+    // memoria de la propia función, no estado del que dependa nadie más.
+    val last = remember { LastScheme() }
+    val effectiveSpec = if (animate) spec else snap()
     @Composable
-    fun anim(target: Color, label: String): Color =
-        animateColorAsState(targetValue = target, animationSpec = spec, label = label).value
-    return copy(
+    fun anim(target: Color, label: String): Color {
+        val state = animateColorAsState(targetValue = target, animationSpec = effectiveSpec, label = label)
+        return if (animate) state.value else target
+    }
+    val next = copy(
         primary = anim(primary, "primary"),
         onPrimary = anim(onPrimary, "onPrimary"),
         primaryContainer = anim(primaryContainer, "primaryContainer"),
@@ -384,7 +560,65 @@ private fun ColorScheme.animatedScheme(
         surfaceContainerLow = anim(surfaceContainerLow, "surfaceContainerLow"),
         surfaceContainerLowest = anim(surfaceContainerLowest, "surfaceContainerLowest")
     )
+    val previous = last.scheme
+    if (previous != null && previous.hasSameColorsAs(next)) return previous
+    last.scheme = next
+    JankProbe.mark {
+        val p = previous
+        val changed = if (p == null) "primera" else listOf(
+            "primary" to (p.primary != next.primary), "surface" to (p.surface != next.surface),
+            "secondary" to (p.secondary != next.secondary), "primaryContainer" to (p.primaryContainer != next.primaryContainer),
+            "onSurface" to (p.onSurface != next.onSurface)
+        ).filter { it.second }.joinToString(",") { it.first }.ifEmpty { "otro rol" }
+        "tema: ColorScheme nuevo (animate=$animate, cambió: $changed) → recompone su subárbol"
+    }
+    return next
 }
+
+/** Ver [animatedScheme]: la última instancia emitida, para devolverla mientras nada cambie. */
+private class LastScheme {
+    var scheme: ColorScheme? = null
+}
+
+/**
+ * Igualdad POR VALOR de dos esquemas, campo a campo — los 48 roles de la versión pineada de
+ * material3 (1.5.0-alpha24). `ColorScheme` no la trae (compara por identidad), y aquí es
+ * exactamente lo que se necesita: decidir si el tema cambió de VERDAD antes de dárselo al
+ * `MaterialTheme`. Se comparan TODOS los campos y no solo los que [animatedScheme] anima, porque
+ * los que no anima llegan del esquema objetivo y también pueden cambiar con él.
+ *
+ * Si material3 añade roles, esta función se queda corta EN SILENCIO (dos esquemas que difieren solo
+ * en el rol nuevo se declararían iguales): al subir de versión, contrastar contra la lista de
+ * campos de `ColorScheme`.
+ */
+private fun ColorScheme.hasSameColorsAs(o: ColorScheme): Boolean =
+    primary == o.primary && onPrimary == o.onPrimary &&
+        primaryContainer == o.primaryContainer && onPrimaryContainer == o.onPrimaryContainer &&
+        inversePrimary == o.inversePrimary &&
+        secondary == o.secondary && onSecondary == o.onSecondary &&
+        secondaryContainer == o.secondaryContainer && onSecondaryContainer == o.onSecondaryContainer &&
+        tertiary == o.tertiary && onTertiary == o.onTertiary &&
+        tertiaryContainer == o.tertiaryContainer && onTertiaryContainer == o.onTertiaryContainer &&
+        background == o.background && onBackground == o.onBackground &&
+        surface == o.surface && onSurface == o.onSurface &&
+        surfaceVariant == o.surfaceVariant && onSurfaceVariant == o.onSurfaceVariant &&
+        surfaceTint == o.surfaceTint &&
+        inverseSurface == o.inverseSurface && inverseOnSurface == o.inverseOnSurface &&
+        error == o.error && onError == o.onError &&
+        errorContainer == o.errorContainer && onErrorContainer == o.onErrorContainer &&
+        outline == o.outline && outlineVariant == o.outlineVariant && scrim == o.scrim &&
+        surfaceBright == o.surfaceBright && surfaceDim == o.surfaceDim &&
+        surfaceContainer == o.surfaceContainer &&
+        surfaceContainerHigh == o.surfaceContainerHigh &&
+        surfaceContainerHighest == o.surfaceContainerHighest &&
+        surfaceContainerLow == o.surfaceContainerLow &&
+        surfaceContainerLowest == o.surfaceContainerLowest &&
+        primaryFixed == o.primaryFixed && primaryFixedDim == o.primaryFixedDim &&
+        onPrimaryFixed == o.onPrimaryFixed && onPrimaryFixedVariant == o.onPrimaryFixedVariant &&
+        secondaryFixed == o.secondaryFixed && secondaryFixedDim == o.secondaryFixedDim &&
+        onSecondaryFixed == o.onSecondaryFixed && onSecondaryFixedVariant == o.onSecondaryFixedVariant &&
+        tertiaryFixed == o.tertiaryFixed && tertiaryFixedDim == o.tertiaryFixedDim &&
+        onTertiaryFixed == o.onTertiaryFixed && onTertiaryFixedVariant == o.onTertiaryFixedVariant
 
 
 /**

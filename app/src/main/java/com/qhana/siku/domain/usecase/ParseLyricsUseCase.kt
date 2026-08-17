@@ -20,9 +20,14 @@ class ParseLyricsUseCase @Inject constructor() {
             if (match != null) {
                 hasTimestamps = true
                 val (min, sec, msStr, content) = match.destructured
-                val ms = if (msStr.isNotEmpty()) {
-                    if (msStr.length == 2) msStr.toLong() * 10 else msStr.toLong()
-                } else 0L
+                // El formato LRC admite la fracción de segundo en CENTÉSIMAS (`.xx`, lo que
+                // escribe casi todo el mundo) o en milésimas (`.xxx`). Se distinguen por el número
+                // de dígitos que capturó el regex, y las centésimas se escalan a milisegundos.
+                val ms = when (msStr.length) {
+                    0 -> 0L
+                    CENTISECOND_DIGITS -> msStr.toLong() * MILLIS_PER_CENTISECOND
+                    else -> msStr.toLong()
+                }
 
                 val timeMillis = TimeUnit.MINUTES.toMillis(min.toLong()) +
                         TimeUnit.SECONDS.toMillis(sec.toLong()) +
@@ -47,6 +52,14 @@ class ParseLyricsUseCase @Inject constructor() {
                 .filter { it.isNotBlank() }
                 .map { LyricLine(0, it) }
         }
+    }
+
+    private companion object {
+        /** Dígitos con los que el LRC expresa centésimas de segundo (`[mm:ss.xx]`). */
+        const val CENTISECOND_DIGITS = 2
+
+        /** Una centésima son diez milisegundos: el factor con el que se normaliza ese caso. */
+        const val MILLIS_PER_CENTISECOND = 10L
     }
 }
 

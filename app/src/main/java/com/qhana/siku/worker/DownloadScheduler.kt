@@ -65,11 +65,18 @@ class DownloadScheduler @Inject constructor(
                 TimeUnit.MINUTES
             )
 
+        // El tracking tag va SIEMPRE: es lo que el logout usa para cancelar descargas en vuelo, y
+        // debe cubrir también las automáticas. Lo que distingue a unas de otras (para el snackbar)
+        // es AUTO_DOWNLOAD_TAG, no la presencia del tracking.
+        requestBuilder.addTag(WorkerTags.DOWNLOAD_TRACKING_TAG)
         if (isUserInitiated) {
             requestBuilder.setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
-            requestBuilder.addTag(WorkerTags.DOWNLOAD_TRACKING_TAG)
+        } else {
+            // Prefetch de fondo: sin expedited (la canción ya suena por streaming, no hay urgencia)
+            // y marcada como automática para que el observador de snackbars no la notifique.
+            requestBuilder.addTag(WorkerTags.AUTO_DOWNLOAD_TAG)
         }
-        
+
         // If it's a repair, add the repair tag
         if (forceRedownload) {
             requestBuilder.addTag(WorkerTags.REPAIR_TAG)

@@ -57,7 +57,7 @@ class PlaybackCoordinator @Inject constructor(
             when (val result = step.execute(preparationContext)) {
                 is PreparationStep.StepResult.Continue -> continue
                 is PreparationStep.StepResult.Abort -> break
-                is PreparationStep.StepResult.Error -> return@withContext PrepareResult.Error(result.message)
+                is PreparationStep.StepResult.Error -> return@withContext PrepareResult.Error(result.messageRes)
             }
         }
 
@@ -88,6 +88,6 @@ class PlaybackCoordinator @Inject constructor(
             val urlRefreshed: Boolean,
             val willStream: Boolean = false
         ) : PrepareResult()
-        data class Error(val message: String) : PrepareResult()
+        data class Error(@androidx.annotation.StringRes val messageRes: Int) : PrepareResult()
     }
 }

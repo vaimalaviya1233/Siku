@@ -28,8 +28,27 @@ interface ISongRepository {
     fun getSongsPaging(
         query: String = "",
         sortOrder: SortOrder = SortOrder.TITLE_ASC,
-        sourceFilters: Set<SongSourceFilter> = emptySet()
+        sourceFilters: Set<SongSourceFilter> = emptySet(),
+        approximateIds: List<String> = emptyList()
     ): Flow<PagingData<Song>>
+
+    /**
+     * Ids de canciones cuyo título, artista o álbum se PARECEN a [query] sin coincidir literalmente
+     * (ver `FuzzyMatch`): lo que rescata a quien escribe `deram` buscando `Dream`.
+     *
+     * Se resuelve en memoria porque SQLite no sabe medir distancias entre palabras, y por eso el
+     * llamador debe pedirlo **solo cuando la búsqueda normal se quedó sin resultados**: recorre el
+     * texto de la biblioteca entera, que es barato de una vez y caro por tecla pulsada.
+     *
+     * Devuelve como mucho [APPROXIMATE_SEARCH_LIMIT] ids, ordenados de más a menos parecido.
+     */
+    suspend fun findApproximateSongIds(query: String): List<String>
+
+    /**
+     * Cuántas canciones coinciden LITERALMENTE con [query]. Responde a "¿hace falta el rescate por
+     * aproximación?" sin traerse ninguna fila.
+     */
+    suspend fun countSongsMatching(query: String, sourceFilters: Set<SongSourceFilter>): Int
 
     /**
      * Lista completa (no paginada) con la misma búsqueda + orden + filtros de origen que
@@ -176,6 +195,12 @@ interface ISongRepository {
 
     /** Sella el intento de resolver carátula: solo tras una lectura que contestó. */
     suspend fun markArtworkAttempted(songIds: List<String>)
+
+    /**
+     * Sella el intento de leer TAGS en la metadata ligera: solo tras una cabecera que se leyó entera
+     * y no traía texto. Gemelo de [markArtworkAttempted] (ver `SongEntity.lightTagsAttemptedAt`).
+     */
+    suspend fun markLightTagsAttempted(songIds: List<String>)
 
     /** Devuelve las canciones a la cola de pendientes (su portada se perdió). */
     suspend fun clearArtworkAttempted(songIds: List<String>)

@@ -29,7 +29,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PlaylistSongCrossRef::class,
         ArtistEntity::class
     ],
-    version = 25, // v25: artworkAttemptedAt (resolución de carátulas pendientes)
+    version = 27, // v27: songs.lightTagsAttemptedAt (sello de la metadata ligera sin tags)
     exportSchema = true
 )
 abstract class MusicDatabase : RoomDatabase() {
@@ -88,6 +88,33 @@ abstract class MusicDatabase : RoomDatabase() {
             }
         }
 
+        // v25 -> v26: contador de búsquedas fallidas en Deezer por artista. Aditiva.
+        // CON backfill, al revés que la v25 y por el motivo opuesto: una fila que ya tiene
+        // fetchedAt sin imageUrl y sin marca manual ES un not-found conocido, así que
+        // dejarla en 0 la trataría como "nunca preguntado" y la volvería a consultar de
+        // inmediato — justo el ciclo que esta columna existe para cortar. Se sella en 1
+        // (un fallo constatado), que le da el mismo TTL de 14 días que tenía antes.
+        private val MIGRATION_25_26 = object : Migration(25, 26) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE artists ADD COLUMN notFoundAttempts INTEGER NOT NULL DEFAULT 0")
+                db.execSQL(
+                    "UPDATE artists SET notFoundAttempts = 1 " +
+                        "WHERE imageUrl IS NULL AND manuallySet = 0 AND fetchedAt IS NOT NULL"
+                )
+            }
+        }
+
+        // v26 -> v27: sello de la metadata ligera (ver `SongEntity.lightTagsAttemptedAt`). Aditiva y
+        // SIN backfill, igual que la v25 y por el mismo motivo: dejarla en NULL hace que la fase
+        // mire una vez cada canción que hoy está pendiente y selle las que de verdad no tienen tags.
+        // Un backfill a "ya intentado" sería mentira —nunca se constató— y condenaría a quedarse sin
+        // texto a las que sí lo tienen pero aún no se habían leído.
+        private val MIGRATION_26_27 = object : Migration(26, 27) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE songs ADD COLUMN lightTagsAttemptedAt INTEGER")
+            }
+        }
+
         fun getInstance(context: Context): MusicDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -95,7 +122,14 @@ abstract class MusicDatabase : RoomDatabase() {
                     MusicDatabase::class.java,
                     "music_cache.db"
                 )
-                    .addMigrations(MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24, MIGRATION_24_25)
+                    .addMigrations(
+                        MIGRATION_21_22,
+                        MIGRATION_22_23,
+                        MIGRATION_23_24,
+                        MIGRATION_24_25,
+                        MIGRATION_25_26,
+                        MIGRATION_26_27
+                    )
                     // SIN fallbackToDestructiveMigration a propósito: ver el KDoc de la clase.
                     .build()
                     .also { INSTANCE = it }

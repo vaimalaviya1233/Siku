@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,20 +24,22 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MaterialTheme.colorScheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
+import androidx.graphics.shapes.RoundedPolygon
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -45,15 +48,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
 import com.qhana.siku.data.local.GenreSummary
-import com.qhana.siku.ui.components.AdaptiveCollage
+import com.qhana.siku.ui.components.ACCENT_SECONDARY_ALPHA
 import com.qhana.siku.ui.components.MaterialSymbol
+import com.qhana.siku.ui.components.QueueOverflowButton
 import com.qhana.siku.ui.components.TonalChip
+import com.qhana.siku.ui.components.rememberRowActionColors
 import com.qhana.siku.ui.theme.AppBoundsTransform
 
 /**
- * Pestaña "Géneros": cuadrícula de 2 columnas, misma familia visual que Álbumes (tarjeta con
- * imagen arriba + contenido y play abajo). Como un género no tiene carátula propia, la imagen es
- * un COLLAGE de hasta cuatro portadas distintas de sus canciones.
+ * Pestaña "Géneros": cuadrícula de 2 columnas. Como un género no tiene carátula propia, cada tile es
+ * una forma M3 Expressive (cookie/sunny) rellena con un color de la PALETA del tema, forma y color
+ * deterministas por el nombre — así el mismo género sale siempre igual, sin depender de que sus
+ * canciones tengan portada y heredando el color dinámico de la app.
  *
  * El toolbar lleva, además del conteo, el chip "géneros compuestos": los tags GENRE reales vienen
  * sucios ("Rock", "Rock/Metal", "Hard Rock") y no hay normalización que no pierda información, así
@@ -66,6 +72,8 @@ fun GenresScreen(
     genres: List<GenreSummary>,
     onGenreClick: (String) -> Unit,
     onPlayGenre: (String) -> Unit,
+    /** Encola TODAS las canciones del género al final de la cola, desde el overflow del tile. */
+    onAddGenreToQueue: (String) -> Unit,
     partialMatch: Boolean,
     onPartialMatchChange: (Boolean) -> Unit,
     contentPadding: PaddingValues,
@@ -84,7 +92,7 @@ fun GenresScreen(
                 MaterialSymbol(
                     "genres",
                     size = 64.sp,
-                    color = colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                    color = colorScheme.outline
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
@@ -148,6 +156,7 @@ fun GenresScreen(
                 modifier = Modifier.animateItem(),
                 onClick = { onGenreClick(genre.name) },
                 onPlayClick = { onPlayGenre(genre.name) },
+                onAddToQueue = { onAddGenreToQueue(genre.name) },
                 sharedTransitionScope = sharedTransitionScope,
                 animatedVisibilityScope = animatedVisibilityScope
             )
@@ -156,9 +165,10 @@ fun GenresScreen(
 }
 
 /**
- * Tarjeta de género: collage de portadas con badge de conteo + nombre y play. Misma anatomía que
- * la tarjeta de álbum para que la cuadrícula se lea igual al deslizar entre pestañas; el collage
- * (y no una sola portada) es lo que distingue de un vistazo un género de un álbum.
+ * Tile de género: forma M3 Expressive (cookie/sunny) rellena con un par `x`/`onX` del tema, ambos
+ * deterministas por el nombre, con el nombre, el conteo y el play CENTRADOS encima. La forma + el
+ * color propio es lo que da identidad a cada género sin depender de que sus canciones tengan
+ * carátula, y lo distingue de un vistazo del tile cuadrado de un álbum.
  */
 @OptIn(ExperimentalSharedTransitionApi::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -166,85 +176,179 @@ private fun GenreTileCard(
     genre: GenreSummary,
     onClick: () -> Unit,
     onPlayClick: () -> Unit,
+    onAddToQueue: () -> Unit,
     modifier: Modifier = Modifier,
     sharedTransitionScope: SharedTransitionScope? = null,
     animatedVisibilityScope: AnimatedVisibilityScope? = null
 ) {
-    Card(
-        onClick = onClick,
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = colorScheme.surfaceContainerHigh),
-        modifier = modifier.fillMaxWidth()
-    ) {
-        val sharedModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
-            with(sharedTransitionScope) {
-                Modifier.sharedBounds(
-                    sharedContentState = rememberSharedContentState(key = "genre_image_${genre.name}"),
-                    animatedVisibilityScope = animatedVisibilityScope,
-                    // Spring del tema en vez del default de la API (ver AppBoundsTransform).
-                    boundsTransform = AppBoundsTransform
-                )
-            }
-        } else Modifier
-
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(1f)
-                .then(sharedModifier)
-                .background(colorScheme.surfaceContainerHighest)
-        ) {
-            val arts = genre.arts
-            if (arts.isEmpty()) {
-                // Sin ninguna portada: glifo de relleno. AdaptiveCollage NO rellena huecos
-                // repitiendo imágenes, así que el placeholder es cosa de la pantalla.
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    MaterialSymbol("genres", size = 40.sp, color = colorScheme.onSurfaceVariant)
-                }
-            } else {
-                AdaptiveCollage(arts = arts, modifier = Modifier.fillMaxSize())
-            }
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(8.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(colorScheme.secondaryContainer)
-                    .padding(horizontal = 8.dp, vertical = 3.dp)
-            ) {
-                MaterialSymbol("music_note", size = 13.sp, color = colorScheme.onSecondaryContainer)
-                Spacer(modifier = Modifier.width(3.dp))
-                Text(
-                    text = "${genre.songCount}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = colorScheme.onSecondaryContainer
-                )
-            }
+    val sharedModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
+        with(sharedTransitionScope) {
+            Modifier.sharedBounds(
+                sharedContentState = rememberSharedContentState(key = "genre_image_${genre.name}"),
+                animatedVisibilityScope = animatedVisibilityScope,
+                // Spring del tema en vez del default de la API (ver AppBoundsTransform).
+                boundsTransform = AppBoundsTransform
+            )
         }
+    } else Modifier
 
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp)
+    // SIN Card detrás: la forma ES el tile. Una superficie rectangular por debajo asomaría por las
+    // esquinas —que la forma no llena— y anularía justo la silueta que le da identidad al género.
+    val shape = genreShape(genre.name).toShape()
+    val (containerColor, onColor) = genrePalette(genre.name)
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .aspectRatio(1f)
+            .then(sharedModifier)
+            .clip(shape)
+            .background(containerColor)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        // Contenido CENTRADO, dentro de la zona sólida de la forma: los festones muerden el borde y
+        // el centro queda limpio sea cual sea la forma sorteada. El play estuvo en `BottomEnd` y
+        // era INVISIBLE — el `clip` recorta también a los hijos, y en una cookie esa esquina está
+        // vacía, así que el botón caía entero fuera de la silueta.
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(horizontal = 20.dp)
         ) {
             Text(
                 text = genre.name,
-                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                color = colorScheme.onSurface,
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                color = onColor,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
+                textAlign = TextAlign.Center
             )
-            Spacer(modifier = Modifier.width(8.dp))
-            IconButton(
-                onClick = onPlayClick,
-                shapes = IconButtonDefaults.shapes(),
-                modifier = Modifier.size(40.dp)
-            ) {
-                MaterialSymbol("play_circle", size = 30.sp, color = colorScheme.primary, fill = true)
+            Text(
+                text = pluralStringResource(R.plurals.song_count, genre.songCount, genre.songCount),
+                style = MaterialTheme.typography.labelSmall,
+                color = onColor.copy(alpha = ACCENT_SECONDARY_ALPHA),
+                maxLines = 1
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            // Play + overflow, los dos DENTRO de la zona sólida de la forma (por eso van en la
+            // columna centrada y no en una esquina: el `clip` del tile recorta a los hijos y en una
+            // cookie las esquinas están vacías — ver la nota de arriba, que ya costó un botón
+            // invisible una vez).
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = onPlayClick,
+                    shapes = IconButtonDefaults.shapes(),
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    MaterialSymbol("play_circle", size = 32.sp, color = onColor, fill = true)
+                }
+                Spacer(modifier = Modifier.width(4.dp))
+                // Colores derivados del color REAL del tile (que cambia con cada género y con la
+                // paleta del tema), no de un rol fijo: sobre un tile que ya ES `primary` una
+                // píldora `secondaryContainer` podría desaparecer.
+                QueueOverflowButton(
+                    onAddToQueue = onAddToQueue,
+                    colors = rememberRowActionColors(containerColor),
+                    contentDescription = stringResource(R.string.common_genre_options),
+                    menuLabel = stringResource(R.string.detail_add_all_to_queue)
+                )
             }
         }
     }
 }
+
+/**
+ * Constantes de avalancha de `lowbias32` (variante de `fmix32`/MurmurHash3). No son un número
+ * mágico elegible: son los multiplicadores con los que ese finalizador consigue que cambiar UN bit
+ * de la entrada altere la mitad de los bits de la salida.
+ */
+private const val MIX_MULTIPLIER_A = 0x7feb352d
+private val MIX_MULTIPLIER_B = 0x846ca68b.toInt()
+
+/** Sales para derivar forma y color de la misma semilla sin que queden correlacionadas. */
+private const val SHAPE_SALT = 0x5bf03635
+private const val COLOR_SALT = 0x2f1e9d43
+
+/**
+ * Finalizador de avalancha. Es lo que hace que el reparto se vea ALEATORIO en vez de por orden.
+ *
+ * El defecto MEDIDO del `% n` directo sobre `String.hashCode`: el ÚLTIMO carácter entra con peso 1,
+ * así que nombres con el mismo prefijo que difieren en el final marchan por las formas en fila —
+ * `Rocka..Rocke` daban 3, 4, 0, 1, 2, un +1 por letra, que es justo el patrón que se veía en la
+ * cuadrícula. Con la mezcla dan 3, 2, 0, 4, 0.
+ *
+ * OJO con lo que NO era: el reparto agregado del hash crudo ya estaba bien (χ²=2.75 sobre 40
+ * géneros reales, contra 4.00 del mezclado — ninguno de los dos está sesgado). Esto no se hace por
+ * uniformidad, sino contra la marcha secuencial y la correlación de [genreShape].
+ */
+private fun mix32(seed: Int): Int {
+    var h = seed
+    h = h xor (h ushr 16)
+    h *= MIX_MULTIPLIER_A
+    h = h xor (h ushr 15)
+    h *= MIX_MULTIPLIER_B
+    h = h xor (h ushr 16)
+    return h
+}
+
+/**
+ * Semilla del género: hash ESTABLE del nombre normalizado (`String.hashCode` es determinista por
+ * especificación) ya mezclado. Pseudoaleatorio pero REPRODUCIBLE — "Rock" sale siempre igual entre
+ * sesiones y dispositivos, que es lo que un `Random` de verdad no daría (cambiaría la forma en cada
+ * recomposición, parpadeando al hacer scroll).
+ */
+private fun genreSeed(name: String): Int = mix32(name.trim().lowercase().hashCode())
+
+/** Número de pares de [genrePalette]. Coprimo con `GENRE_SHAPES.size` (5), que ayuda a que forma y
+ *  color no vuelvan a caer en fase aunque alguien toque las sales. */
+private const val GENRE_PALETTE_COUNT = 6
+
+/**
+ * Color del tile y su color de contenido, sacados de la PALETA del tema (que a su vez se siembra de
+ * la carátula): así los géneros heredan el color dinámico y el `PaletteStyle` elegido en Ajustes, en
+ * vez de un HSV inventado que se vería igual con cualquier tema. El contraste no se calcula — lo
+ * garantiza el par `x`/`onX` de M3.
+ *
+ * Solo entran roles que GIRAN con el tema. Los `xFixed` quedaron fuera a propósito: valen T90 en
+ * claro y en oscuro (existen justo para no cambiar), así que mezclados con los `xContainer` —T90 en
+ * claro pero T30 en oscuro— habrían dejado en tema oscuro media cuadrícula de tiles claros y media
+ * de oscuros.
+ *
+ * Se lee del scheme en cada llamada, sin `remember`: el tema de esta app se ANIMA mutando la misma
+ * instancia de `ColorScheme`, así que cachear por instancia serviría colores viejos.
+ */
+@Composable
+private fun genrePalette(name: String): Pair<Color, Color> {
+    val cs = colorScheme
+    return when (Math.floorMod(mix32(genreSeed(name) xor COLOR_SALT), GENRE_PALETTE_COUNT)) {
+        0 -> cs.primaryContainer to cs.onPrimaryContainer
+        1 -> cs.secondaryContainer to cs.onSecondaryContainer
+        2 -> cs.tertiaryContainer to cs.onTertiaryContainer
+        3 -> cs.primary to cs.onPrimary
+        4 -> cs.secondary to cs.onSecondary
+        else -> cs.tertiary to cs.onTertiary
+    }
+}
+
+/**
+ * Formas M3 Expressive candidatas para los tiles de género: convexas/redondeadas a propósito porque
+ * el nombre va CENTRADO encima (las de concavidad profunda —tréboles— se lo comerían). Todas están
+ * verificadas en uso en la app (NowPlaying / Artistas).
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+private val GENRE_SHAPES: List<RoundedPolygon> = listOf(
+    MaterialShapes.Cookie12Sided,
+    MaterialShapes.Cookie9Sided,
+    MaterialShapes.Sunny,
+    MaterialShapes.Cookie7Sided,
+    MaterialShapes.Cookie6Sided
+)
+
+/**
+ * Forma determinista del género. Se RE-MEZCLA con [SHAPE_SALT] en vez de reusar [genreSeed] tal
+ * cual: como `GENRE_SHAPES.size` divide a 360, `seed % 5` quedaría determinado por `seed % 360`, o
+ * sea la forma sería una función del color y dos géneros de matiz parecido saldrían siempre con la
+ * misma silueta.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+private fun genreShape(name: String): RoundedPolygon =
+    GENRE_SHAPES[Math.floorMod(mix32(genreSeed(name) xor SHAPE_SALT), GENRE_SHAPES.size)]

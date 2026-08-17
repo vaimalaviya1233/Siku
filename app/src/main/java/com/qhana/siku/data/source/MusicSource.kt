@@ -5,13 +5,14 @@ import com.qhana.siku.data.model.SourceType
 import kotlinx.coroutines.flow.Flow
 
 /**
- * Abstracción de un proveedor de música (OneDrive, carpeta local, …). Fase 2: seam para las
- * operaciones específicas del proveedor, de modo que agregar una fuente nueva no obligue a
- * tocar el player ni el pipeline genérico.
+ * Abstracción de un proveedor de música (OneDrive, carpeta local, …): el seam con las operaciones
+ * específicas del proveedor, de modo que agregar una fuente nueva no obligue a tocar el player ni
+ * el pipeline genérico.
  *
- * El descubrimiento (scan/delta) se añade a esta interfaz en el siguiente incremento; por ahora
- * cubre la resolución de reproducción y la extracción de metadata, que es lo que el player
- * consumía directo de `OneDriveRepository`.
+ * Cubre el ciclo completo: si la fuente está configurada ([isConfigured] / [isConfiguredFlow]),
+ * el DESCUBRIMIENTO ([discover] — delta en la nube, walk en local), la resolución de reproducción
+ * ([resolveDownloadUrl]) y la extracción de metadata. `SyncManager` orquesta sin conocer a
+ * ninguna implementación concreta.
  */
 interface MusicSource {
     /** Tipo de fuente que maneja esta implementación (se rutea por `song.sourceType`). */

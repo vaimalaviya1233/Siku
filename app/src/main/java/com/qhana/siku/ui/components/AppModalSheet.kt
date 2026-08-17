@@ -52,7 +52,15 @@ import kotlinx.coroutines.launch
 fun AppModalSheet(
     onDismissRequest: () -> Unit,
     modifier: Modifier = Modifier,
-    sheetState: SheetState = rememberModalBottomSheetState(),
+    // `skipPartiallyExpanded = true` por DEFAULT, y es lo que arregla el "hay que dar atrás dos
+    // veces para cerrar". El `settleToDismiss` de `ModalBottomSheet` (lo que corre al hacer back)
+    // COLAPSA a media altura en vez de cerrar cuando la hoja está `Expanded` y tiene estado parcial
+    // (`if (currentValue == Expanded && hasPartiallyExpandedState) partialExpand() else hide()`); con
+    // contenido alto —una lista de candidatos, p.ej.— el primer back solo baja el detent y hace falta
+    // un segundo para cerrar. Sin estado parcial, back siempre cierra en un gesto. Todas las hojas de
+    // la app son listas/opciones que abren enteras: ninguna quiere el medio-detent. Dos hojas ya lo
+    // forzaban a mano (AddSongsToPlaylist, OneDriveFolderPicker) — ahora es el default para todas.
+    sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
     content: @Composable ColumnScope.() -> Unit
 ) {
     val scope = rememberCoroutineScope()

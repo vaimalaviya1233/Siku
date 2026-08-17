@@ -1,10 +1,6 @@
 package com.qhana.siku.ui.components
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExperimentalSharedTransitionApi
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -13,49 +9,26 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.isSpecified
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import com.qhana.siku.R
 import com.qhana.siku.data.model.Song
-import com.qhana.siku.ui.LocalArtOriginSongId
+import com.qhana.siku.ui.ContainerOriginRole
+import com.qhana.siku.ui.LocalRowOrigin
 import com.qhana.siku.ui.appSharedTransitionScope
 import com.qhana.siku.ui.model.SongUiModel
 import com.qhana.siku.ui.model.toUiModel
-import com.qhana.siku.ui.theme.AppBoundsTransform
-import com.qhana.siku.ui.theme.EXPRESSIVE_FAST_EFFECTS_MS
-import com.qhana.siku.ui.theme.ExpressiveFastEffectsEasing
-import androidx.compose.ui.graphics.compositeOver
-import com.materialkolor.hct.Hct
+import com.qhana.siku.ui.theme.AppContainerBoundsTransform
 
 // ============== FONDO Y ACCIONES DE LA FILA ==============
-
-/**
- * Tinte del ítem en reproducción sobre el contenedor de su lista: `secondary` al 12%, el criterio
- * de resaltado de toda la app. Vive aquí porque lo necesitan DOS consumidores —quien lo pinta
- * ([SongItem]) y quien se mide contra él ([rememberRowActionColors])— y con dos copias la píldora
- * de acciones se calcularía contra un fondo que ya no es el que se dibuja.
- */
-private const val ACTIVE_ROW_TINT_ALPHA = 0.12f
-
-/**
- * Separación tonal (HCT) de la píldora de acciones respecto del fondo de SU fila. 8 = el recorrido
- * COMPLETO de la escala de contenedores de M3 en tema claro (`surface` 98 → `surfaceContainerHighest`
- * 90): la mayor distancia que el spec sigue leyendo como "otra superficie" sin llegar al salto de un
- * botón de acción. Por debajo de ~4 (dos niveles) la píldora se funde con la fila, que es justo de
- * donde venimos: `secondaryContainer` cae en la MISMA banda que `surfaceContainerHigh` (~90 vs 92).
- */
-private const val ROW_ACTION_TONE_DELTA = 8.0
-
-/** Centro de la escala de tono HCT: decide si la píldora se aleja del fondo hacia abajo o hacia arriba. */
-private const val ROW_ACTION_MID_TONE = 50.0
 
 /**
  * Contraste mínimo del glifo sobre la píldora. 4.5:1 (AA de texto, no el 3:1 de icono) porque los
@@ -64,63 +37,74 @@ private const val ROW_ACTION_MID_TONE = 50.0
 private const val ROW_ACTION_GLYPH_MIN_CONTRAST = 4.5f
 
 /**
- * Fondo EFECTIVO de una fila de canción: el contenedor de la lista con el tinte del ítem activo ya
- * compuesto. Es el color que hay REALMENTE debajo del contenido de la fila, y por tanto contra el
- * que se miden las superficies que se apoyan encima.
+ * Fondo EFECTIVO de una fila de canción: `primaryContainer` (contenedor de acento SÓLIDO, sin
+ * opacidad) cuando la fila SUENA, el contenedor base en las demás. Es el color que hay REALMENTE
+ * debajo del contenido de la fila, y por tanto contra el que se miden las superficies que se apoyan
+ * encima ([rememberRowActionColors]).
+ *
+ * El resaltado del ítem activo es el MISMO en toda la app —biblioteca, detalles y cola—:
+ * `primaryContainer` con contenido en `onPrimaryContainer`. Antes cada superficie lo resolvía
+ * distinto (esta con `secondary` al 12%, la lista y la cola con un blend del acento del álbum), y el
+ * blend quedaba casi invisible en un álbum monocromo. La jerarquía va por ROL, no por opacidad.
  */
 @Composable
 fun songRowBackground(base: Color, isPlaying: Boolean): Color =
-    if (isPlaying) MaterialTheme.colorScheme.secondary.copy(alpha = ACTIVE_ROW_TINT_ALPHA).compositeOver(base)
-    else base
+    if (isPlaying) MaterialTheme.colorScheme.primaryContainer else base
 
-/** Par contenedor/contenido de la píldora de acciones de una fila. */
-@Immutable
-data class RowActionColors(val container: Color, val content: Color)
+/**
+ * Contraste mínimo del contenido de la fila ACTIVA sobre su relleno de acento. 4.5:1 = AA de TEXTO,
+ * porque lo que se apoya ahí es el título y el subtítulo de la canción.
+ */
+private const val ACTIVE_ROW_CONTENT_MIN_CONTRAST = 4.5f
+
+/**
+ * Color del contenido de la fila que SUENA: `onPrimaryContainer`, pero pasado por [ensureContrast]
+ * contra el relleno que lo pinta. En teoría el par `on-`/contenedor de M3 ya contrasta, pero con
+ * carátulas de croma bajo —y según el estilo de paleta— MaterialKolor entrega el par demasiado cerca
+ * en tono y el texto de la fila activa quedaba MÁS apagado que el de las filas normales, justo al
+ * revés de lo que el resaltado busca. Conserva el matiz del álbum y es no-op si el par ya cumple.
+ *
+ * Devuelve `Unspecified` cuando la fila no está activa, que es lo que [SongItem] espera en
+ * `activeContentColor` para caer a sus roles normales.
+ *
+ * Vive AQUÍ, junto a [songRowBackground], porque el resaltado del ítem activo se pinta desde cuatro
+ * sitios (biblioteca, cola, detalle de lista y el propio `ListItem` de los demás detalles) y el color
+ * de su contenido tiene que salir de UNA sola definición: mientras la cola aplicaba el contraste y el
+ * resto usaba el rol a pelo, la misma fila se leía distinta según la pantalla.
+ */
+@Composable
+fun rememberActiveRowContentColor(rowBackground: Color, isPlaying: Boolean): Color {
+    val onPrimaryContainer = MaterialTheme.colorScheme.onPrimaryContainer
+    // Solo la fila que suena lo necesita, y solo cuando cambian esos colores: el barrido de contraste
+    // no debe correr por cada fila en cada recomposición del scroll.
+    return remember(isPlaying, onPrimaryContainer, rowBackground) {
+        if (isPlaying) {
+            ensureContrast(onPrimaryContainer, rowBackground, ACTIVE_ROW_CONTENT_MIN_CONTRAST)
+        } else {
+            Color.Unspecified
+        }
+    }
+}
+
+/**
+ * Par contenedor/contenido de la píldora de acciones de una fila. Es el par genérico de
+ * [TonalLayerColors]: la píldora fue el primer caso, pero la regla —derivar del fondo REAL en vez de
+ * un rol fijo— vale para cualquier capa sobre otra (ver el chip de origen del NowPlaying).
+ */
+typealias RowActionColors = TonalLayerColors
 
 /**
  * Colores de la píldora de overflow (⋮) de una fila, DERIVADOS del fondo real de la fila en vez de
- * un rol fijo de la paleta.
+ * un rol fijo de la paleta. La regla y su porqué viven en [rememberTonalLayerColors]; aquí solo se
+ * fija el contraste que pide ESTE caso.
  *
- * Por qué no `secondaryContainer` a secas: ese rol vive en la misma banda tonal que los contenedores
- * de superficie sobre los que se apoyan las filas, así que la píldora se ve o no según lo que la
- * paleta activa haya hecho con esa banda — y sobre el fondo TEÑIDO del ítem en reproducción
- * desaparece. Medido en device con tres estilos de paleta sobre la MISMA canción: vibrante daba una
- * píldora saturada que competía con el botón de play, monocromo un bloque plano y "fiel" una mancha
- * fundida con la fila. Los parches previos (interpolar `primary` hacia blanco o negro con constantes
- * distintas por tema) no podían arreglarlo: un lerp hacia los extremos mata el croma junto con la luz
- * —lo mismo que ya documenta `accentTone`— y sobre todo no GARANTIZA ninguna separación, que es lo
- * único que se estaba pidiendo.
- *
- * La regla: se conservan hue y croma del rol que le toca (`secondaryContainer` — sigue siendo un
- * color de la paleta, no un gris inventado) y se le fija el TONO a [ROW_ACTION_TONE_DELTA] puntos del
- * fondo, alejándose del extremo de la escala. Es como M3 construye sus propios niveles de superficie,
- * así que la separación sale idéntica en cualquier paleta y en cualquiera de los dos temas: la
- * dirección la decide el tono MEDIDO del fondo, no una rama `isSystemInDarkTheme()`.
- *
- * **Sirve para UNA capa sobre otra, no para apilar tres.** Vale para las filas —una píldora sobre un
- * fondo— pero no para el MiniPlayer, donde el botón tiene que verse a la vez sobre el contenedor y
- * sobre el relleno de progreso: al derivar dos veces seguidas con "aléjate del extremo", un fondo de
- * tono medio hace que la segunda invierta el sentido y vuelva al color del primero (probado el 31
- * jul, ver `MiniPlayerSurfaces`, que apila en una sola dirección).
+ * Medido en device con tres estilos de paleta sobre la MISMA canción: con `secondaryContainer` a
+ * secas, vibrante daba una píldora saturada que competía con el botón de play, monocromo un bloque
+ * plano y "fiel" una mancha fundida con la fila.
  */
 @Composable
-fun rememberRowActionColors(rowBackground: Color): RowActionColors {
-    val role = MaterialTheme.colorScheme.secondaryContainer
-    val onRole = MaterialTheme.colorScheme.onSecondaryContainer
-    return remember(rowBackground, role, onRole) {
-        val rowTone = Hct.fromInt(rowBackground.toArgb()).tone
-        val roleHct = Hct.fromInt(role.toArgb())
-        val tone = (
-            if (rowTone > ROW_ACTION_MID_TONE) rowTone - ROW_ACTION_TONE_DELTA
-            else rowTone + ROW_ACTION_TONE_DELTA
-        ).coerceIn(0.0, 100.0)
-        val container = Color(Hct.from(roleHct.hue, roleHct.chroma, tone).toInt())
-        RowActionColors(
-            container = container,
-            content = ensureContrast(onRole, container, ROW_ACTION_GLYPH_MIN_CONTRAST)
-        )
-    }
-}
+fun rememberRowActionColors(rowBackground: Color): RowActionColors =
+    rememberTonalLayerColors(rowBackground, minContrast = ROW_ACTION_GLYPH_MIN_CONTRAST)
 
 // ============== SONG STATUS ICON ==============
 
@@ -180,7 +164,10 @@ fun SongStatusIcon(
                 }
             }
             else -> {
-                MaterialSymbol("cloud_download", color = Color.Gray.copy(alpha = 0.5f), size = sizeSp)
+                // `outline` y no un gris FIJO: `Color.Gray` no se entera del tema, así que en
+                // oscuro este indicador quedaba casi invisible sobre el fondo. El rol tiene tono
+                // por tema (50 claro / 60 oscuro), que es lo que este glifo pedía.
+                MaterialSymbol("cloud_download", color = MaterialTheme.colorScheme.outline, size = sizeSp)
             }
         }
     }
@@ -208,35 +195,43 @@ fun SongStatusIcon(
 
 /**
  * Carátula de una fila de canción. Normalmente es un `AlbumArt` y ya está; lo que la complica es
- * que además es el **origen** de la carátula del reproductor cuando éste se abre desde esta fila.
+ * que además **viaja al reproductor** cuando éste se abre desde esta fila.
  *
- * ## Cómo una fila puede ser origen de un shared element
+ * ## Es la portada DENTRO de un container transform, no un morph suelto
  *
- * El reproductor NO es una ruta del `NavHost` sino una capa hermana, así que al abrirlo la lista
- * **sigue en pantalla detrás**. Eso choca de frente con la regla de Compose de que, de las dos
- * puntas de una key, solo UNA puede ser destino: una fila que se queda visible siempre lo es, y con
- * dos destinos no hay animación ninguna (la portada aparecería quieta en su posición final, que es
- * el bug que se persiguió media tarde del 30 jul).
+ * Al tocar una fila, lo que crece hasta ser el reproductor es la superficie ENTERA de la fila
+ * ([SongRowContainer]); esta portada es un `sharedElement` **anidado** dentro de ese contenedor —el
+ * mismo reparto de papeles que la píldora y su carátula—. El contenedor escala y se funde; la
+ * portada es lo único que VIAJA, porque es lo único que existe igual en las dos puntas.
  *
- * La solución es la misma que usa el *container transform* de Material: **el origen se oculta
- * mientras dura el viaje**. El `AnimatedVisibility` de aquí no está por estética — al pasar a
- * `visible = false` la fila queda "saliendo", deja de ser destino y cede sus bounds como origen. Al
- * cerrar el reproductor vuelve a entrar y recibe la portada de vuelta.
+ * Por eso aquí ya no hay `AnimatedVisibility`: **ocultar el origen es trabajo del contenedor**, que
+ * es quien tiene que dejar de ser destino para que Compose acepte el match (de las dos puntas de una
+ * key solo UNA puede ser destino; con dos, la portada aparece quieta en su posición final — el bug
+ * del 30 jul). Esta capa solo dice si se pinta o no.
+ *
+ * ## `sharedElementWithCallerManagedVisibility`, no el atado al scope
+ *
+ * Del scope se leería su DURACIÓN, y una punta atada a él deja de participar en cuanto esa
+ * transición termina. Aquí la visibilidad se deriva del estado del origen y punto: exactamente una
+ * de las dos puntas está `visible` en cada sentido, que es lo que decide cuál es origen y cuál
+ * destino, sin depender de que dos transiciones distintas duren lo mismo.
  *
  * ## Por qué NO hace falta pasar ningún id
  *
  * La fila origen es SIEMPRE la de la canción activa: `MusicController.announceSelection` fija la
  * canción en el frame del tap, antes de que el reproductor se expanda. Así que cada fila decide por
- * su cuenta comparando ids contra `LocalArtOriginSongId`, sin que ningún callback tenga que cargar
+ * su cuenta preguntando a `LocalRowOrigin` qué papel le toca, sin que ningún callback tenga que cargar
  * con el id. De regalo, si el usuario cambia de canción dentro del reproductor, al cerrar la portada
  * aterriza en la fila que AHORA suena, que es lo coherente.
  *
  * ## Lo que hay que vigilar
  *
- * El `sharedElement` se declara SIEMPRE, no solo al ser origen: una punta que nace en el frame del
- * tap no tiene bounds que ofrecer y no hay match. Lo que permite tener diez filas declarando a la
- * vez sin que se peleen es que la key lleve el id (`rowArtSharedKey`); lo que hace que una sea
- * ORIGEN es ocultarse, no declararse.
+ * El shared element se declara SOLO mientras la fila tiene papel en el morph, igual que el contenedor
+ * (ver `ContainerOriginRole`): con papel VISIBLE está a la vista y ofrece sus bounds —el frame de
+ * preparación, o el cierre—; con HIDDEN la portada la dibuja el reproductor al otro lado y pintarla
+ * también aquí sería dibujarla dos veces. Sin papel no hay modifier: es el camino caliente del scroll
+ * y hasta el 16 ago cada fila visible mantenía aquí una entrada viva en el `SharedTransitionScope`.
+ * La key lleva el id ([rowArtSharedKey]) para que la punta del reproductor elija de qué fila sale.
  *
  * Y el scope se pide con `appSharedTransitionScope()`, que devuelve null fuera de su ventana: estas
  * mismas filas se componen dentro de diálogos (el overlay de búsqueda) y de sheets, donde declarar
@@ -255,59 +250,43 @@ private fun SongItemArt(
     val sharedScope = appSharedTransitionScope()
 
     // SIN scope no hay nada que hacer aquí: esta fila no puede ser origen de ningún morph, así que
-    // no necesita ni ocultarse ni declarar shared element. Se dibuja la carátula a pelo y se sale.
-    //
-    // No es una micro-optimización: es el caso de TODAS las filas de las hojas —la cola, "añadir
-    // canciones"— donde el scope va anulado a propósito, y de cualquier lista fuera del
-    // `SharedTransitionLayout`. Para ellas el envoltorio de abajo era un nodo de layout MÁS una
-    // `Transition` por fila, que hay que componer al abrir y DESCOMPONER al cerrar. Con "añadir
-    // canciones", que lista media biblioteca, eso se pagaba de golpe en el frame del cierre y se
-    // veía como un tirón al salir la hoja.
+    // no necesita declarar shared element. Se dibuja la carátula a pelo y se sale. Es el caso de
+    // TODAS las filas de las hojas —la cola, "añadir canciones"— donde el scope va anulado a
+    // propósito, y de cualquier lista fuera del `SharedTransitionLayout`.
     if (sharedScope == null) {
         SongArtImage(song, downloadProgress, isDownloading, useRingProgress)
         return
     }
 
-    // `derivedStateOf` y no una lectura directa: el id del origen cambia al abrir y al cerrar el
+    // `derivedStateOf` y no una lectura directa: el origen cambia al preparar, al abrir y al cerrar el
     // reproductor, y leerlo a pelo recompondría TODAS las filas visibles en ese mismo frame — el
-    // que arranca la transición y el que la termina. Así solo recompone la fila cuyo veredicto
-    // cambia. Ver [LocalArtOriginSongId].
-    val originIdState = LocalArtOriginSongId.current
-    val isArtOrigin by remember(song.id) {
-        derivedStateOf { originIdState.value == song.id }
-    }
+    // que arranca la transición y el que la termina. Así solo recompone la fila cuyo papel cambia.
+    // Ver [RowOriginHost].
+    val rowOrigin = LocalRowOrigin.current
+    val role by remember(song.id, rowOrigin) { derivedStateOf { rowOrigin.roleOf(song.id) } }
 
-    AnimatedVisibility(
-        visible = !isArtOrigin,
-        // El contenido se mantiene compuesto un instante tras ocultarse (ver `exit`), y eso es
-        // deliberado: es la ventana en la que sirve de origen.
-        // Entrar: la portada VUELVE a la fila al cerrar el reproductor. El shared element la trae
-        // hasta aquí, así que esta capa solo tiene que dejar de estorbar — sin fade propio, o se
-        // vería aparecer encima de la que está aterrizando.
-        enter = EnterTransition.None,
-        // Salir: se disuelve rápido mientras la copia despega. Con `ExitTransition.None` la fila se
-        // descompondría en el acto y el shared element se quedaría sin punta de origen.
-        exit = fadeOut(tween(EXPRESSIVE_FAST_EFFECTS_MS, easing = ExpressiveFastEffectsEasing))
-    ) {
-        // SIEMPRE declarado, no solo cuando la fila es el origen. Es la corrección del 30 jul
-        // (noche): declararlo solo al ser origen lo registraba en el MISMO frame del tap, sin
-        // bounds previos que ofrecer, y sin bounds no hay match — la portada aparecía quieta en su
-        // destino. Que la key lleve el id es lo que permite tener diez filas declarando a la vez
-        // sin que se peleen (ver [rowArtSharedKey]).
-        SongArtImage(
-            song = song,
-            downloadProgress = downloadProgress,
-            isDownloading = isDownloading,
-            useRingProgress = useRingProgress,
-            modifier = with(sharedScope) {
-                Modifier.sharedElement(
-                    sharedContentState = rememberSharedContentState(key = rowArtSharedKey(song.id)),
-                    animatedVisibilityScope = this@AnimatedVisibility,
-                    boundsTransform = AppBoundsTransform
-                )
-            }
+    // Sin papel, sin modifier: la portada a secas. Cambiar de papel cambia la cadena de modifiers de
+    // la MISMA imagen, no su estructura — la carátula ya cargada es la que viaja.
+    val artModifier = if (role == null) Modifier else with(sharedScope) {
+        Modifier.sharedElementWithCallerManagedVisibility(
+            sharedContentState = rememberSharedContentState(key = rowArtSharedKey(song.id)),
+            // VISIBLE = a la vista (preparándose como origen, o recibiendo el cierre). HIDDEN = la
+            // portada la dibuja el reproductor al otro lado del morph; pintarla también aquí sería
+            // dibujarla dos veces.
+            visible = role == ContainerOriginRole.VISIBLE,
+            boundsTransform = AppContainerBoundsTransform,
+            // Por encima de las dos superficies: es lo único que cruza de una a la otra, así que
+            // no puede viajar por debajo de la fila que se está fundiendo.
+            zIndexInOverlay = CONTAINER_ART_OVERLAY_Z
         )
     }
+    SongArtImage(
+        song = song,
+        downloadProgress = downloadProgress,
+        isDownloading = isDownloading,
+        useRingProgress = useRingProgress,
+        modifier = artModifier
+    )
 }
 
 /**
@@ -323,18 +302,32 @@ private fun SongArtImage(
     useRingProgress: Boolean,
     modifier: Modifier = Modifier
 ) {
-    // Cookie de 9 lados (M3 Expressive) en vez de círculo.
+    // Cookie de 9 lados (M3 Expressive) en vez de círculo, HORNEADA en el bitmap (`SongItemCookieMask`)
+    // y NO clipada por frame: un shape cookie es cóncavo y su clip de path no tiene fast-path de
+    // hardware, así que clipar la fila costaba fps en cada frame del scroll (el mismo jank que ya se
+    // resolvió en Artistas). `shape` se sigue pasando: AlbumArt lo usa solo para el placeholder/velo.
     // toShape() ya es @Composable y memoiza internamente (no envolver en remember).
     AlbumArt(
         albumArtUri = song.imageUrl,
         size = ComponentConfig.SongItemIconSize,
         shape = MaterialShapes.Cookie9Sided.toShape(),
+        maskTransformation = SongItemCookieMask,
         modifier = modifier,
-        cacheKey = song.id,
         downloadProgress = downloadProgress,
         isDownloading = isDownloading,
         useRingProgress = useRingProgress
     )
+}
+
+/**
+ * Máscara cookie de 9 lados COMPARTIDA por todas las filas de canción (biblioteca, cola, detalles):
+ * una sola instancia (su path unitario se calcula una vez) y un solo `cacheKey`, así el memory cache
+ * de Coil reutiliza el bitmap enmascarado entre pistas del mismo álbum. Mismo patrón que `CookieMask`
+ * de Artistas.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+private val SongItemCookieMask by lazy {
+    RoundedPolygonMaskTransformation(MaterialShapes.Cookie9Sided, cacheKey = "cookie9")
 }
 
 // ============== SONG ITEM ==============
@@ -352,6 +345,11 @@ fun SongItem(
     showActiveBackground: Boolean = true,
     // null = el estado solo informa (sin ripple). Solo lo pasan las pantallas que reaccionan al tap.
     onStatusClick: (() -> Unit)? = null,
+    // Color del contenido (texto + icono de estado) de la fila cuando SUENA. `Unspecified` = los
+    // roles por defecto (onSurface / onSurfaceVariant / primary). Se pasa cuando un contenedor
+    // externo rellena la fila activa con un color de acento y su contenido tiene que ir en el `on-`
+    // de ese contenedor para contrastar (la cola y la lista de canciones, ítem en reproducción).
+    activeContentColor: Color = Color.Unspecified,
     trailingContent: @Composable (() -> Unit)? = null
 ) {
     // Convertir a modelo UI para reutilizar la lógica de renderizado
@@ -368,6 +366,7 @@ fun SongItem(
         useRingProgress = useRingProgress, // Pass through
         showActiveBackground = showActiveBackground,
         onStatusClick = onStatusClick,
+        activeContentColor = activeContentColor,
         trailingContent = trailingContent
     )
 }
@@ -388,16 +387,40 @@ fun SongItem(
     showActiveBackground: Boolean = true,
     // null = el estado solo informa (sin ripple). Solo lo pasan las pantallas que reaccionan al tap.
     onStatusClick: (() -> Unit)? = null,
+    // Color del contenido (texto + icono de estado) de la fila cuando SUENA. `Unspecified` = los
+    // roles por defecto (onSurface / onSurfaceVariant / primary). Se pasa cuando un contenedor
+    // externo rellena la fila activa con un color de acento y su contenido tiene que ir en el `on-`
+    // de ese contenedor para contrastar (la cola y la lista de canciones, ítem en reproducción).
+    activeContentColor: Color = Color.Unspecified,
     trailingContent: @Composable (() -> Unit)? = null
 ) {
     // `ListItem` REAL de M3 (anatomía + tokens por spec): headline `bodyLarge`/onSurface,
-    // supporting `bodyMedium`/onSurfaceVariant, leading/trailing en sus slots. El resaltado del
-    // item activo va por el `containerColor` de ListItemColors (secondary 12%, mismo criterio de
-    // antes). El look de LISTA AGRUPADA (esquinas + gaps + fondo tonal) lo sigue poniendo el
-    // contenedor EXTERNO de cada pantalla; aquí el container es transparente salvo el activo.
-    val activeContainer = MaterialTheme.colorScheme.secondary.copy(alpha = ACTIVE_ROW_TINT_ALPHA)
+    // supporting `bodyMedium`/onSurfaceVariant, leading/trailing en sus slots. El look de LISTA
+    // AGRUPADA (esquinas + gaps + fondo tonal) lo pone el contenedor EXTERNO de cada pantalla; aquí
+    // el container es transparente salvo el activo.
+    //
+    // Resaltado del ítem en reproducción, UNIFICADO en toda la app (biblioteca, detalles, cola):
+    // contenedor `primaryContainer` con contenido en `onPrimaryContainer`, sólido y sin opacidad.
+    // Dos rutas para el mismo resultado:
+    //  · `showActiveBackground = true` (detalles): lo pinta ESTE `ListItem` y deriva su `on-` solo.
+    //  · `showActiveBackground = false` + `activeContentColor` (lista, cola): el contenedor EXTERNO
+    //    rellena la fila y le pasa el color de contenido; aquí solo se aplica al texto/icono.
+    val paintsOwnActive = isPlaying && showActiveBackground
+    // Mismo contraste garantizado que cuando el relleno lo pinta un contenedor externo: el color de
+    // la fila activa sale de una sola definición, la pinte quien la pinte.
+    val ownActiveContent = rememberActiveRowContentColor(
+        rowBackground = MaterialTheme.colorScheme.primaryContainer,
+        isPlaying = paintsOwnActive
+    )
+    val effectiveActiveContent = when {
+        activeContentColor.isSpecified -> activeContentColor
+        else -> ownActiveContent
+    }
+    val useActiveContent = isPlaying && effectiveActiveContent.isSpecified
     val listColors = ListItemDefaults.colors(
-        containerColor = if (isPlaying && showActiveBackground) activeContainer else Color.Transparent
+        containerColor = if (paintsOwnActive) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+        headlineColor = if (useActiveContent) effectiveActiveContent else MaterialTheme.colorScheme.onSurface,
+        supportingColor = if (useActiveContent) effectiveActiveContent else MaterialTheme.colorScheme.onSurfaceVariant
     )
 
     // El indicador de estado del archivo (descargada / se transmitirá) es un concepto de NUBE:
@@ -427,7 +450,11 @@ fun SongItem(
                         isDownloaded = song.isDownloaded,
                         isDownloading = isDownloading,
                         downloadProgress = null, // Hide progress here (moved to AlbumArt)
-                        onClick = onStatusClick
+                        onClick = onStatusClick,
+                        // Fila activa rellena de acento: el glifo va en su `on-` en vez de `primary`,
+                        // que sobre ese contenedor apenas contrasta.
+                        contrast = useActiveContent,
+                        contrastColor = effectiveActiveContent
                     )
                 }
                 if (trailingContent != null) {
@@ -442,8 +469,15 @@ fun SongItem(
         headlineContent = {
             Text(
                 text = song.title,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = if (isPlaying) FontWeight.SemiBold else FontWeight.Medium, // Medium por defecto
+                // ROLES del scale Expressive, no un peso pegado a mano sobre `bodyLarge`. Los dos
+                // que se eligen tienen MÉTRICAS IDÉNTICAS —16sp, alto de línea 24, tracking 0.15—
+                // y solo difieren en el peso (Medium vs Bold), así que empezar a sonar no mueve el
+                // layout de la fila ni un píxel. Leído de `TypeScaleTokens` de la versión pineada:
+                // `bodyLarge` a secas trae tracking 0.5, que es el correcto para Regular y queda
+                // suelto en cuanto se engorda el peso — ése era el defecto de escribir
+                // `bodyLarge + FontWeight.Medium`, que en todo lo demás ya era este mismo rol.
+                style = if (isPlaying) MaterialTheme.typography.titleMediumEmphasized
+                        else MaterialTheme.typography.bodyLargeEmphasized,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )

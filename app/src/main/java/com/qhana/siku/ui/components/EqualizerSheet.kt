@@ -1,11 +1,15 @@
 package com.qhana.siku.ui.components
 
+import androidx.annotation.StringRes
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -28,11 +32,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
-import com.qhana.siku.data.model.EqCustomPreset
+import com.qhana.siku.data.model.EqSettings
+import com.qhana.siku.data.model.EqProfile
 import androidx.compose.ui.graphics.Color
 import com.qhana.siku.player.audio.AudioRoute
 import com.qhana.siku.player.audio.EqCurve
 import com.qhana.siku.player.audio.EqualizerAudioProcessor
+import com.qhana.siku.player.audio.clarity.Clarity
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.ln
@@ -85,13 +91,18 @@ internal object EqPresets {
     )
 
     fun gainsFor(preset: Preset, bandCount: Int): FloatArray =
-        resample(preset.anchors, EqualizerAudioProcessor.bandsFor(5), bandCount)
+        resample(
+            preset.anchors,
+            // Los anchors de los presets de fábrica están definidos en las 5 frecuencias clásicas.
+            EqualizerAudioProcessor.bandsFor(EqualizerAudioProcessor.BANDS_5_COUNT),
+            bandCount
+        )
 
     /**
      * Remuestrea una curva [anchors] (definida en las frecuencias [anchorFreqs]) al modo de
      * [bandCount] bandas, interpolando en espacio log-frecuencia. Si las frecuencias destino
      * coinciden con las de origen la curva se conserva exacta. Lo usan tanto los presets de
-     * fábrica como los personalizados (guardados en 5 o 10 bandas).
+     * fábrica como los perfiles guardados (capturados en 5 o 10 bandas).
      */
     fun resample(anchors: FloatArray, anchorFreqs: FloatArray, bandCount: Int): FloatArray {
         val target = EqualizerAudioProcessor.bandsFor(bandCount)
@@ -130,23 +141,23 @@ fun EqualizerSheet(
     trebleFreq: Double,
     headroomDb: Float,
     preamp: Float,
-    suggestedPreampDb: Float,
     limiterEnabled: Boolean,
     limiterThresholdDb: Float,
     limiterThresholdAuto: Boolean,
     gainReductionDb: Float,
     audioRoute: AudioRoute,
-    customPresets: List<EqCustomPreset>,
+    profiles: List<EqProfile>,
     hiddenPresets: Set<String>,
-    routeProfilesEnabled: Boolean,
+    clarityEnabled: Boolean,
+    clarityGain: Float,
     conflictWarningSuppressed: Boolean,
     onSuppressConflictWarning: () -> Unit,
     onEnabledChange: (Boolean) -> Unit,
     onBandCountChange: (Int) -> Unit,
     onApplyPreset: (FloatArray) -> Unit,
-    onApplyCustomPreset: (EqCustomPreset) -> Unit,
-    onSaveCurrentAsPreset: (String) -> Unit,
-    onDeleteCustomPreset: (String) -> Unit,
+    onApplyProfile: (EqProfile) -> Unit,
+    onSaveCurrentAsProfile: (String) -> Unit,
+    onDeleteProfile: (String) -> Unit,
     onBandChange: (band: Int, db: Float) -> Unit,
     onBandChangeFinished: () -> Unit,
     onBassBoostChange: (Float) -> Unit,
@@ -160,12 +171,58 @@ fun EqualizerSheet(
     onLimiterThresholdChange: (Float) -> Unit,
     onLimiterThresholdChangeFinished: () -> Unit,
     onLimiterThresholdAutoChange: (Boolean) -> Unit,
+    onClarityEnabledChange: (Boolean) -> Unit,
+    onClarityGainChange: (Float) -> Unit,
+    onClarityGainChangeFinished: () -> Unit,
     onReset: () -> Unit,
     onOpenSystemEq: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val frequencies = EqualizerAudioProcessor.bandsFor(bandCount)
     var showSaveDialog by remember { mutableStateOf(false) }
+    // El estado vivo del EQ como una sola unidad, para que el selector pueda decidir si un PERFIL
+    // guardado está realmente aplicado (un perfil promete también refuerzos, preamp y limitador).
+    // Se arma aquí y no llega por parámetro: los campos ya están todos en esta firma y duplicarlos
+    // en un objeto más significaría dos fuentes para el mismo estado.
+    val liveSettings = remember(
+        bandCount, gains, bassBoost, trebleBoost, bassFreq, trebleFreq,
+        preamp, limiterEnabled, limiterThresholdDb, limiterThresholdAuto,
+        clarityEnabled, clarityGain
+    ) {
+        EqSettings(
+            bandCount = bandCount,
+            gains = gains.toFloatArray(),
+            bassBoostDb = bassBoost,
+            trebleBoostDb = trebleBoost,
+            bassFreqHz = bassFreq,
+            trebleFreqHz = trebleFreq,
+            preampDb = preamp,
+            limiterEnabled = limiterEnabled,
+            limiterThresholdDb = limiterThresholdDb,
+            limiterThresholdAuto = limiterThresholdAuto,
+            clarityEnabled = clarityEnabled,
+            clarityGainDb = clarityGain
+        )
+    }
+    /**
+     * A qué perfil se refiere "guardar" ahora mismo, o null si no hay ninguno de referencia.
+     *
+     * NO es lo mismo que el perfil que el selector marca como activo, y la diferencia es justo el
+     * caso de uso: en cuanto mueves un slider el sonido deja de coincidir con lo guardado —que es
+     * precisamente cuando quieres guardar—, así que la coincidencia exacta valdría null siempre que
+     * hace falta. Lo que se recuerda es el ÚLTIMO APLICADO, que sobrevive a los retoques.
+     *
+     * Se siembra con lo que haya coincidiendo al abrir la hoja: si entras con "Mi mezcla" puesto y
+     * tocas un control, guardar ya te ofrece actualizar "Mi mezcla" sin haber pasado por el
+     * selector. Si cierras la hoja y vuelves con la curva ya retocada, la referencia se pierde y el
+     * guardado pide nombre — no hay forma honesta de adivinar de qué perfil salió una curva suelta.
+     */
+    var currentProfileName by remember { mutableStateOf<String?>(null) }
+    val matchedProfile = matchingProfile(profiles, bandCount, gains, liveSettings)
+    LaunchedEffect(matchedProfile?.id) {
+        if (matchedProfile != null) currentProfileName = matchedProfile.name
+    }
+
     // Aviso (no bloqueante) al ENCENDER el EQ propio: Android no permite saber de forma fiable
     // si hay un EQ del sistema/fabricante activo (Xiaomi misound vive fuera de la API pública),
     // así que no se puede bloquear el toggle; en su lugar recordamos que ambos se sumarían.
@@ -297,13 +354,47 @@ fun EqualizerSheet(
                 .padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            // Selector de preset (desplegable): colapsa fábrica + personalizados en un solo
-            // control. Marca el preset actual (o "Personalizado" si la curva no coincide con
-            // ninguno). Los personalizados llevan una X para borrarlos sin aplicarlos.
+            // DOS selectores, no uno: un preset aplica SOLO la curva de bandas y un perfil el
+            // sonido completo (curva + refuerzos + preamp + limitador). Mientras compartieron
+            // desplegable, elegir de la lista de arriba o de la de abajo hacía cosas de alcance
+            // distinto y solo lo decía un rótulo de grupo.
             //
-            // Va ENCIMA del gráfico: elegir preset es lo primero que se hace al entrar, y así la
-            // curva queda inmediatamente debajo — se toca el preset y se ve la forma cambiar en el
-            // sitio al que ya estabas mirando, sin saltar por encima del control.
+            // El PERFIL va primero y a todo el ancho porque gobierna todo lo demás —y es lo que
+            // vuelve solo al conectar un dispositivo—, mientras que el preset es una pieza de eso.
+            // El icono de la ruta viaja con él por el mismo motivo.
+            //
+            // Los dos van ENCIMA del gráfico: elegir es lo primero que se hace al entrar, y así la
+            // curva queda inmediatamente debajo — se toca y se ve la forma cambiar en el sitio al
+            // que ya estabas mirando, sin saltar por encima del control.
+            //
+            // Sin ningún perfil guardado el selector NO se pinta: un control que solo puede decir
+            // "—" es ruido permanente para quien nunca guarda uno, y el botón "Guardar" de abajo ya
+            // es la puerta de entrada. Aparece con el primero.
+            if (profiles.isNotEmpty()) {
+                ProfileSelector(
+                    bandCount = bandCount,
+                    gains = gains,
+                    liveSettings = liveSettings,
+                    profiles = profiles,
+                    hiddenPresets = hiddenPresets,
+                    audioRoute = audioRoute,
+                    enabled = enabled,
+                    onApplyProfile = {
+                        // Aplicar uno lo convierte en "el perfil actual" a efectos de guardar,
+                        // aunque después se retoque y deje de coincidir.
+                        currentProfileName = it.name
+                        onApplyProfile(it)
+                    },
+                    onDeleteProfile = { name ->
+                        // El que se borra deja de ser candidato a sobrescribirse: si no, guardar
+                        // ofrecería actualizar un perfil que ya no existe y lo RECREARÍA.
+                        if (currentProfileName == name) currentProfileName = null
+                        onDeleteProfile(name)
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(PresetRowGap))
+            }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(PresetRowGap),
@@ -312,14 +403,9 @@ fun EqualizerSheet(
                 PresetSelector(
                     bandCount = bandCount,
                     gains = gains,
-                    customPresets = customPresets,
                     hiddenPresets = hiddenPresets,
-                    audioRoute = audioRoute,
-                    routeProfilesEnabled = routeProfilesEnabled,
                     enabled = enabled,
                     onApplyPreset = onApplyPreset,
-                    onApplyCustomPreset = onApplyCustomPreset,
-                    onDeleteCustomPreset = onDeleteCustomPreset,
                     modifier = Modifier.weight(1f)
                 )
                 // El modo de bandas vive aquí, no dentro de la sección: está acoplado al preset
@@ -436,6 +522,7 @@ fun EqualizerSheet(
                     severe = severeFault,
                     interactionSource = bassGainInteraction
                 )
+                Spacer(modifier = Modifier.height(BoostPairInnerGap))
                 FreqSlider(
                     value = bassFreq,
                     minHz = EqualizerAudioProcessor.BASS_BOOST_FREQ_MIN_HZ,
@@ -456,6 +543,7 @@ fun EqualizerSheet(
                     severe = severeFault,
                     interactionSource = trebleGainInteraction
                 )
+                Spacer(modifier = Modifier.height(BoostPairInnerGap))
                 FreqSlider(
                     value = trebleFreq,
                     minHz = EqualizerAudioProcessor.TREBLE_BOOST_FREQ_MIN_HZ,
@@ -485,39 +573,9 @@ fun EqualizerSheet(
                     onValueChange = onPreampChange,
                     onValueChangeFinished = onPreampChangeFinished
                 )
-                // El sugerido solo se ofrece cuando cambiaría algo: con la curva casi plana, o si
-                // el usuario ya lo aplicó, un botón que no hace nada es ruido. Que se SUGIERA y no
-                // se aplique solo es toda la diferencia con el auto-preamp que se rechazó dos
-                // veces — el número se ve y la decisión es del usuario.
-                AnimatedVisibility(
-                    visible = enabled &&
-                        abs(suggestedPreampDb - preamp) >= PREAMP_SUGGESTION_EPSILON_DB,
-                    enter = appExpandFadeIn(),
-                    exit = appShrinkFadeOut()
-                ) {
-                    Row(
-                        horizontalArrangement = Arrangement.End,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        AssistChip(
-                            onClick = {
-                                onPreampChange(suggestedPreampDb)
-                                onPreampChangeFinished()
-                            },
-                            label = {
-                                Text(
-                                    stringResource(
-                                        R.string.eq_preamp_apply_suggested,
-                                        String.format(
-                                            Locale.getDefault(), "%+.1f", suggestedPreampDb
-                                        )
-                                    )
-                                )
-                            },
-                            leadingIcon = { MaterialSymbol(icon = "auto_fix_high", size = 18.sp) }
-                        )
-                    }
-                }
+                // No hay botón de "preamp sugerido": el headroom se muestra (arriba) y el usuario
+                // decide cuánto bajar. Sugerir un valor concreto era acercarse al auto-preamp que el
+                // proyecto rechazó — informar sí, empujar a un número no.
 
                 Spacer(modifier = Modifier.height(12.dp))
 
@@ -531,6 +589,30 @@ fun EqualizerSheet(
                     onThresholdChange = onLimiterThresholdChange,
                     onThresholdChangeFinished = onLimiterThresholdChangeFinished,
                     onThresholdAutoChange = onLimiterThresholdAutoChange
+                )
+
+                Spacer(modifier = Modifier.height(SectionGap))
+
+                // CLARITY. Sección propia porque no es ecualización ni protección de nivel: no
+                // mueve energía existente, fabrica armónicos nuevos. Pero SÍ va dentro del bloque
+                // que gobierna el interruptor del ecualizador, igual que el limitador — ese toggle
+                // no decide "si hay curva" sino si el DSP propio está en la cadena del sink, y los
+                // tres módulos comparten el mismo `AudioProcessor`. Con la curva plana el
+                // ecualizador es bit-perfect, así que tenerlo encendido para usar solo el exciter no
+                // cuesta nada.
+                Text(
+                    text = stringResource(R.string.clarity_section),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                ClarityCard(
+                    clarityEnabled = clarityEnabled,
+                    gainDb = clarityGain,
+                    enabled = enabled,
+                    onEnabledChange = onClarityEnabledChange,
+                    onGainChange = onClarityGainChange,
+                    onGainChangeFinished = onClarityGainChangeFinished
                 )
             }
 
@@ -639,7 +721,7 @@ fun EqualizerSheet(
                             contentPadding = compactPadding,
                             modifier = Modifier.weight(1f).animateWidth(systemSource)
                         ) {
-                            MaterialSymbol(icon = "tune", size = 18.sp)
+                            MaterialSymbol(icon = "equalizer", size = 18.sp)
                             Spacer(Modifier.width(6.dp))
                             Text(stringResource(R.string.eq_system_short), maxLines = 1)
                         }
@@ -647,7 +729,7 @@ fun EqualizerSheet(
                     menuContent = { state ->
                         DropdownMenuItem(
                             text = { Text(stringResource(R.string.eq_system_short)) },
-                            leadingIcon = { MaterialSymbol(icon = "tune") },
+                            leadingIcon = { MaterialSymbol(icon = "equalizer") },
                             onClick = {
                                 if (enabled) showOpenSystemWarning = true else onOpenSystemEq()
                                 state.dismiss()
@@ -730,9 +812,17 @@ fun EqualizerSheet(
     }
 
     if (showSaveDialog) {
-        SavePresetDialog(
-            onConfirm = {
-                onSaveCurrentAsPreset(it)
+        SaveProfileDialog(
+            // A quién se ofrece ACTUALIZAR. Null (sin perfil de referencia) salta ese paso y va
+            // directo a pedir el nombre: preguntar "¿actualizar o crear?" sin nada que actualizar
+            // sería una pregunta con una sola respuesta posible.
+            currentProfileName = currentProfileName,
+            existingNames = profiles.map { it.name },
+            onConfirm = { name ->
+                onSaveCurrentAsProfile(name)
+                // Guardar deja ese perfil como el de referencia: dos retoques seguidos ofrecen
+                // actualizar el mismo, sin volver a pasar por el nombre.
+                currentProfileName = name
                 showSaveDialog = false
             },
             onDismiss = { showSaveDialog = false }
@@ -740,10 +830,52 @@ fun EqualizerSheet(
     }
 }
 
-/** Modos de banda que ofrece el processor. */
-private val BAND_COUNTS = listOf(5, 10)
+/**
+ * El perfil guardado que está aplicado EXACTAMENTE ahora mismo, o null si el sonido actual no es
+ * ninguno de ellos.
+ *
+ * Vive fuera de [ProfileSelector] porque lo consultan dos sitios con propósitos distintos: el
+ * selector, para marcar el activo, y la cabecera, para SEMBRAR a quién se ofrecerá actualizar al
+ * guardar (ver `currentProfileName` en [EqualizerSheet]). Con la comparación escrita dos veces, el
+ * check del menú y el nombre del diálogo podrían discrepar sobre cuál es "el perfil actual".
+ */
+@Composable
+private fun matchingProfile(
+    profiles: List<EqProfile>,
+    bandCount: Int,
+    gains: List<Float>,
+    liveSettings: EqSettings
+): EqProfile? = profiles.firstOrNull { profile ->
+    // La curva, llevada al modo de bandas ACTUAL y con tolerancia (`EqSettings.equals` exige
+    // igualdad exacta y el remuestreo no la da)...
+    val curve = EqPresets.resample(
+        profile.gains,
+        EqualizerAudioProcessor.bandsFor(profile.bandCount),
+        bandCount
+    )
+    gains.size == curve.size &&
+        gains.indices.all { abs(gains[it] - curve[it]) < PRESET_MATCH_TOLERANCE_DB } &&
+        // ...y todo lo demás, que es lo que un perfil promete de más. Los nullables se resuelven
+        // a los defaults del processor ANTES de comparar, o un perfil guardado antes de que
+        // existiera un campo no se marcaría nunca.
+        profile.settings.withDefaults(
+            bassHz = EqualizerAudioProcessor.BASS_BOOST_FREQ_DEFAULT_HZ,
+            trebleHz = EqualizerAudioProcessor.TREBLE_BOOST_FREQ_DEFAULT_HZ,
+            limiterDb = EqualizerAudioProcessor.LIMITER_THRESHOLD_MAX_DB
+        ).matchesApartFromGains(liveSettings)
+}
 
-/** Aire entre el selector de preset y el chip de bandas. */
+/** Modos de banda que ofrece el processor: los publica él, no los enumera esta hoja. */
+private val BAND_COUNTS = listOf(
+    EqualizerAudioProcessor.BANDS_5_COUNT,
+    EqualizerAudioProcessor.BANDS_10_COUNT
+)
+
+/**
+ * Aire entre los controles de la cabecera: el selector de preset y el chip de bandas en horizontal,
+ * y el selector de perfil con la fila de abajo en vertical. El MISMO valor en los dos ejes, o los
+ * dos desplegables no se leerían como un bloque.
+ */
 private val PresetRowGap = 8.dp
 
 /**
@@ -818,126 +950,77 @@ private fun routeIcon(route: AudioRoute): String = when (route) {
 }
 
 /**
- * Selector de preset desplegable. Detecta si la curva actual coincide (con tolerancia) con un
- * preset de fábrica o propio para marcarlo; si no, muestra "Personalizado". Los presets propios
- * llevan un icono de borrar que no dispara la aplicación (clic aparte).
+ * Selector de **perfil**: el sonido completo guardado por el usuario ([EqSettings] entero — curva,
+ * refuerzos, preamp y limitador), que es la misma unidad que se recuerda por ruta de salida.
+ *
+ * Va SEPARADO del de presets, y esa separación es el punto: mientras compartieron desplegable,
+ * elegir de la lista de arriba o de la de abajo hacía cosas de alcance distinto (un preset toca solo
+ * las ganancias) y lo único que lo decía era un rótulo de grupo.
+ *
+ * **El check es estricto**: un perfil solo se marca si coincide TODO su [EqSettings], no solo la
+ * curva. Con el criterio viejo —solo ganancias— un perfil con preamp −6 dB aparecía como activo con
+ * el preamp en 0, o sea que el menú afirmaba un estado que la pantalla de abajo desmentía.
+ *
+ * Con nada aplicado muestra un GUION y no "Personalizado": aquí "—" significa "ninguno de los tuyos
+ * está puesto", que no es lo mismo que la curva manual que sí describe el otro selector.
  *
  * [hiddenPresets] no se lista (ver `MusicPreferences.loadHiddenEqPresets`). El filtrado es SOLO de
- * presentación: un preset oculto que coincida con la curva actual se sigue mostrando como valor
- * del selector, porque lo contrario sería mentir — decir "Personalizado" sobre una curva que es
- * exactamente Rock.
+ * presentación: un perfil oculto que coincida con lo actual se sigue mostrando como valor, porque lo
+ * contrario sería mentir.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PresetSelector(
+private fun ProfileSelector(
     bandCount: Int,
     gains: List<Float>,
-    customPresets: List<EqCustomPreset>,
+    liveSettings: EqSettings,
+    profiles: List<EqProfile>,
     hiddenPresets: Set<String>,
     audioRoute: AudioRoute,
-    routeProfilesEnabled: Boolean,
     enabled: Boolean,
-    onApplyPreset: (FloatArray) -> Unit,
-    onApplyCustomPreset: (EqCustomPreset) -> Unit,
-    onDeleteCustomPreset: (String) -> Unit,
+    onApplyProfile: (EqProfile) -> Unit,
+    onDeleteProfile: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    fun matches(g: FloatArray) = gains.size == g.size &&
-        gains.indices.all { abs(gains[it] - g[it]) < 0.1f }
+    val match = matchingProfile(profiles, bandCount, gains, liveSettings)
+    val visible = remember(profiles, hiddenPresets) {
+        profiles.filterNot { it.id in hiddenPresets }
+    }
+    val noneLabel = stringResource(R.string.eq_profile_none)
 
-    val builtInMatch = EqPresets.ALL.firstOrNull { matches(EqPresets.gainsFor(it, bandCount)) }
-    val customMatch = customPresets.firstOrNull {
-        matches(EqPresets.resample(it.gains, EqualizerAudioProcessor.bandsFor(it.bandCount), bandCount))
-    }
-    val currentLabel = when {
-        builtInMatch != null -> stringResource(builtInMatch.labelRes)
-        customMatch != null -> customMatch.name
-        else -> stringResource(R.string.eq_preset_custom)
-    }
-
-    val visibleBuiltIn = remember(hiddenPresets) {
-        EqPresets.ALL.filterNot { EqPresets.hideKey(it) in hiddenPresets }
-    }
-    val visibleCustom = remember(customPresets, hiddenPresets) {
-        customPresets.filterNot { it.id in hiddenPresets }
-    }
-
-    // Ancla TONAL y no un `TextField` de solo lectura: un campo de texto comunica escritura y
-    // arrastra label flotante e indicador inferior, que sobre la superficie del reproductor se
-    // leían como un formulario. Ver [TonalDropdownButton].
-    // Sin etiqueta ni icono: el valor ("Rock", "Personalizado") ya dice lo que es, y el rótulo
-    // "Preset" encima era el resto del text field del que viene este control — dos líneas de texto
-    // para un dato de una.
     TonalDropdownButton(
-        value = currentLabel,
-        // Solo con los perfiles por ruta activados: si no, el icono señalaría un dispositivo que
-        // no cambia nada, y un indicador que no informa de una diferencia es ruido.
-        leadingIcon = if (routeProfilesEnabled) routeIcon(audioRoute) else null,
+        // Con DOS desplegables el valor solo no basta: "Rock" y "Mi mezcla" no dicen cuál es cuál,
+        // así que cada uno lleva su nombre delante. Con un único control ese rótulo sobraba —el
+        // valor ya se explicaba solo— y por eso se había quitado.
+        value = stringResource(R.string.eq_selector_profile, match?.name ?: noneLabel),
+        // El icono de la ruta vive AQUÍ, no en el de presets: lo que se recuerda por dispositivo es
+        // el perfil. La memoria por ruta es SIEMPRE activa (ya no es un toggle), así que el icono
+        // acompaña siempre al selector — señala qué dispositivo gobierna el perfil que se recordará.
+        leadingIcon = routeIcon(audioRoute),
         enabled = enabled,
         matchAnchorWidth = true,
         fillWidth = true,
         modifier = modifier
     ) { dismiss ->
-        // Aplicar un preset es una SELECCIÓN EXCLUSIVA (solo uno puede estar activo, y de
-        // hecho `builtInMatch`/`customMatch` ya calculan cuál): sobrecarga `selected`, que lo
-        // marca con contenedor propio y morph de forma. El check pasa a `selectedLeadingIcon`
-        // en AMBAS listas — antes los de fábrica lo ponían de trailing y los personalizados
-        // de leading, así que el mismo estado se señalaba en lados opuestos del mismo menú.
-        visibleBuiltIn.forEachIndexed { index, preset ->
-            DropdownMenuItem(
-                selected = builtInMatch == preset,
-                onClick = {
-                    onApplyPreset(EqPresets.gainsFor(preset, bandCount))
+        visible.forEachIndexed { index, profile ->
+            ProfileMenuItem(
+                profile = profile,
+                selected = match?.id == profile.id,
+                shapes = MenuDefaults.itemShape(index = index, count = visible.size),
+                onApply = {
+                    onApplyProfile(profile)
                     dismiss()
                 },
-                text = { Text(stringResource(preset.labelRes)) },
-                shapes = MenuDefaults.itemShape(index = index, count = visibleBuiltIn.size),
-                selectedLeadingIcon = { MenuItemIcon("check") },
-                contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                onDelete = {
+                    onDeleteProfile(profile.id)
+                    dismiss()
+                }
             )
         }
-        if (visibleCustom.isNotEmpty()) {
-            // Los personalizados son su PROPIO bloque (índices desde 0 otra vez), así que el
-            // divisor separa dos grupos con esquinas cerradas en vez de partir uno solo.
-            // El divisor solo tiene sentido si ARRIBA quedó algo: con todos los de fábrica
-            // ocultos abriría el menú con una raya al aire.
-            if (visibleBuiltIn.isNotEmpty()) {
-                HorizontalDivider(
-                    modifier = Modifier.padding(MenuDefaults.HorizontalDividerPadding)
-                )
-            }
-            visibleCustom.forEachIndexed { index, preset ->
-                DropdownMenuItem(
-                    selected = customMatch?.id == preset.id,
-                    onClick = {
-                        onApplyCustomPreset(preset)
-                        dismiss()
-                    },
-                    text = { Text(preset.name) },
-                    shapes = MenuDefaults.itemShape(index = index, count = visibleCustom.size),
-                    selectedLeadingIcon = { MenuItemIcon("check") },
-                    contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding,
-                    trailingIcon = {
-                        IconButton(
-                            onClick = {
-                                onDeleteCustomPreset(preset.id)
-                                dismiss()
-                            }
-                        ) {
-                            MaterialSymbol(
-                                icon = "delete",
-                                size = 20.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                )
-            }
-        }
-        // Se puede ocultar TODO, y entonces el menú no tendría nada dentro: un desplegable que se
-        // abre vacío se lee como un fallo. Prohibir ocultar el último sería una regla arbitraria
-        // que hay que explicar; decir dónde están es más barato y no le quita el control a nadie.
-        if (visibleBuiltIn.isEmpty() && visibleCustom.isEmpty()) {
+        // Se pueden ocultar TODOS, y entonces el menú no tendría nada dentro: un desplegable que se
+        // abre vacío se lee como un fallo. Prohibir ocultar el último sería una regla arbitraria que
+        // hay que explicar; decir dónde están es más barato y no le quita el control a nadie.
+        if (visible.isEmpty()) {
             DropdownMenuItem(
                 text = { Text(stringResource(R.string.eq_presets_all_hidden)) },
                 onClick = {},
@@ -948,31 +1031,234 @@ private fun PresetSelector(
     }
 }
 
+/**
+ * Selector de **preset**: una curva de bandas y nada más. Son los diez de fábrica — no tocan
+ * refuerzos, preamp ni limitador, y no se crean: se eligen (lo que el usuario guarda es siempre un
+ * perfil, ver [ProfileSelector]).
+ *
+ * Marca el que coincida con la curva actual —que es todo lo que un preset promete— y "Personalizado"
+ * si no coincide ninguno. Que a la vez haya un perfil marcado arriba NO es contradicción: son dos
+ * afirmaciones distintas y las dos pueden ser ciertas (un perfil de curva plana coincide también con
+ * "Plano"). Cuando compartían menú sí lo era, y por eso hubo que resolver la ambigüedad a mano.
+ *
+ * [hiddenPresets] no se lista (ver `MusicPreferences.loadHiddenEqPresets`). El filtrado es SOLO de
+ * presentación: un preset oculto que coincida con la curva actual se sigue mostrando como valor,
+ * porque lo contrario sería mentir — decir "Personalizado" sobre una curva que es exactamente Rock.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SavePresetDialog(
+private fun PresetSelector(
+    bandCount: Int,
+    gains: List<Float>,
+    hiddenPresets: Set<String>,
+    enabled: Boolean,
+    onApplyPreset: (FloatArray) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val match = EqPresets.ALL.firstOrNull { preset ->
+        val curve = EqPresets.gainsFor(preset, bandCount)
+        gains.size == curve.size &&
+            gains.indices.all { abs(gains[it] - curve[it]) < PRESET_MATCH_TOLERANCE_DB }
+    }
+    val visible = remember(hiddenPresets) {
+        EqPresets.ALL.filterNot { EqPresets.hideKey(it) in hiddenPresets }
+    }
+    val customLabel = stringResource(R.string.eq_preset_custom)
+    val matchLabel = match?.let { stringResource(it.labelRes) }
+
+    TonalDropdownButton(
+        value = stringResource(R.string.eq_selector_preset, matchLabel ?: customLabel),
+        enabled = enabled,
+        matchAnchorWidth = true,
+        fillWidth = true,
+        modifier = modifier
+    ) { dismiss ->
+        // Aplicar un preset es una SELECCIÓN EXCLUSIVA: sobrecarga `selected`, que lo marca con
+        // contenedor propio y morph de forma, y el check va de `selectedLeadingIcon` — el mismo lado
+        // que en el menú de perfiles, para que el mismo estado no se señale en sitios opuestos.
+        visible.forEachIndexed { index, preset ->
+            DropdownMenuItem(
+                selected = match == preset,
+                onClick = {
+                    onApplyPreset(EqPresets.gainsFor(preset, bandCount))
+                    dismiss()
+                },
+                text = { Text(stringResource(preset.labelRes)) },
+                shapes = MenuDefaults.itemShape(index = index, count = visible.size),
+                selectedLeadingIcon = { MenuItemIcon("check") },
+                contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+            )
+        }
+        if (visible.isEmpty()) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.eq_presets_all_hidden)) },
+                onClick = {},
+                enabled = false,
+                contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+            )
+        }
+    }
+}
+
+/**
+ * Cuánto puede diferir una banda para seguir considerándose "la misma curva". Los dos selectores lo
+ * comparten: con valores distintos, un mismo estado podría contar como coincidencia en uno y no en
+ * el otro.
+ */
+private const val PRESET_MATCH_TOLERANCE_DB = 0.1f
+
+/**
+ * Item de un perfil guardado. El icono de borrar es un clic APARTE: pulsarlo no debe aplicar el
+ * perfil que se está eliminando.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ProfileMenuItem(
+    profile: EqProfile,
+    selected: Boolean,
+    shapes: MenuItemShapes,
+    onApply: () -> Unit,
+    onDelete: () -> Unit
+) {
+    DropdownMenuItem(
+        selected = selected,
+        onClick = onApply,
+        text = { Text(profile.name) },
+        shapes = shapes,
+        selectedLeadingIcon = { MenuItemIcon("check") },
+        contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding,
+        trailingIcon = {
+            IconButton(onClick = onDelete) {
+                MaterialSymbol(
+                    icon = "delete",
+                    size = 20.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    )
+}
+
+/**
+ * Diálogo de guardar, en uno o dos pasos según haya perfil de referencia.
+ *
+ * Con uno puesto ([currentProfileName]) pregunta primero **actualizarlo o crear uno nuevo**, y solo
+ * el segundo camino pide nombre. Sin él va directo al nombre.
+ *
+ * Lo que NO pregunta —y no debe volver a preguntar— es el ALCANCE de lo guardado: siempre es un
+ * perfil, o sea el sonido completo. Se implementó un selector "solo la curva / todo" y se descartó
+ * el mismo día: metía una decisión en el camino de una acción cuya respuesta es casi siempre la
+ * misma, y los presets de fábrica ya cubren el caso de la curva sola. La pregunta que sí se añadió
+ * (actualizar vs. nuevo) es de otra naturaleza: ahí las dos respuestas son frecuentes de verdad, y
+ * antes la de "actualizar" costaba reescribir el nombre exacto a mano.
+ *
+ * El texto de apoyo del paso del nombre dice QUÉ se guarda, que es lo que la palabra "perfil" no
+ * dice por sí sola.
+ */
+@Composable
+private fun SaveProfileDialog(
+    /** Perfil de referencia al que se ofrece ACTUALIZAR; null = ir directo a pedir nombre. */
+    currentProfileName: String?,
+    existingNames: List<String>,
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
+    // PRIMER PASO cuando hay un perfil de referencia: actualizarlo o crear uno nuevo.
+    //
+    // Existe porque el camino frecuente —cargar un perfil, retocar un slider, volver a guardarlo—
+    // obligaba a reescribir su nombre EXACTO para que el guardado lo reconociera como el mismo. Un
+    // acento o una mayúscula de más y en vez de actualizar creabas un perfil casi idéntico, sin que
+    // nada avisara de que eso no era lo que querías. Aquí "actualizar el que tengo puesto" es un
+    // toque y no hay nada que escribir, que es la proporción correcta: es la respuesta habitual.
+    //
+    // Sin referencia (`currentProfileName == null`) este paso NO se muestra: preguntar entre dos
+    // opciones cuando una no existe es un trámite con una sola salida posible.
+    var choosingAction by remember { mutableStateOf(currentProfileName != null) }
     var name by remember { mutableStateOf("") }
+    // Estado de confirmación de SOBRESCRITURA: guardar con un nombre ya usado no crea un duplicado,
+    // sino que pisa el perfil existente (misma decisión que [EqPresetLibrary.upsertProfile]) — y eso
+    // es destructivo, así que se pide confirmación en vez de hacerlo callado.
+    var confirmingOverwrite by remember { mutableStateOf(false) }
+
+    val trimmed = name.trim()
+    // El mismo criterio que el upsert: trim + sin distinguir mayúsculas. Si no coincidieran, el
+    // diálogo podría no avisar de un choque que el guardado sí resolvería sobrescribiendo.
+    val duplicateName = remember(trimmed, existingNames) {
+        existingNames.firstOrNull { it.trim().equals(trimmed, ignoreCase = true) }
+    }
+
+    if (choosingAction && currentProfileName != null) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text(stringResource(R.string.eq_profile_save_title)) },
+            text = {
+                Text(
+                    text = stringResource(R.string.eq_profile_update_message, currentProfileName),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            // La acción PRINCIPAL es actualizar: es la que responde al caso que trajo aquí al
+            // usuario (venía de retocar un perfil suyo). "Guardar como nuevo" queda como la
+            // alternativa, en el sitio donde normalmente está cancelar — y cancelar sigue
+            // disponible tocando fuera o con el back, como en cualquier diálogo de la app.
+            confirmButton = {
+                TextButton(onClick = { onConfirm(currentProfileName) }) {
+                    Text(stringResource(R.string.eq_profile_update_confirm))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { choosingAction = false }) {
+                    Text(stringResource(R.string.eq_profile_save_as_new))
+                }
+            }
+        )
+        return
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.eq_preset_save_title)) },
+        title = { Text(stringResource(R.string.eq_profile_save_title)) },
         text = {
-            // FILLED, igual que el selector de presets: los dos campos de esta pantalla siguen la
-            // misma variante.
-            TextField(
-                value = name,
-                onValueChange = { name = it },
-                singleLine = true,
-                label = { Text(stringResource(R.string.eq_preset_name_label)) }
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                // FILLED, igual que el selector: los dos campos de esta pantalla siguen la misma
+                // variante.
+                TextField(
+                    value = name,
+                    // Editar el nombre CANCELA la confirmación pendiente: si el usuario cambia el
+                    // texto tras ver el aviso, ya no está confirmando sobre el mismo perfil.
+                    onValueChange = { name = it; confirmingOverwrite = false },
+                    singleLine = true,
+                    label = { Text(stringResource(R.string.eq_profile_name_label)) }
+                )
+                Text(
+                    text = if (confirmingOverwrite && duplicateName != null) {
+                        stringResource(R.string.eq_profile_overwrite_message, duplicateName)
+                    } else {
+                        stringResource(R.string.eq_profile_save_hint)
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (confirmingOverwrite) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         },
         confirmButton = {
             TextButton(
-                onClick = { onConfirm(name) },
-                enabled = name.isNotBlank()
+                onClick = {
+                    // Nombre repetido y aún sin confirmar: primer toque solo PIDE confirmación. Con
+                    // el nombre libre (o ya confirmada la sobrescritura), guarda directo.
+                    if (duplicateName != null && !confirmingOverwrite) {
+                        confirmingOverwrite = true
+                    } else {
+                        onConfirm(trimmed)
+                    }
+                },
+                enabled = trimmed.isNotEmpty()
             ) {
-                Text(stringResource(R.string.eq_preset_save))
+                Text(
+                    if (confirmingOverwrite) stringResource(R.string.eq_profile_overwrite_confirm)
+                    else stringResource(R.string.eq_preset_save_short)
+                )
             }
         },
         dismissButton = {
@@ -988,16 +1274,17 @@ private fun SavePresetDialog(
 // columna se ve torcida.
 //
 // Los dimensiona el texto MÁS LARGO de cada columna en `labelMedium`: "Frecuencia" (~62dp) y
-// "3,15 kHz" (~52dp), más un pelo de holgura. Ni uno más, y esa es la regla que hay que respetar
-// aquí: como el valor va alineado a la DERECHA, cada dp que sobre en la columna se convierte en
-// hueco VISIBLE delante de la cifra — y lo sufren las filas de ganancia, cuyo "+6.0" es el texto más
-// corto de todos. Estuvieron en 76/80 durante una tarde y el resultado fue justo eso: 45dp de aire
-// entre el icono de aviso y el número.
+// "3,15 kHz" (~52dp). `EqValueWidth` es un MÍNIMO, no un ancho fijo: se ajusta al widest real y se
+// EXPANDE solo si algún valor no cupiera, así que bajarlo no recorta nada. La regla a respetar:
+// como el valor va alineado a la DERECHA, cada dp que sobre en la columna es hueco VISIBLE delante
+// de la cifra — y lo sufren las filas de ganancia, cuyo "+12.0" es el texto más corto. Estuvieron
+// en 76/80 durante una tarde y el resultado fue 45dp de aire entre el icono de aviso y el número.
 //
-// El valor bajó además al pasar la frecuencia a forma compacta (ver [formatFrequency]): mientras el
-// texto más largo fue "16.000 Hz", esta columna no podía medir menos de ~64.
+// Ceñido al widest ("3,15 kHz") SIN holgura: los 4dp que sobraban se veían como gap extra en las
+// filas de ganancia. Si un valor más largo apareciera, el `widthIn` lo absorbe (a lo sumo esa fila
+// queda ~2dp más ancha, imperceptible).
 private val EqLabelWidth = 68.dp
-private val EqValueWidth = 56.dp
+private val EqValueWidth = 50.dp
 
 /**
  * Hueco del aviso entre el slider y la cifra, reservado en TODAS las filas (ver [EqSliderRow]).
@@ -1008,6 +1295,35 @@ private val EqValueWidth = 56.dp
  * slider, la cifra teñida, la curva) no depende de acertarle.
  */
 private val BadgeSlot = 32.dp
+
+/**
+ * Aire entre el SLIDER y la casilla del aviso, en todas las filas.
+ *
+ * Es lo que agrupa el icono con la cifra en vez de con el slider, y hace falta explícito porque el
+ * slider es elástico (`weight(1f)`): sin este hueco termina pegado al trailing, así que el icono
+ * queda tocando el slider y lejos del número — justo al revés de lo que describe. Como se aplica a
+ * TODAS las filas, los sliders siguen empezando y acabando a la misma altura.
+ */
+private val SliderTrailingGap = 16.dp
+
+/**
+ * Aire entre la casilla del aviso y la cifra. Pequeño a propósito: el glifo va CENTRADO en su
+ * casilla de [BadgeSlot] (el badge la llena entera), así que ya hay ~6dp muertos a cada lado suyo —
+ * ese es el hueco real que se ve, y sumarle más los separaba.
+ */
+private val BadgeReadoutGap = 2.dp
+
+/**
+ * Ancho de la cifra en las filas de GANANCIA (refuerzos), ceñido al valor MÁS ANCHO posible
+ * ("+12.0"/"−12.0").
+ *
+ * Es un piso, no un ancho cerrado, y en la práctica se comporta como fijo: a escala de fuente normal
+ * ningún valor lo alcanza, así que la caja mide siempre lo mismo y el icono —que va a su izquierda—
+ * no se corre al pasar de "+0.0" a "+12.0", que es lo que se veía moverse al arrastrar. Con la
+ * fuente del sistema en grande crece en vez de recortar el texto, que es lo que haría un `width`
+ * cerrado. Ceñido SIN holgura porque cada dp que sobre es hueco visible entre el icono y la cifra.
+ */
+private val EqGainValueWidth = 36.dp
 
 /** Glifo del aviso: la talla de un icono secundario, no la de los 24 de una acción. */
 private val BadgeGlyphSize = 20.sp
@@ -1021,7 +1337,7 @@ private val BadgeGlyphSize = 20.sp
  * El de frecuencia sí usa `steps`, y por el motivo contrario: ahí las paradas son POCAS y verlas es
  * justamente lo que hace que se pueda clavar un valor (ver [THIRD_OCTAVE_HZ]).
  */
-private const val GAIN_STEP_DB = 0.5f
+private const val GAIN_STEP_DB = EqualizerAudioProcessor.GAIN_STEP_DB
 
 /**
  * Paradas del slider de frecuencia de los refuerzos: las frecuencias nominales de TERCIO DE OCTAVA
@@ -1152,6 +1468,8 @@ private fun BoostSlider(
         enabled = enabled,
         // La cifra en dB es lo que hay que bajar, así que se tiñe con el slider.
         readoutColor = warnColor,
+        // Columna ceñida: es la fila con aviso, y así el icono no se corre al cambiar de "+0.0" a "+12.0".
+        readoutMinWidth = EqGainValueWidth,
         // Icono en la fila, en el hueco que EqSliderRow reserva. Sustituye a una etiqueta
         // "Saturando" que colgaba debajo: la palabra ocupaba una línea entera para decir lo que el
         // color del slider ya decía, y no distinguía los dos grados. El icono sí —`info` contra
@@ -1377,6 +1695,78 @@ private fun LimiterCard(
 }
 
 /**
+ * Clarity: interruptor, carácter y cantidad.
+ *
+ * Se deshabilita con el interruptor del ecualizador, igual que la tarjeta del limitador y por el
+ * mismo motivo: ese toggle decide si el DSP propio está en la cadena del sink, y los tres módulos
+ * viven en el mismo `AudioProcessor`. Con el ecualizador apagado no hay nada que pueda sonar aquí, y
+ * enseñar un interruptor que no hace nada es peor que enseñarlo apagado.
+ *
+ * La descripción dice explícitamente que AÑADE contenido. Es el único módulo no lineal de la app y
+ * quien lo enciende tiene que saberlo: la alternativa —venderlo como "más detalle"— es el lenguaje
+ * de los mejoradores de sonido que este proyecto no quiere ser.
+ */
+@Composable
+private fun ClarityCard(
+    clarityEnabled: Boolean,
+    gainDb: Float,
+    enabled: Boolean,
+    onEnabledChange: (Boolean) -> Unit,
+    onGainChange: (Float) -> Unit,
+    onGainChangeFinished: () -> Unit
+) {
+    Surface(
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    // Sin título propio: el encabezado "Clarity" de la sección ya nombra el control,
+                    // así que la tarjeta solo lleva la descripción.
+                    Text(
+                        text = stringResource(R.string.clarity_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(
+                    checked = clarityEnabled,
+                    onCheckedChange = onEnabledChange,
+                    enabled = enabled
+                )
+            }
+
+            AnimatedVisibility(
+                visible = enabled && clarityEnabled,
+                enter = appExpandFadeIn(),
+                exit = appShrinkFadeOut()
+            ) {
+                Column {
+                    Spacer(Modifier.height(8.dp))
+                    EqSliderRow(
+                        label = stringResource(R.string.clarity_amount),
+                        readout = String.format(Locale.getDefault(), "%+.1f dB", gainDb),
+                        enabled = enabled
+                    ) { modifier ->
+                        Slider(
+                            value = gainDb,
+                            onValueChange = { v -> onGainChange(snapGain(v)) },
+                            onValueChangeFinished = onGainChangeFinished,
+                            valueRange = Clarity.MIN_GAIN_DB..Clarity.MAX_GAIN_DB,
+                            enabled = enabled,
+                            modifier = modifier
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
  * Medidor de reducción de ganancia. Barra dibujada a mano y no un indicador de progreso de M3: no
  * es progreso hacia ninguna parte, y darle esa semántica confundiría al lector de pantalla.
  */
@@ -1452,12 +1842,6 @@ private fun GainReductionMeter(
 private const val LIMITER_METER_RANGE_DB = 6f
 
 private val MeterHeight = 8.dp
-
-/**
- * Diferencia mínima entre el preamp puesto y el sugerido para ofrecer el botón. Coincide con el
- * paso del slider: por debajo de eso el botón no podría cambiar el valor aunque se pulsara.
- */
-private const val PREAMP_SUGGESTION_EPSILON_DB = GAIN_STEP_DB
 
 /**
  * Frecuencia central de un refuerzo: slider de paradas DISCRETAS sobre la rejilla de tercios de
@@ -1686,6 +2070,12 @@ private val BandSliderHeight = 150.dp
 private val SectionGap = 24.dp
 
 /**
+ * Aire entre el slider de ganancia de un refuerzo y el de su frecuencia. Sin él las dos filas van
+ * pegadas y los thumbs de una y otra llegan a tocarse.
+ */
+private val BoostPairInnerGap = 10.dp
+
+/**
  * Estructura común de todas las filas: etiqueta, slider elástico, hueco de aviso y lectura alineada
  * a la derecha.
  */
@@ -1696,6 +2086,12 @@ private fun EqSliderRow(
     enabled: Boolean,
     /** Color de la cifra en dB; null = el de siempre. Lo usa el aviso de saturación. */
     readoutColor: Color? = null,
+    /**
+     * Ancho de la columna de la cifra cuando la fila necesita uno propio. Lo pasan las filas con
+     * aviso (ganancia), ceñido a su valor más ancho, para que el icono no se mueva al cambiar el
+     * número mientras se arrastra (ver [EqGainValueWidth]). null = el piso normal de la hoja.
+     */
+    readoutMinWidth: androidx.compose.ui.unit.Dp? = null,
     /** Aviso de la fila (ver [SaturationBadge]). Vacío en las filas que no avisan de nada. */
     badge: @Composable () -> Unit = {},
     slider: @Composable (Modifier) -> Unit
@@ -1715,30 +2111,49 @@ private fun EqSliderRow(
             // lo que mantiene los sliders alineados.
             modifier = Modifier.widthIn(min = EqLabelWidth)
         )
-        slider(Modifier.weight(1f))
-        // El hueco se reserva SIEMPRE y en todas las filas, tenga aviso o no. Es la parte
-        // load-bearing: si el icono ocupara sitio solo cuando aparece, el slider se encogería en el
-        // mismo instante en que el aviso salta —que es mientras el dedo lo está arrastrando— y el
-        // thumb se movería por debajo del dedo. Es el mismo defecto por el que el aviso vivía como
-        // etiqueta DEBAJO de la fila. Y en todas porque los sliders de la hoja tienen que empezar y
-        // acabar a la misma altura, o la columna se ve torcida.
+        // El slider va envuelto en un `draggable` VERTICAL vacío que ABSORBE el componente vertical
+        // del gesto. Sin esto, un slider horizontal dentro del `verticalScroll` de la hoja compite
+        // con él: si el dedo se mueve algo en diagonal, el scroll le ROBA el gesto y la hoja se
+        // desplaza con el dedo todavía sobre el slider (el bug reportado en Clarity, pero común a
+        // TODOS los sliders horizontales de aquí). El Slider, más interno, sigue recibiendo el
+        // componente horizontal; el vertical cae en este draggable —que no hace nada— y nunca llega
+        // al scroll padre. Se puede seguir scrolleando la hoja desde las etiquetas, los huecos o el
+        // gráfico; lo único que ya no scrollea es tener el dedo puesto sobre un slider.
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .draggable(
+                    state = rememberDraggableState { /* no-op: solo consumir para bloquear el scroll */ },
+                    orientation = Orientation.Vertical
+                )
+        ) {
+            slider(Modifier.fillMaxWidth())
+        }
+        // Hueco explícito ANTES del trailing: es lo único que separa el icono del slider (ver
+        // [SliderTrailingGap]). Va aquí y no dentro de la casilla del badge porque [SaturationBadge]
+        // mide [BadgeSlot] EXACTO —llena su caja—, así que alinearlo dentro de un wrapper del mismo
+        // ancho no mueve nada; el glifo queda centrado y con él la casilla entera hay que apartarla.
+        Spacer(modifier = Modifier.width(SliderTrailingGap))
+        // Casilla del aviso, reservada SIEMPRE (visible o no) para que el slider no cambie de ancho
+        // cuando el aviso entra o sale mientras se arrastra.
         Box(
             modifier = Modifier.width(BadgeSlot),
             contentAlignment = Alignment.Center
         ) {
             badge()
         }
+        Spacer(modifier = Modifier.width(BadgeReadoutGap))
         Text(
             text = readout,
             style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
             color = readoutColor
                 ?: if (enabled) MaterialTheme.colorScheme.onSurface
                 else MaterialTheme.colorScheme.onSurfaceVariant,
-            // Mínimo por el mismo motivo que la etiqueta, y aquí además es lo que permite tener la
-            // columna ajustada: el ancho lo pide "16.000 Hz", pero como es un piso y no un techo, si
-            // algún día no cupiera se ensancha en vez de romperse.
             maxLines = 1,
-            modifier = Modifier.widthIn(min = EqValueWidth),
+            // Ceñida al valor más ancho en las filas de ganancia (así el icono a su izquierda no se
+            // mueve al pasar de "+0.0" a "+12.0"); con el piso normal en el resto. En ambos casos el
+            // texto va alineado a la derecha, así que el borde derecho queda en su sitio.
+            modifier = Modifier.widthIn(min = readoutMinWidth ?: EqValueWidth),
             textAlign = androidx.compose.ui.text.style.TextAlign.End
         )
     }

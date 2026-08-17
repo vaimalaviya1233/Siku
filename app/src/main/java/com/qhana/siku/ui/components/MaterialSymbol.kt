@@ -56,7 +56,18 @@ fun MaterialSymbol(
             lineHeight = size,
             lineHeightStyle = LineHeightStyle(
                 alignment = LineHeightStyle.Alignment.Center,
-                trim = LineHeightStyle.Trim.None
+                // `Trim.Both` y no `None`: esto es un GLIFO, no un párrafo. Con `None` la caja
+                // conserva el espacio que la fuente reserva sobre el ascender y bajo el descender,
+                // y ese espacio NO es simétrico — así que la caja que mide Compose no tiene el
+                // dibujo en su centro. Se nota en cuanto el símbolo convive con texto y los dos se
+                // centran por caja (el play de la botonera de detalles salía más bajo que su
+                // etiqueta), y también, más sutil, dentro de cualquier botón de icono.
+                //
+                // Recortándolo, la caja pasa a medir exactamente `lineHeight` —o sea `size`, el
+                // tamaño nominal del icono— con el glifo centrado dentro, que es justo lo que
+                // asume quien lo coloca. Requiere `includeFontPadding = false`, que ya está
+                // arriba; sin eso `Trim` no hace nada.
+                trim = LineHeightStyle.Trim.Both
             )
         )
     }

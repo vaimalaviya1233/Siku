@@ -4,9 +4,11 @@ import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -21,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -30,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.materialkolor.hct.Hct
 import com.qhana.siku.R
 import com.qhana.siku.data.lyrics.safFolderDisplayName
 import com.qhana.siku.data.model.LibraryTabId
@@ -40,6 +44,8 @@ import com.qhana.siku.data.model.PlayerToolbarAction
 import com.qhana.siku.data.model.PlayerToolbarConfig
 import com.qhana.siku.data.model.ReplayGainMode
 import com.qhana.siku.data.model.ToolbarActionState
+import com.qhana.siku.ui.components.DISABLED_CONTENT_ALPHA
+import com.qhana.siku.ui.components.ComponentConfig
 import com.qhana.siku.ui.components.ConnectedChoiceGroup
 import com.qhana.siku.ui.components.EqPresets
 import com.qhana.siku.ui.components.DisconnectOneDriveDialog
@@ -58,14 +64,9 @@ import com.qhana.siku.ui.viewmodel.BackupViewModel
 import com.qhana.siku.ui.viewmodel.BrowseViewModel
 import com.qhana.siku.ui.viewmodel.LibraryViewModel
 import com.qhana.siku.ui.viewmodel.SourcesViewModel
+import kotlin.math.roundToInt
 import com.qhana.siku.ui.viewmodel.SyncViewModel
 
-/**
- * Medidas compartidas por todas las pantallas de Ajustes. Existen porque el radio de las tarjetas
- * y las dos separaciones estaban repetidos literalmente en ~15 sitios del archivo: cambiar el
- * lenguaje visual obligaba a un buscar-y-reemplazar y cualquier olvido quedaba como una tarjeta
- * con otra forma.
- */
 /** Modos de ReplayGain, en el orden en que se ofrecen. */
 private val REPLAY_GAIN_MODES = listOf(
     ReplayGainMode.OFF,
@@ -73,6 +74,12 @@ private val REPLAY_GAIN_MODES = listOf(
     ReplayGainMode.ALBUM
 )
 
+/**
+ * Medidas compartidas por todas las pantallas de Ajustes. Existen porque el radio de las tarjetas
+ * y las dos separaciones estaban repetidos literalmente en ~15 sitios del archivo: cambiar el
+ * lenguaje visual obligaba a un buscar-y-reemplazar y cualquier olvido quedaba como una tarjeta
+ * con otra forma.
+ */
 private object SettingsTokens {
     /** Esquina de un bloque SUELTO (los agrupados la reciben de [rememberListItemShape]). */
     val BlockCorner = 12.dp
@@ -127,6 +134,15 @@ private fun SettingsSwitchTile(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                // Toda la fila alterna el switch, como en Ajustes de Android: apuntar solo al pulgar
+                // del Switch es un blanco pequeño para una acción que ocupa la fila entera. El Switch
+                // pasa a display-only (onCheckedChange = null) para que el tap no se maneje dos veces,
+                // y `role = Switch` deja que el lector de pantalla lo anuncie como interruptor.
+                .toggleable(
+                    value = checked,
+                    onValueChange = onCheckedChange,
+                    role = Role.Switch
+                )
                 .padding(SettingsTokens.TilePadding),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -141,7 +157,7 @@ private fun SettingsSwitchTile(
                 )
             }
             Spacer(modifier = Modifier.width(16.dp))
-            Switch(checked = checked, onCheckedChange = onCheckedChange)
+            Switch(checked = checked, onCheckedChange = null)
         }
     }
 }
@@ -171,9 +187,10 @@ fun SettingsScreen(
     }
 
     // Cada categoría lleva una forma orgánica de MaterialShapes (sello M3 Expressive) y su
-    // propio color FIJO (no el scheme seedeado del álbum, que en Ajustes queda gris oscuro),
-    // con icono blanco encima — así el hub es colorido y no una lista de blobs grises iguales.
-    val onBlob = Color.White
+    // propio color de acento FIJO (no el scheme seedeado del álbum, que en Ajustes queda gris
+    // oscuro), del que se DERIVA el par tonal del badge (contenedor tenue + glifo saturado, estilo
+    // Ajustes de Android) en [rememberBadgeColors] — así el hub es colorido y no una lista de
+    // blobs grises iguales.
     val categories = listOfNotNull(
         SettingsCategory(
             icon = "cloud",
@@ -181,8 +198,7 @@ fun SettingsScreen(
             subtitle = sourcesSubtitle,
             route = Screen.SettingsSources.route,
             iconShape = MaterialShapes.Cookie9Sided.toShape(),
-            container = Color(0xFF1976D2), // azul
-            content = onBlob
+            seed = Color(0xFF1976D2) // azul
         ),
         // La copia de seguridad vive en el approot de OneDrive: sin sesión, exportar/importar
         // solo puede fallar en runtime — mismo criterio de gating que "Descargas" más abajo.
@@ -192,17 +208,15 @@ fun SettingsScreen(
             subtitle = stringResource(R.string.settings_cat_backup_desc),
             route = Screen.SettingsBackup.route,
             iconShape = MaterialShapes.Sunny.toShape(),
-            container = Color(0xFF2E7D32), // verde
-            content = onBlob
+            seed = Color(0xFF2E7D32) // verde
         ) else null,
         SettingsCategory(
-            icon = "volume_up",
+            icon = "brand_awareness",
             title = stringResource(R.string.settings_volume_header),
             subtitle = stringResource(R.string.settings_cat_playback_desc),
             route = Screen.SettingsPlayback.route,
             iconShape = MaterialShapes.Cookie7Sided.toShape(),
-            container = Color(0xFFE65100), // naranja
-            content = onBlob
+            seed = Color(0xFFE65100) // naranja
         ),
         // Descargas: siempre visible — además del tope de GB (que solo aplica con nube y
         // dentro se muestra deshabilitado con su aviso) contiene la política de red de las
@@ -213,8 +227,7 @@ fun SettingsScreen(
             subtitle = stringResource(R.string.settings_cat_downloads_desc),
             route = Screen.SettingsDownloads.route,
             iconShape = MaterialShapes.Cookie12Sided.toShape(),
-            container = Color(0xFF6A1B9A), // violeta
-            content = onBlob
+            seed = Color(0xFF6A1B9A) // violeta
         ),
         SettingsCategory(
             icon = "palette",
@@ -222,8 +235,7 @@ fun SettingsScreen(
             subtitle = stringResource(R.string.settings_cat_appearance_desc),
             route = Screen.SettingsAppearance.route,
             iconShape = MaterialShapes.Cookie6Sided.toShape(),
-            container = Color(0xFFC2185B), // rosa
-            content = onBlob
+            seed = Color(0xFFC2185B) // rosa
         ),
         SettingsCategory(
             icon = "swipe",
@@ -231,8 +243,7 @@ fun SettingsScreen(
             subtitle = stringResource(R.string.settings_cat_gestures_desc),
             route = Screen.SettingsGestures.route,
             iconShape = MaterialShapes.Cookie4Sided.toShape(),
-            container = Color(0xFF00838F), // turquesa
-            content = onBlob
+            seed = Color(0xFF00838F) // turquesa
         )
     )
 
@@ -253,17 +264,18 @@ fun SettingsScreen(
                         .padding(16.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    val (badgeContainer, badgeContent) = rememberBadgeColors(category.seed)
                     Surface(
                         shape = category.iconShape,
-                        color = category.container,
+                        color = badgeContainer,
                         modifier = Modifier.size(44.dp)
                     ) {
-                        Box(contentAlignment = Alignment.Center) {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             MaterialSymbol(
                                 category.icon,
                                 size = 22.sp,
                                 fill = true,
-                                color = category.content
+                                color = badgeContent
                             )
                         }
                     }
@@ -300,9 +312,27 @@ private data class SettingsCategory(
     val subtitle: String,
     val route: String,
     val iconShape: Shape,
-    val container: Color,
-    val content: Color
+    /** Color de acento de la categoría; el par del badge se deriva vía [rememberBadgeColors]. */
+    val seed: Color
 )
+
+/**
+ * Par (contenedor, glifo) del badge de una categoría, al estilo de Ajustes de Android: contenedor
+ * TONAL tenue del color con el glifo en el color SATURADO —en vez de un círculo saturado con el
+ * icono blanco—. Se deriva del [seed] por tono HCT, igual que Material genera sus pares
+ * `x-container`/`on-x-container`, así que funciona en tema claro y oscuro sin colores a mano.
+ */
+@Composable
+private fun rememberBadgeColors(seed: Color): Pair<Color, Color> {
+    val dark = isSystemInDarkTheme()
+    return remember(seed, dark) {
+        val hct = Hct.fromInt(seed.toArgb())
+        // Contenedor tenue / glifo brillante en oscuro; contenedor pastel / glifo saturado en claro.
+        val container = Hct.from(hct.hue, hct.chroma, if (dark) 30.0 else 90.0).toInt()
+        val content = Hct.from(hct.hue, hct.chroma, if (dark) 90.0 else 40.0).toInt()
+        Color(container) to Color(content)
+    }
+}
 
 // ==================== Sub-pantallas ====================
 
@@ -483,6 +513,14 @@ fun SettingsPlaybackScreen(
             color = MaterialTheme.colorScheme.surfaceContainerHigh
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
+                // Encabezado propio del bloque: antes lo hacía el título de la pantalla, que ahora es
+                // "Audio" (más amplio que solo ReplayGain), así que la normalización necesita el suyo
+                // —igual que el bloque del ecualizador tiene el suyo (settings_eq_header)—.
+                Text(
+                    text = stringResource(R.string.settings_replaygain_header),
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.padding(bottom = 4.dp)
+                )
                 Text(
                     text = stringResource(R.string.settings_volume_desc),
                     style = MaterialTheme.typography.bodySmall,
@@ -546,63 +584,12 @@ fun SettingsPlaybackScreen(
                     style = MaterialTheme.typography.titleSmall,
                     modifier = Modifier.padding(bottom = 4.dp)
                 )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = stringResource(R.string.settings_use_system_eq),
-                            style = MaterialTheme.typography.bodyLarge
-                        )
-                        Text(
-                            text = stringResource(R.string.settings_use_system_eq_desc),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(16.dp))
-                    Switch(
-                        checked = uiState.useSystemEq,
-                        onCheckedChange = { viewModel.setUseSystemEq(it) }
-                    )
-                }
-
-                // Perfiles por ruta de salida. Van bajo el mismo encabezado que el EQ y NO en una
-                // categoría propia: son una propiedad del ecualizador, no otra función.
-                //
-                // Deshabilitados con el EQ del sistema activo: ahí el ecualizador propio está
-                // apagado, así que no hay curva que recordar por dispositivo. Se muestra en vez de
-                // esconderse, para que la opción no parezca haber desaparecido.
-                val routeProfiles by viewModel.eqRouteProfilesEnabled.collectAsStateWithLifecycle()
-                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = stringResource(R.string.settings_eq_route_profiles),
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = if (uiState.useSystemEq) {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            } else {
-                                MaterialTheme.colorScheme.onSurface
-                            }
-                        )
-                        Text(
-                            text = stringResource(R.string.settings_eq_route_profiles_desc),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(16.dp))
-                    Switch(
-                        checked = routeProfiles && !uiState.useSystemEq,
-                        enabled = !uiState.useSystemEq,
-                        onCheckedChange = { viewModel.setEqRouteProfilesEnabled(it) }
-                    )
-                }
+                SettingsSwitchRow(
+                    title = stringResource(R.string.settings_use_system_eq),
+                    description = stringResource(R.string.settings_use_system_eq_desc),
+                    checked = uiState.useSystemEq,
+                    onCheckedChange = { viewModel.setUseSystemEq(it) }
+                )
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
                 Row(
@@ -641,7 +628,11 @@ fun SettingsPlaybackScreen(
 }
 
 /**
- * Qué presets del ecualizador se listan en el selector del reproductor.
+ * Qué presets y perfiles del ecualizador se listan en el selector del reproductor.
+ *
+ * Los dos grupos son los mismos del selector, y por el mismo motivo: un preset (los de fábrica)
+ * aplica solo la curva de bandas y un perfil (los guardados) el sonido completo. Mezclarlos aquí
+ * desharía la distinción justo en la pantalla donde se decide qué conservar a la vista.
  *
  * Vive en Ajustes y no en la hoja del EQ a propósito: es una tarea de mantenimiento que se hace
  * una vez y luego no se vuelve a tocar, mientras que esa hoja es una pantalla de uso constante
@@ -658,8 +649,11 @@ fun SettingsEqPresetsScreen(
     onBackClick: () -> Unit,
     viewModel: LibraryViewModel = hiltViewModel()
 ) {
-    val hidden by viewModel.hiddenEqPresets.collectAsStateWithLifecycle()
-    val customPresets by viewModel.customEqPresets.collectAsStateWithLifecycle()
+    val hidden by viewModel.eqPresets.hidden.collectAsStateWithLifecycle()
+    // Los mismos dos grupos que el selector del EQ, y por el mismo motivo: un preset aplica solo la
+    // curva y un perfil el sonido completo. Si aquí aparecieran mezclados, esta pantalla desharía
+    // la distinción justo donde el usuario decide cuáles conservar a la vista.
+    val profiles by viewModel.eqPresets.profiles.collectAsStateWithLifecycle()
 
     SettingsScaffold(
         title = stringResource(R.string.settings_eq_presets),
@@ -682,24 +676,24 @@ fun SettingsEqPresetsScreen(
                     PresetVisibilityRow(
                         name = stringResource(preset.labelRes),
                         visible = key !in hidden,
-                        onVisibleChange = { viewModel.setEqPresetHidden(key, !it) },
+                        onVisibleChange = { viewModel.eqPresets.setEntryHidden(key, !it) },
                         onDelete = null
                     )
                 }
 
-                if (customPresets.isNotEmpty()) {
+                if (profiles.isNotEmpty()) {
                     HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
                     Text(
-                        text = stringResource(R.string.settings_eq_presets_own),
+                        text = stringResource(R.string.settings_eq_profiles_own),
                         style = MaterialTheme.typography.titleSmall,
                         modifier = Modifier.padding(bottom = 4.dp)
                     )
-                    customPresets.forEach { preset ->
+                    profiles.forEach { profile ->
                         PresetVisibilityRow(
-                            name = preset.name,
-                            visible = preset.id !in hidden,
-                            onVisibleChange = { viewModel.setEqPresetHidden(preset.id, !it) },
-                            onDelete = { viewModel.deleteEqPreset(preset.id) }
+                            name = profile.name,
+                            visible = profile.id !in hidden,
+                            onVisibleChange = { viewModel.eqPresets.setEntryHidden(profile.id, !it) },
+                            onDelete = { viewModel.eqPresets.deleteProfile(profile.id) }
                         )
                     }
                 }
@@ -708,7 +702,7 @@ fun SettingsEqPresetsScreen(
                 // usuario a ignorar esa zona de la pantalla.
                 if (hidden.isNotEmpty()) {
                     HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-                    TextButton(onClick = { viewModel.restoreAllEqPresets() }) {
+                    TextButton(onClick = { viewModel.eqPresets.restoreAll() }) {
                         Text(stringResource(R.string.settings_eq_presets_restore_all, hidden.size))
                     }
                 }
@@ -786,6 +780,12 @@ fun SettingsGesturesScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    // Fila entera alterna (mismo criterio que SettingsSwitchTile).
+                    .toggleable(
+                        value = uiState.playerGestures,
+                        onValueChange = { viewModel.setPlayerGestures(it) },
+                        role = Role.Switch
+                    )
                     .padding(16.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -812,7 +812,7 @@ fun SettingsGesturesScreen(
 
                 Switch(
                     checked = uiState.playerGestures,
-                    onCheckedChange = { viewModel.setPlayerGestures(it) }
+                    onCheckedChange = null
                 )
             }
         }
@@ -1114,7 +1114,6 @@ fun SettingsAppearanceScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val isRegenerating = uiState.isRegeneratingColors
     val nowPlayingSolidBackground = uiState.nowPlayingSolidBackground
-    val nowPlayingWavyProgress = uiState.nowPlayingWavyProgress
     val miniPlayerRoundedRect = uiState.miniPlayerRoundedRect
     val nowPlayingDetailedFormat = uiState.nowPlayingDetailedFormat
 
@@ -1176,18 +1175,6 @@ fun SettingsAppearanceScreen(
                         onCheckedChange = { viewModel.setNowPlayingSolidBackground(it) }
                     )
                 },
-                // Barra de progreso: píldora plana (diseño propio) vs onda Expressive. Solo afecta
-                // al NowPlaying — en el MiniPlayer la barra mide 3dp y la onda no se leería.
-                { shape ->
-                    SettingsSwitchTile(
-                        icon = "waves",
-                        title = stringResource(R.string.settings_wavy_progress),
-                        description = stringResource(R.string.settings_wavy_progress_desc),
-                        checked = nowPlayingWavyProgress,
-                        shape = shape,
-                        onCheckedChange = { viewModel.setNowPlayingWavyProgress(it) }
-                    )
-                },
                 // Forma de la barra flotante: píldora (diseño original) o rectángulo redondeado.
                 // Solo afecta al contenedor; la carátula del mini sigue siendo circular porque es
                 // el extremo del shared element hacia el reproductor.
@@ -1230,10 +1217,25 @@ fun SettingsAppearanceScreen(
 
         Spacer(modifier = Modifier.height(SettingsTokens.SectionGap))
 
-        // Las dos personalizaciones con lista drag & drop viven en su propia pantalla: metidas
+        // Las personalizaciones que necesitan más de una fila viven en su propia pantalla: metidas
         // aquí ocupaban Apariencia entera y enterraban el resto de ajustes.
         SettingsGroup(
             listOf<@Composable (Shape) -> Unit>(
+                // Barra de progreso: modo (plana/ondulada) y grosor, con vista previa en vivo. Los
+                // dos ajustes se eligen MIRANDO la barra, así que van donde se la puede enseñar —
+                // el switch suelto en esta lista obligaba a salir al reproductor para ver el
+                // efecto, y el grosor no se juzga leyendo "12 dp".
+                { shape ->
+                    SettingsActionRow(
+                        icon = "linear_scale",
+                        title = stringResource(R.string.settings_progress_bar_header),
+                        description = stringResource(R.string.settings_progress_bar_desc),
+                        enabled = true,
+                        onClick = { onNavigate(Screen.SettingsProgressBar.route) },
+                        navigates = true,
+                        shape = shape
+                    )
+                },
                 { shape ->
                     SettingsActionRow(
                         icon = "tab",
@@ -1241,6 +1243,7 @@ fun SettingsAppearanceScreen(
                         description = stringResource(R.string.settings_tabs_desc),
                         enabled = true,
                         onClick = { onNavigate(Screen.SettingsTabs.route) },
+                        navigates = true,
                         shape = shape
                     )
                 },
@@ -1251,6 +1254,7 @@ fun SettingsAppearanceScreen(
                         description = stringResource(R.string.settings_player_bar_desc),
                         enabled = true,
                         onClick = { onNavigate(Screen.SettingsPlayerBar.route) },
+                        navigates = true,
                         shape = shape
                     )
                 }
@@ -1263,6 +1267,85 @@ fun SettingsAppearanceScreen(
         // long-press sobre la carátula del NowPlaying (NowPlayingColorPicker).
     }
 }
+
+/**
+ * Barra de progreso del reproductor: modo (plana u ondulada) y grosor, **con la barra de verdad
+ * arriba**. Es una pantalla propia y no dos filas sueltas en Apariencia porque los dos ajustes se
+ * eligen mirando el resultado: el switch obligaba a salir al reproductor para ver qué hacía, y un
+ * grosor no se juzga leyendo "12 dp".
+ *
+ * La vista previa dibuja los tracks REALES ([ProgressBarPreview]), así que el modo se ve moverse y
+ * el grosor cambia bajo el dedo mientras se arrastra el slider.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsProgressBarScreen(
+    onBackClick: () -> Unit,
+    viewModel: LibraryViewModel = hiltViewModel()
+) {
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val wavy = uiState.nowPlayingWavyProgress
+    val thickness = uiState.nowPlayingProgressThickness
+
+    SettingsScaffold(
+        title = stringResource(R.string.settings_progress_bar_header),
+        onBackClick = onBackClick
+    ) {
+        // La previa va PRIMERO y en su propio bloque: es el objeto sobre el que actúan los dos
+        // controles de abajo, no una decoración de uno de ellos.
+        Surface(
+            shape = RoundedCornerShape(SettingsTokens.BlockCorner),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                // Mismos roles que en el reproductor: el activo es el acento (allí, el color del
+                // álbum) y el riel es ese mismo color muy atenuado.
+                ProgressBarPreview(
+                    wavy = wavy,
+                    trackHeight = thickness.dp,
+                    activeColor = MaterialTheme.colorScheme.primary,
+                    inactiveColor = MaterialTheme.colorScheme.primary.copy(alpha = PREVIEW_RAIL_ALPHA)
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(SettingsTokens.SectionGap))
+
+        SettingsGroup(
+            listOf<@Composable (Shape) -> Unit>(
+                { shape ->
+                    SettingsSwitchTile(
+                        icon = "waves",
+                        title = stringResource(R.string.settings_wavy_progress),
+                        description = stringResource(R.string.settings_wavy_progress_desc),
+                        checked = wavy,
+                        shape = shape,
+                        onCheckedChange = { viewModel.setNowPlayingWavyProgress(it) }
+                    )
+                }
+            )
+        )
+
+        Spacer(modifier = Modifier.height(SettingsTokens.SectionGap))
+
+        ProgressThicknessSetting(
+            thicknessDp = thickness,
+            onChange = { viewModel.setNowPlayingProgressThickness(it) }
+        )
+    }
+}
+
+/**
+ * Opacidad del riel en la vista previa: la MISMA que el track recibe en el reproductor. Allí llega
+ * como `playButtonColor.copy(0.2f)` y `ProgressSlider` lo vuelve a pasar por `copy(alpha = 0.25f)`
+ * — que REEMPLAZA el alpha, no lo multiplica—, así que el valor que pinta es este.
+ */
+private const val PREVIEW_RAIL_ALPHA = 0.25f
 
 /** Pestañas de la biblioteca: orden (drag & drop) + cuáles se muestran. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1452,6 +1535,68 @@ private val PaletteStyleOptions = listOf(
     "FruitSalad" to (R.string.settings_palette_fruitsalad to R.string.settings_palette_fruitsalad_desc)
 )
 
+/**
+ * Grosor de la barra de progreso del reproductor. UN solo slider para los DOS modos (píldora plana
+ * y onda): de este número la barra deriva el trazo, la amplitud, el indicador y el alto del palo
+ * (ver `progressMetricsFor`), así que no hay nada más que ajustar ni forma de dejar la geometría
+ * incoherente.
+ *
+ * No dibuja ninguna muestra: vive en [SettingsProgressBarScreen], que ya enseña la barra REAL
+ * encima y la actualiza mientras se arrastra este slider. Eso es lo que justifica que el ajuste
+ * tenga pantalla propia — "12 dp" no se juzga leyéndolo.
+ */
+@Composable
+private fun ProgressThicknessSetting(
+    thicknessDp: Int,
+    onChange: (Int) -> Unit
+) {
+    val min = ComponentConfig.ProgressTrackHeightMin
+    val max = ComponentConfig.ProgressTrackHeightMax
+    val step = ComponentConfig.ProgressTrackHeightStep
+    // Paradas INTERMEDIAS (el Slider no cuenta los extremos), de ahí el −1.
+    val steps = ((max - min) / step).toInt() - 1
+    val current = thicknessDp.dp.coerceIn(min, max)
+
+    Surface(
+        shape = RoundedCornerShape(SettingsTokens.BlockCorner),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                MaterialSymbol("line_weight", size = 24.sp)
+                Spacer(modifier = Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.settings_progress_thickness),
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        text = stringResource(R.string.settings_progress_thickness_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(modifier = Modifier.width(16.dp))
+                Text(
+                    text = stringResource(R.string.settings_progress_thickness_value, current.value.toInt()),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            // Sin muestra propia: la barra REAL está arriba, en la misma pantalla
+            // ([SettingsProgressBarScreen]), y responde a este slider mientras se arrastra. Dos
+            // dibujos del mismo objeto solo pueden acabar contándose cosas distintas.
+            Slider(
+                value = current.value,
+                onValueChange = { onChange(it.roundToInt()) },
+                valueRange = min.value..max.value,
+                steps = steps
+            )
+        }
+    }
+}
+
 /** Selector del estilo de paleta: fila con el valor actual que despliega el menú de opciones. */
 @Composable
 private fun ThemePaletteStyleSetting(
@@ -1580,24 +1725,42 @@ private fun SettingsSwitchRow(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
+            // Fila entera alterna el switch (ver [SettingsSwitchTile]). `enabled` gobierna también
+            // el gesto: deshabilitada, ni el tap de la fila ni el del switch hacen nada.
+            .toggleable(
+                value = checked,
+                enabled = enabled,
+                onValueChange = onCheckedChange,
+                role = Role.Switch
+            )
             .padding(vertical = 6.dp)
     ) {
+        // El 0.38 es el alpha de CONTENIDO DESHABILITADO del spec de M3, el mismo que aplican por
+        // dentro `Button`, `TextField` y compañía; por eso se escribe aquí en vez de derivar un rol.
+        //
+        // Es la ÚNICA opacidad que sigue viva sobre un color del tema en toda la UI. M3 usa alpha
+        // solo para deshabilitado, state layers y scrims: la jerarquía de texto se hace con ROLES
+        // (`onSurface` vs `onSurfaceVariant`), que llevan su contraste medido contra la superficie.
+        // Había quince atenuaciones más que sí eran jerarquía —incluidas varias sobre
+        // `onSurfaceVariant`, o sea atenuar lo ya atenuado, rompiendo justo la garantía por la que
+        // ese rol existe— y se sustituyeron por el rol que les tocaba (`outline` para los glifos
+        // decorativos de los estados vacíos, `onSurfaceVariant` a secas para los subtítulos).
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = title,
                 style = MaterialTheme.typography.bodyLarge,
                 color = if (enabled) MaterialTheme.colorScheme.onSurface
-                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                else MaterialTheme.colorScheme.onSurface.copy(alpha = DISABLED_CONTENT_ALPHA)
             )
             Text(
                 text = description,
                 style = MaterialTheme.typography.bodySmall,
                 color = if (enabled) MaterialTheme.colorScheme.onSurfaceVariant
-                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = DISABLED_CONTENT_ALPHA)
             )
         }
         Spacer(modifier = Modifier.width(16.dp))
-        Switch(checked = checked, enabled = enabled, onCheckedChange = onCheckedChange)
+        Switch(checked = checked, enabled = enabled, onCheckedChange = null)
     }
 }
 
@@ -1611,6 +1774,12 @@ private fun SettingsActionRow(
     enabled: Boolean,
     onClick: () -> Unit,
     loading: Boolean = false,
+    /**
+     * true = la fila NAVEGA a otra pantalla → muestra el chevron ">" (misma pista visual que el hub
+     * de Ajustes y que la app de Ajustes de Android). false = acción in-place (reescanear, regenerar
+     * colores), donde un chevron mentiría prometiendo una pantalla que no hay.
+     */
+    navigates: Boolean = false,
     /** La pasa [SettingsGroup] cuando la fila va dentro de un grupo; suelta, es un bloque. */
     shape: Shape = RoundedCornerShape(SettingsTokens.BlockCorner)
 ) {
@@ -1633,7 +1802,7 @@ private fun SettingsActionRow(
                 MaterialSymbol(icon, size = 24.sp)
             }
             Spacer(modifier = Modifier.width(16.dp))
-            Column {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = title,
                     style = MaterialTheme.typography.bodyLarge
@@ -1641,6 +1810,14 @@ private fun SettingsActionRow(
                 Text(
                     text = description,
                     style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (navigates) {
+                Spacer(modifier = Modifier.width(12.dp))
+                MaterialSymbol(
+                    "chevron_right",
+                    size = 24.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }

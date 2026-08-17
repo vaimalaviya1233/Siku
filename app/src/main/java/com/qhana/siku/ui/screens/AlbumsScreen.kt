@@ -47,6 +47,8 @@ fun AlbumsScreen(
     albums: List<AlbumSummary>,
     onAlbumClick: (String) -> Unit,
     onPlayAlbum: (String) -> Unit,
+    /** Encola TODAS las canciones del álbum al final de la cola, desde el overflow de la tarjeta. */
+    onAddAlbumToQueue: (String) -> Unit,
     contentPadding: PaddingValues,
     sortOrder: AlbumSortOrder,
     onSortOrderChange: (AlbumSortOrder) -> Unit,
@@ -65,7 +67,7 @@ fun AlbumsScreen(
                 MaterialSymbol(
                     "album",
                     size = 64.sp,
-                    color = colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                    color = colorScheme.outline
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
@@ -137,6 +139,7 @@ fun AlbumsScreen(
                 modifier = Modifier.animateItem(),
                 onClick = { onAlbumClick(album.name) },
                 onPlayClick = { onPlayAlbum(album.name) },
+                onAddToQueue = { onAddAlbumToQueue(album.name) },
                 // Carátula = shared element hacia el header del detalle del álbum.
                 sharedTransitionScope = sharedTransitionScope,
                 animatedVisibilityScope = animatedVisibilityScope

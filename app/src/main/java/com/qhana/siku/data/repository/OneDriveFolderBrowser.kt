@@ -5,6 +5,7 @@ import com.qhana.siku.data.auth.AuthManager
 import com.qhana.siku.data.auth.AuthResult
 import com.qhana.siku.data.model.AppError
 import com.qhana.siku.data.model.AppResult
+import com.qhana.siku.data.remote.HttpStatus
 import com.qhana.siku.data.remote.OneDriveApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.firstOrNull
@@ -61,7 +62,7 @@ class OneDriveFolderBrowser @Inject constructor(
             } catch (e: HttpException) {
                 Log.w(TAG, "No se pudieron listar las carpetas: ${e.code()}")
                 AppResult.Error(
-                    if (e.code() == HTTP_UNAUTHORIZED || e.code() == HTTP_FORBIDDEN) {
+                    if (HttpStatus.isAuthFailure(e.code())) {
                         AppError.Auth(needsRelogin = true)
                     } else {
                         AppError.Network("Error de OneDrive (${e.code()})", e)
@@ -91,7 +92,5 @@ class OneDriveFolderBrowser @Inject constructor(
         const val PAGE_SIZE = 200
         /** Tope de sanidad: una carpeta con miles de hijos no debe bloquear el selector. */
         const val MAX_PAGES = 10
-        const val HTTP_UNAUTHORIZED = 401
-        const val HTTP_FORBIDDEN = 403
     }
 }

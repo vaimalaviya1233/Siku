@@ -47,6 +47,8 @@ data class PlaybackSettingsState(
     val replayGainPreamp: Float = 0f,
     val nowPlayingSolidBackground: Boolean = false,
     val nowPlayingWavyProgress: Boolean = false,
+    /** Grosor de la barra de progreso del NowPlaying, en dp (vale para los dos modos). */
+    val nowPlayingProgressThickness: Int = MusicPreferences.DEFAULT_PROGRESS_THICKNESS_DP,
     /** MiniPlayer como rectángulo redondeado en vez de píldora (false = píldora, el diseño actual). */
     val miniPlayerRoundedRect: Boolean = false,
     /** Chip de formato del NowPlaying con la ficha técnica (bitrate/bits + frecuencia). */
@@ -85,6 +87,7 @@ data class LibraryUiState(
     val replayGainPreamp: Float get() = playbackSettings.replayGainPreamp
     val nowPlayingSolidBackground: Boolean get() = playbackSettings.nowPlayingSolidBackground
     val nowPlayingWavyProgress: Boolean get() = playbackSettings.nowPlayingWavyProgress
+    val nowPlayingProgressThickness: Int get() = playbackSettings.nowPlayingProgressThickness
     val miniPlayerRoundedRect: Boolean get() = playbackSettings.miniPlayerRoundedRect
     val nowPlayingDetailedFormat: Boolean get() = playbackSettings.nowPlayingDetailedFormat
     val playerGestures: Boolean get() = playbackSettings.playerGestures

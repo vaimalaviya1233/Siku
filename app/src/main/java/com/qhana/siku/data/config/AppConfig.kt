@@ -1,7 +1,32 @@
 package com.qhana.siku.data.config
 
 object AppConfig {
-    const val API_TIMEOUT_SECONDS = 30L
+    /**
+     * Tiempo para ESTABLECER la conexión (TCP + TLS) con Graph, el host de descargas y el
+     * `DataSource` de ExoPlayer. Es el default de OkHttp, y se usa precisamente por eso: un valor
+     * con autoridad de quien escribió la librería, en un parámetro donde no tenemos nada que medir.
+     *
+     * Separado de [API_READ_TIMEOUT_SECONDS] porque son preguntas distintas con costes distintos, y
+     * durante un tiempo compartieron un único valor de 30 s. **Una conexión que no se establece en
+     * diez segundos casi nunca se establece**, así que ahí el margen extra no compra nada y sí se
+     * paga: se multiplica por los reintentos y lo acaba esperando quien acaba de pulsar play.
+     */
+    const val API_CONNECT_TIMEOUT_SECONDS = 10L
+
+    /**
+     * Tiempo máximo sin recibir datos de una respuesta ya en curso (read/write).
+     *
+     * Aquí sí es DEFENSIVO y por eso triplica el default de OkHttp: durante un sync masivo el
+     * dispositivo va saturado con decenas de conexiones compitiendo, y un servidor que tarda en
+     * empezar a responder es normal en esas condiciones. Cortar antes convertiría una racha de
+     * lentitud en fallos, que generan reintentos, que añaden más carga.
+     *
+     * **Ojo al componerlo con reintentos**: `OneDriveRepository.executeWithRetry` hace hasta tres
+     * intentos, así que un cuelgue tarda `3 × esto` más las esperas del backoff antes de rendirse.
+     * La latencia del camino de reproducción NO se acota bajando este valor —que protege al sync—
+     * sino con el presupuesto explícito de la resolución prioritaria.
+     */
+    const val API_READ_TIMEOUT_SECONDS = 30L
 
     // Cuánto se mantienen vivos los sockets ociosos del pool de descargas: cubre el hueco
     // entre que termina un archivo y el worker toma el siguiente sin renegociar TLS.
@@ -15,7 +40,7 @@ object AppConfig {
 
     /**
      * Cliente "lyrics" (LrcLib + Deezer): APIs públicas de terceros que devuelven JSON pequeño.
-     * Más corto que [API_TIMEOUT_SECONDS] a propósito — Graph sostiene el sync y la reproducción
+     * Más corto que [API_READ_TIMEOUT_SECONDS] a propósito — Graph sostiene el sync y la reproducción
      * y merece paciencia, mientras que una letra o una foto de artista que tarda es una mejora
      * opcional: rendirse pronto libera el hilo y la UI ya tiene su estado de "no encontrado".
      */

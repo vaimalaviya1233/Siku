@@ -63,6 +63,10 @@ class LightMetadataFetcher @Inject constructor(
         // Canciones cuya cabecera se leyó ENTERA y no traía imagen. Se sellan al final, en una
         // sola escritura, para que dejen de aparecer como pendientes en cada sync.
         val noArtwork = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+        // Lo mismo para los TAGS de texto: la cabecera contestó y no traía ninguno. Sin este sello,
+        // un archivo sin tags vuelve en cada sync mientras siga sin descargar (ver
+        // `SongEntity.lightTagsAttemptedAt`) — era el banner "Leyendo datos 1 de 4" de cada arranque.
+        val noTags = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
         val semaphore = Semaphore(PARALLELISM)
 
         onProgress(0, pending.size)
@@ -77,7 +81,7 @@ class LightMetadataFetcher @Inject constructor(
                 try {
                     semaphore.withPermit {
                         if (isStopped()) return@withPermit
-                        processSong(song, albumArtThisRun, noArtwork, updated, isStopped)
+                        processSong(song, albumArtThisRun, noArtwork, noTags, updated, isStopped)
                     }
                 } finally {
                     onProgress(processed.incrementAndGet(), pending.size)
@@ -86,8 +90,9 @@ class LightMetadataFetcher @Inject constructor(
         }
         jobs.forEach { it.join() }
         if (noArtwork.isNotEmpty()) musicRepository.markArtworkAttempted(noArtwork.toList())
+        if (noTags.isNotEmpty()) musicRepository.markLightTagsAttempted(noTags.toList())
         val total = updated.get()
-        Log.i(TAG, "Metadata ligera: $total actualizadas, ${noArtwork.size} sin portada")
+        Log.i(TAG, "Metadata ligera: $total actualizadas, ${noArtwork.size} sin portada, ${noTags.size} sin tags")
         total
     }
 
@@ -102,6 +107,7 @@ class LightMetadataFetcher @Inject constructor(
         song: Song,
         albumArtThisRun: MutableMap<String, String>,
         noArtwork: MutableSet<String>,
+        noTags: MutableSet<String>,
         updated: java.util.concurrent.atomic.AtomicInteger,
         isStopped: () -> Boolean
     ) {
@@ -138,6 +144,16 @@ class LightMetadataFetcher @Inject constructor(
                     durationMs = meta.durationMs
                 )
                 updated.incrementAndGet()
+            } else if (song.artist == AppConfig.UNKNOWN_ARTIST) {
+                // La cabecera CONTESTÓ y no traía ni un tag de texto: hecho definitivo para esta
+                // fase, así que se sella y deja de entrar en la lista. Solo importa cuando la fila
+                // está aquí POR los tags (artista centinela); si vino solo por la carátula, la
+                // primera condición de la consulta no la mira y el UPDATE sería inútil.
+                //
+                // El otro sello (`needsMetadata = 0`) no cubre este caso porque solo llega con el
+                // análisis del archivo completo, o sea tras DESCARGARLO: hasta entonces esta misma
+                // canción volvía a pedirse en cada arranque en frío para no encontrar nada.
+                noTags.add(song.id)
             }
 
             when (applyArtwork(song.id, album, meta, albumArtThisRun, isStopped)) {

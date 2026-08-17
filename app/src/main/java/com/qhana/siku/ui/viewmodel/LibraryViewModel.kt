@@ -23,7 +23,9 @@ import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.qhana.siku.player.MusicController
 import com.qhana.siku.ui.state.LibraryUiState
+import com.qhana.siku.data.coordinator.IncompleteReason
 import com.qhana.siku.worker.DownloadScheduler
+import com.qhana.siku.worker.ScanWorker
 import com.qhana.siku.worker.WorkerTags
 import com.qhana.siku.R
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -33,6 +35,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import com.qhana.siku.data.util.WhileUiSubscribed
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -125,7 +128,7 @@ class LibraryViewModel @Inject constructor(
      */
     val downloadProgressById: StateFlow<Map<String, Float>> = syncManager.activeDownloads
         .map { active -> active.filter { it.individual }.associate { it.song.id to it.progress } }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+        .stateIn(viewModelScope, WhileUiSubscribed, emptyMap())
 
     // Indicador del pull-to-refresh. Vive acá (no en la pantalla) porque quien sabe
     // cuándo el sync realmente arrancó es el colector de syncManager.state.
@@ -140,11 +143,26 @@ class LibraryViewModel @Inject constructor(
         .map { Triple(it.searchQuery, it.sortOrderAll, it.sourceFilters) }
         .distinctUntilChanged()
         .flatMapLatest { (query, sortOrder, sourceFilters) ->
-            repository.getSongsPaging(query, sortOrder, sourceFilters)
-                .catch { e ->
-                    snackbarManager.show(context.getString(R.string.library_error_loading, e.message ?: e.javaClass.simpleName))
-                    emit(PagingData.empty())
-                }
+            flow {
+                // Rescate por APROXIMACIÓN, y solo cuando hace falta: si la búsqueda literal ya
+                // devuelve algo, esos son los resultados que el usuario espera y no se toca nada.
+                // Cuando no devuelve NADA es cuando una errata deja la pantalla en blanco, y ahí sí
+                // compensa recorrer el texto de la biblioteca comparando con tolerancia.
+                //
+                // Atarlo a "no hubo resultados" es lo que lo hace barato: el caso corriente no paga
+                // ni una consulta de más, y el costoso ocurre una vez, con el usuario mirando una
+                // lista vacía. Sin esa condición habría que recorrer la biblioteca en cada tecla.
+                val approximateIds =
+                    if (query.isNotBlank() && repository.countSongsMatching(query, sourceFilters) == 0) {
+                        repository.findApproximateSongIds(query)
+                    } else {
+                        emptyList()
+                    }
+                emitAll(repository.getSongsPaging(query, sortOrder, sourceFilters, approximateIds))
+            }.catch { e ->
+                snackbarManager.show(context.getString(R.string.library_error_loading, e.message ?: e.javaClass.simpleName))
+                emit(PagingData.empty())
+            }
         }
         .cachedIn(viewModelScope)
 
@@ -182,7 +200,7 @@ class LibraryViewModel @Inject constructor(
         .map { it.sourceFilters }
         .distinctUntilChanged()
         .flatMapLatest { repository.getSongCountFlow(it) }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+        .stateIn(viewModelScope, WhileUiSubscribed, 0)
 
     /** Chip de origen de la pestaña Todas: alterna su presencia en el set (unión). */
     fun toggleSourceFilter(filter: SongSourceFilter) {
@@ -198,29 +216,11 @@ class LibraryViewModel @Inject constructor(
     // siguen distinguiendo offline vs streaming.
     val hasLocalSongs: StateFlow<Boolean> = repository.hasLocalSongsFlow()
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+        .stateIn(viewModelScope, WhileUiSubscribed, false)
 
     val hasCloudSongs: StateFlow<Boolean> = repository.hasCloudSongsFlow()
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
-
-    init {
-        // Saneo: si una familia desaparece (p. ej. logout de la nube o quitar la carpeta
-        // local) con su chip seleccionado, el filtro quedaría ACTIVO pero INVISIBLE —
-        // una lista filtrada sin forma de quitar el filtro. Se limpia solo.
-        viewModelScope.launch {
-            combine(hasLocalSongs, hasCloudSongs) { local, cloud -> local to cloud }
-                .collect { (local, cloud) ->
-                    _uiState.update { state ->
-                        val sanitized = state.searchFilter.sourceFilters.filterTo(mutableSetOf()) { f ->
-                            if (f == SongSourceFilter.LOCAL) local else cloud
-                        }
-                        if (sanitized == state.searchFilter.sourceFilters) state
-                        else state.copy(searchFilter = state.searchFilter.copy(sourceFilters = sanitized))
-                    }
-                }
-        }
-    }
+        .stateIn(viewModelScope, WhileUiSubscribed, false)
 
     // --- Secciones de la pantalla de inicio ---
     // Reactivas al historial (v22): cada escucha contada actualiza estas listas sin recargar
@@ -250,7 +250,7 @@ class LibraryViewModel @Inject constructor(
             }
         }
         .flowOn(Dispatchers.IO)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+        .stateIn(viewModelScope, WhileUiSubscribed, emptyList())
 
     /**
      * Carátulas del collage de los contextos de GÉNERO de "Seguir escuchando", por nombre en
@@ -268,18 +268,26 @@ class LibraryViewModel @Inject constructor(
             if (names.isEmpty()) flowOf(emptyMap()) else browseRepository.getGenreArts(names)
         }
         .flowOn(Dispatchers.IO)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+        .stateIn(viewModelScope, WhileUiSubscribed, emptyMap())
 
     /** Antepone un contexto al historial de "Seguir escuchando" (dedup + tope). */
     fun recordContext(ctx: PlaybackContext) = musicPreferences.recordContext(ctx)
 
+    /**
+     * Ver [settlingFlow] y [sampledDuringSync]: gobierna el muestreo de las consultas del inicio
+     * mientras el sync reescribe la tabla `songs`.
+     */
+    private val libraryIsSettling: Flow<Boolean> = syncManager.settlingFlow()
+
     val homeMostPlayed: StateFlow<List<Song>> = repository.getMostPlayed(HOME_SECTION_LIMIT)
+        .sampledDuringSync(libraryIsSettling)
         .flowOn(Dispatchers.IO)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+        .stateIn(viewModelScope, WhileUiSubscribed, emptyList())
 
     val homeRecentlyAdded: StateFlow<List<Song>> = repository.getRecentlyAdded(HOME_SECTION_LIMIT)
+        .sampledDuringSync(libraryIsSettling)
         .flowOn(Dispatchers.IO)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+        .stateIn(viewModelScope, WhileUiSubscribed, emptyList())
 
     // Datos del saludo del inicio: escuchas de la última semana + tamaño de biblioteca (respaldo
     // cuando la semana está vacía). La ventana se fija al construir el ViewModel (se refresca al
@@ -288,8 +296,9 @@ class LibraryViewModel @Inject constructor(
         repository.getPlayedSinceCount(System.currentTimeMillis() - WEEK_MILLIS),
         repository.getLibrarySize()
     ) { week, size -> HomeStats(week, size) }
+        .sampledDuringSync(libraryIsSettling)
         .flowOn(Dispatchers.IO)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HomeStats(0, 0))
+        .stateIn(viewModelScope, WhileUiSubscribed, HomeStats(0, 0))
 
     // Sección generada "Porque escuchaste a X": el catálogo del artista más escuchado. Reactiva
     // en dos niveles — cambia de artista cuando el historial lo hace, y refleja altas/bajas de
@@ -306,14 +315,16 @@ class LibraryViewModel @Inject constructor(
                     ?.let { HomeArtistPick(artist, it) }
             }
         }
+        .sampledDuringSync(libraryIsSettling)
         .flowOn(Dispatchers.IO)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+        .stateIn(viewModelScope, WhileUiSubscribed, null)
 
     // "Vuelve a escucharlas": escuchadas alguna vez pero no en las últimas ~2 semanas.
     val homeRediscover: StateFlow<List<Song>> =
         repository.getRediscover(System.currentTimeMillis() - REDISCOVER_MILLIS, HOME_SECTION_LIMIT)
+            .sampledDuringSync(libraryIsSettling)
             .flowOn(Dispatchers.IO)
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+            .stateIn(viewModelScope, WhileUiSubscribed, emptyList())
 
     // Top de géneros para los chips de acciones rápidas del inicio (≥ GENRE_MIN_COUNT canciones,
     // máx. GENRE_CHIP_LIMIT). Reactivo: aparecen solos a medida que el backfill puebla la columna.
@@ -330,19 +341,15 @@ class LibraryViewModel @Inject constructor(
     // distinctUntilChanged no filtraba NADA (misma fila en pantalla, emisión nueva).
     val homeTopGenres: StateFlow<List<String>> =
         combine(
-            repository.getTopGenres(GENRE_MIN_COUNT, GENRE_CHIP_LIMIT),
-            syncManager.state
-        ) { genres, sync ->
-            // `Preparing` cuenta como asentándose: la metadata ligera escribe géneros canción a
-            // canción, que es exactamente lo que hace saltar de línea a la fila de chips.
-            val settling = sync is SyncStatus.Scanning || sync is SyncStatus.Downloading ||
-                sync is SyncStatus.Preparing
+            repository.getTopGenres(GENRE_MIN_COUNT, GENRE_CHIP_LIMIT).sampledDuringSync(libraryIsSettling),
+            libraryIsSettling
+        ) { genres, settling ->
             if (settling) null else genres.map { it.name }
         }
             .filterNotNull()
             .distinctUntilChanged()
             .flowOn(Dispatchers.IO)
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+            .stateIn(viewModelScope, WhileUiSubscribed, emptyList())
 
     /**
      * Canciones de un género (para el chip: se reproducen en aleatorio). Respeta el ajuste
@@ -353,6 +360,22 @@ class LibraryViewModel @Inject constructor(
         repository.getSongsByGenre(genre, musicPreferences.loadGenrePartialMatch())
 
     init {
+        // Saneo: si una familia desaparece (p. ej. logout de la nube o quitar la carpeta
+        // local) con su chip seleccionado, el filtro quedaría ACTIVO pero INVISIBLE —
+        // una lista filtrada sin forma de quitar el filtro. Se limpia solo.
+        viewModelScope.launch {
+            combine(hasLocalSongs, hasCloudSongs) { local, cloud -> local to cloud }
+                .collect { (local, cloud) ->
+                    _uiState.update { state ->
+                        val sanitized = state.searchFilter.sourceFilters.filterTo(mutableSetOf()) { f ->
+                            if (f == SongSourceFilter.LOCAL) local else cloud
+                        }
+                        if (sanitized == state.searchFilter.sourceFilters) state
+                        else state.copy(searchFilter = state.searchFilter.copy(sourceFilters = sanitized))
+                    }
+                }
+        }
+
         // Initial Prefs Load
         _uiState.update {
             it.copy(
@@ -365,6 +388,7 @@ class LibraryViewModel @Inject constructor(
                     replayGainPreamp = musicPreferences.loadReplayGainPreamp(),
                     nowPlayingSolidBackground = musicPreferences.loadNowPlayingSolidBackground(),
                     nowPlayingWavyProgress = musicPreferences.loadNowPlayingWavyProgress(),
+                    nowPlayingProgressThickness = musicPreferences.loadNowPlayingProgressThickness(),
                     miniPlayerRoundedRect = musicPreferences.loadMiniPlayerRoundedRect(),
                     playerGestures = musicPreferences.loadPlayerGestures(),
                     themePaletteStyle = musicPreferences.loadThemePaletteStyle(),
@@ -401,26 +425,35 @@ class LibraryViewModel @Inject constructor(
             }
         }
 
-        // Collect Repository Flows (Combined) — flowOn IO to avoid main thread work
+        // Collect Repository Flows (Combined) — flowOn IO to avoid main thread work.
+        // `sampledDuringSync`: `getFavoritesIds` lee canciones favoritas, así que Room la re-ejecuta
+        // en cada escritura de `songs` (invalidación por TABLA). Sin el muestreo, un sync masivo la
+        // dispara decenas de veces por segundo aunque el resultado no cambie. Igual que las consultas
+        // del inicio; ver [sampledDuringSync].
         viewModelScope.launch {
             combine(
                 repository.getUserPlaylists(),
                 repository.getFavoritesIds()
             ) { playlists, favorites ->
                 playlists to favorites
-            }.flowOn(Dispatchers.IO).collect { (playlists, favorites) ->
-                _uiState.update {
-                    it.copy(data = it.data.copy(
-                        playlists = playlists,
-                        favorites = favorites
-                    ))
-                }
             }
+                .sampledDuringSync(libraryIsSettling)
+                .flowOn(Dispatchers.IO)
+                .collect { (playlists, favorites) ->
+                    _uiState.update {
+                        it.copy(data = it.data.copy(
+                            playlists = playlists,
+                            favorites = favorites
+                        ))
+                    }
+                }
         }
 
-        // Collect Favorite Songs separately (heavy list, ensure IO thread)
+        // Collect Favorite Songs separately (heavy list, ensure IO thread). Es el `SELECT s.* … JOIN`
+        // sobre `songs` del hallazgo: el más caro de re-ejecutar y el que más se beneficia del muestreo.
         viewModelScope.launch {
             repository.getFavoritesSongs()
+                .sampledDuringSync(libraryIsSettling)
                 .flowOn(Dispatchers.IO)
                 .collect { list ->
                     _uiState.update { it.copy(data = it.data.copy(favoriteSongs = list)) }
@@ -504,10 +537,55 @@ class LibraryViewModel @Inject constructor(
             }
         }
 
+        // Escaneo que se dio por perdido en segundo plano. Va en un colector APARTE del anterior
+        // —que es el dueño del banner mientras el sync habla— porque estas dos cosas nunca compiten:
+        // esta señal solo existe cuando NO hay sync corriendo, y cualquier corrida posterior que
+        // termine bien la borra. El de arriba manda en cuanto vuelve a haber actividad.
+        //
+        // Se lee de disco y no de `SyncManager` a propósito: quien se rindió fue un worker, minutos
+        // antes y con la app probablemente cerrada, así que el estado en memoria ya no existe. Es lo
+        // que evita que la biblioteca aparezca desactualizada sin decir por qué (ver
+        // `ScanWorker.recordingFailure`).
+        viewModelScope.launch {
+            combine(
+                musicPreferences.lastSyncFailureFlow,
+                syncManager.state
+            ) { failure, status -> failure.takeIf { !status.isRunning } }
+                .distinctUntilChanged()
+                .collect { failure ->
+                    if (failure == null) return@collect
+                    // Solo si no hay nada más que contar: un banner en curso o un resumen recién
+                    // publicado son más actuales que un fallo anterior.
+                    val current = _uiState.value.data.bannerState
+                    if (current != LibraryBannerState.Hidden) return@collect
+                    _uiState.update {
+                        it.copy(
+                            data = it.data.copy(
+                                bannerState = LibraryBannerState.Error(syncFailureMessage(failure))
+                            )
+                        )
+                    }
+                }
+        }
+
         // La restauración de sesión vive en MusicController.syncCurrentState (al conectar el
         // MediaController, resolviendo SOLO los IDs de la cola contra la BD). El viejo restore
         // desde aquí cargaba la biblioteca ENTERA en memoria para lo mismo.
     }
+
+    /**
+     * Traduce el motivo persistido de un escaneo perdido al texto que ve el usuario. Las categorías
+     * las fija `ScanWorker`; lo desconocido cae al mensaje genérico, que es preferible a enseñar un
+     * código interno.
+     */
+    private fun syncFailureMessage(reason: String): String = context.getString(
+        when (reason) {
+            ScanWorker.FAILURE_AUTH -> R.string.sync_failed_auth
+            ScanWorker.FAILURE_NETWORK, IncompleteReason.NETWORK_LOST.name -> R.string.sync_failed_network
+            ScanWorker.FAILURE_SERVER -> R.string.sync_failed_server
+            else -> R.string.sync_failed_generic
+        }
+    )
 
     /**
      * Cuánto permanece el resumen del sync, con el MISMO criterio que un snackbar de Material 3:
@@ -558,10 +636,16 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
-    /** Espejo de la constraint BATTERY_NOT_LOW del ScanWorker (~15% sin cargar). */
+    /**
+     * Espejo de la constraint `BATTERY_NOT_LOW` del ScanWorker (ver [BATTERY_LOW_PERCENT]).
+     *
+     * Existe porque la UI necesita ANTICIPAR lo que WorkManager va a decidir —explicar por qué el
+     * escaneo no arranca en vez de dejar un botón que no hace nada—, y no hay API que lo pregunte.
+     */
     private fun isBatteryLow(): Boolean = try {
         val bm = context.getSystemService(Context.BATTERY_SERVICE) as android.os.BatteryManager
-        bm.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY) <= 15 && !bm.isCharging
+        bm.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY) <= BATTERY_LOW_PERCENT &&
+            !bm.isCharging
     } catch (_: Exception) {
         false
     }
@@ -589,14 +673,24 @@ class LibraryViewModel @Inject constructor(
         downloadScheduler.scheduleDownload(songId = song.id, forceRedownload = true, isUserInitiated = true)
         viewModelScope.launch {
             try {
-                // Espera al estado terminal con timeout: si el WorkInfo desaparece (pruned o
-                // similar) o el flow nunca emite finished, el timeout nos libera y el finally
-                // limpia el id de _redownloadingIds (no se queda pegado el botón).
-                val finalInfo = kotlinx.coroutines.withTimeoutOrNull(5 * 60_000L) {
+                // Espera a que el trabajo TERMINE o DESAPAREZCA, y suelta el indicador en cuanto
+                // ocurra lo primero de las dos.
+                //
+                // Que la desaparición cuente como final es el punto: WorkManager poda los WorkInfo
+                // terminados, y con `mapNotNull` esa lista vacía se filtraba, así que el flow no
+                // volvía a emitir jamás y solo el timeout rescataba el caso — cinco minutos de
+                // spinner para acabar diciendo "estado desconocido".
+                //
+                // `dropWhile` cubre el otro lado: `enqueueUniqueWork` registra de forma asíncrona,
+                // así que las primeras emisiones pueden llegar vacías ANTES de que el trabajo
+                // exista. Sin descartarlas, ese hueco inicial se leería como "ya desapareció" y el
+                // mensaje saldría al instante en el caso normal.
+                val finalInfo = kotlinx.coroutines.withTimeoutOrNull(REDOWNLOAD_WAIT_TIMEOUT_MS) {
                     workManager
                         .getWorkInfosForUniqueWorkFlow(WorkerTags.repairTag(song.id))
-                        .mapNotNull { it.firstOrNull() }
-                        .first { it.state.isFinished }
+                        .map { it.firstOrNull() }
+                        .dropWhile { it == null }
+                        .first { it == null || it.state.isFinished }
                 }
                 val message = when (finalInfo?.state) {
                     WorkInfo.State.SUCCEEDED -> context.getString(R.string.download_msg_complete, song.title)
@@ -666,59 +760,19 @@ class LibraryViewModel @Inject constructor(
         if (enabled) musicPreferences.saveEqEnabled(false)
     }
 
-    // --- Ecualizador: perfiles por ruta y presets ocultos ---
+    // --- Ecualizador: perfiles, presets ocultos y perfiles por ruta ---
     //
-    // Estos accesos existen TAMBIÉN en PlaybackViewModel, y no son dos verdades: los dos son
-    // fachadas de lectura/escritura sobre MusicPreferences, que sigue siendo el único dueño del
-    // estado (mismo patrón que `useSystemEq`). La hoja del EQ vive en el reproductor y la pantalla
-    // de gestión en Ajustes, y cada una llega con el ViewModel de su lado.
-
-    /** Ver [com.qhana.siku.player.audio.EqProfileManager]. */
-    val eqRouteProfilesEnabled: StateFlow<Boolean> = musicPreferences.eqRouteProfilesEnabledFlow
-        .stateIn(
-            viewModelScope,
-            SharingStarted.WhileSubscribed(5_000),
-            musicPreferences.loadEqRouteProfilesEnabled()
-        )
-
-    fun setEqRouteProfilesEnabled(enabled: Boolean) =
-        musicPreferences.saveEqRouteProfilesEnabled(enabled)
-
-    val hiddenEqPresets: StateFlow<Set<String>> = musicPreferences.hiddenEqPresetsFlow
-        .stateIn(
-            viewModelScope,
-            SharingStarted.WhileSubscribed(5_000),
-            musicPreferences.loadHiddenEqPresets()
-        )
-
-    val customEqPresets: StateFlow<List<com.qhana.siku.data.model.EqCustomPreset>> =
-        musicPreferences.customEqPresetsFlow
-            .stateIn(
-                viewModelScope,
-                SharingStarted.WhileSubscribed(5_000),
-                musicPreferences.loadCustomEqPresets()
-            )
-
-    fun setEqPresetHidden(id: String, hidden: Boolean) {
-        val current = musicPreferences.loadHiddenEqPresets()
-        musicPreferences.saveHiddenEqPresets(if (hidden) current + id else current - id)
-    }
-
-    fun restoreAllEqPresets() = musicPreferences.saveHiddenEqPresets(emptySet())
-
-    /** Borrar SÍ es definitivo (a diferencia de ocultar): solo para presets propios. */
-    fun deleteEqPreset(id: String) {
-        musicPreferences.saveCustomEqPresets(
-            musicPreferences.loadCustomEqPresets().filterNot { it.id == id }
-        )
-        val hidden = musicPreferences.loadHiddenEqPresets()
-        if (id in hidden) musicPreferences.saveHiddenEqPresets(hidden - id)
-    }
+    // Misma fachada compartida que en PlaybackViewModel (la hoja del EQ vive en el reproductor y la
+    // pantalla de gestión en Ajustes). La lógica está una sola vez en [EqPresetLibrary]; aquí solo
+    // cambia la política de sharing (`WhileSubscribed`: Ajustes puede soltar el colector).
+    val eqPresets = EqPresetLibrary(
+        musicPreferences, viewModelScope, WhileUiSubscribed
+    )
 
     // --- Pestañas de la biblioteca (orden + visibilidad) ---
     val libraryTabs: StateFlow<List<com.qhana.siku.data.model.LibraryTabState>> =
         musicPreferences.libraryTabsConfigFlow
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), musicPreferences.loadLibraryTabsConfig())
+            .stateIn(viewModelScope, WhileUiSubscribed, musicPreferences.loadLibraryTabsConfig())
 
     fun setLibraryTabs(list: List<com.qhana.siku.data.model.LibraryTabState>) =
         musicPreferences.saveLibraryTabsConfig(list)
@@ -726,7 +780,7 @@ class LibraryViewModel @Inject constructor(
     // --- Toolbar del NowPlaying ---
     val toolbarConfig: StateFlow<List<com.qhana.siku.data.model.ToolbarActionState>> =
         musicPreferences.toolbarConfigFlow
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), musicPreferences.loadToolbarConfig())
+            .stateIn(viewModelScope, WhileUiSubscribed, musicPreferences.loadToolbarConfig())
 
     fun setToolbarConfig(list: List<com.qhana.siku.data.model.ToolbarActionState>) =
         musicPreferences.saveToolbarConfig(list)
@@ -772,6 +826,24 @@ class LibraryViewModel @Inject constructor(
     fun setNowPlayingWavyProgress(enabled: Boolean) {
         _uiState.update { it.copy(playbackSettings = it.playbackSettings.copy(nowPlayingWavyProgress = enabled)) }
         musicPreferences.saveNowPlayingWavyProgress(enabled)
+    }
+
+    /**
+     * Grosor de la barra de progreso del NowPlaying, en dp. Se escribe en cada frame del arrastre
+     * del slider, y por eso el estado se actualiza aquí en memoria: `MusicPreferences.update`
+     * refresca su caché de forma síncrona y encola el volcado, así que la barra sigue al dedo sin
+     * esperar al disco.
+     */
+    fun setNowPlayingProgressThickness(dp: Int) {
+        // El slider avisa en CADA frame del arrastre, y con paradas discretas casi todos esos avisos
+        // traen el valor que ya está puesto: sin esta guarda, un arrastre encola decenas de volcados
+        // idénticos a disco (la cola FIFO de MusicPreferences vuelca el snapshot ENTERO por
+        // escritura).
+        if (dp == _uiState.value.nowPlayingProgressThickness) return
+        _uiState.update {
+            it.copy(playbackSettings = it.playbackSettings.copy(nowPlayingProgressThickness = dp))
+        }
+        musicPreferences.saveNowPlayingProgressThickness(dp)
     }
 
     /** Forma del MiniPlayer: rectángulo redondeado (true) o píldora (false, el diseño actual). */
@@ -863,7 +935,7 @@ class LibraryViewModel @Inject constructor(
 
     /** Conteo + carátulas por playlist para los thumbnails de la pestaña Listas. */
     val playlistsCoverMeta = repository.getPlaylistsCoverMeta()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+        .stateIn(viewModelScope, WhileUiSubscribed, emptyMap())
 
     // --- Selector "añadir canciones a la lista" ---
     // Búsqueda propia, independiente de la de la biblioteca: la hoja se abre desde el detalle
@@ -873,14 +945,14 @@ class LibraryViewModel @Inject constructor(
     val songPickerQuery: StateFlow<String> = _songPickerQuery.asStateFlow()
 
     val songPickerResults: StateFlow<List<Song>> = _songPickerQuery
-        .debounce(200)
+        .debounce(SONG_PICKER_DEBOUNCE_MS)
         .flatMapLatest { query ->
             flow { emit(repository.getSongsSnapshot(query, SortOrder.TITLE_ASC)) }
                 // El catch va DENTRO del flatMapLatest: fuera mataría el flow para siempre
                 // tras el primer error y la búsqueda dejaría de responder.
                 .catch { emit(emptyList()) }
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+        .stateIn(viewModelScope, WhileUiSubscribed, emptyList())
 
     fun setSongPickerQuery(query: String) {
         _songPickerQuery.value = query
@@ -919,5 +991,38 @@ class LibraryViewModel @Inject constructor(
         // en ~2 semanas" para la sección de redescubrimiento.
         private const val WEEK_MILLIS = 7L * 24 * 60 * 60 * 1000
         private const val REDISCOVER_MILLIS = 14L * 24 * 60 * 60 * 1000
+
+        /**
+         * Umbral con el que se considera "batería baja". NO es una elección de esta pantalla: es el
+         * valor con el que Android evalúa la constraint `BATTERY_NOT_LOW` que el `ScanWorker` ya
+         * declara, y que el framework no expone por ninguna API pública. Se replica aquí porque la
+         * UI tiene que explicar por adelantado una decisión que toma WorkManager; si alguna vez
+         * discrepan, la que manda es la constraint y esto solo mentiría al usuario.
+         */
+        private const val BATTERY_LOW_PERCENT = 15
+
+        /**
+         * Cuánto se mantiene girando el indicador de una re-descarga manual sin noticias del trabajo.
+         *
+         * **Ya no cubre la desaparición del `WorkInfo`**: eso se detecta en el propio flow y suelta
+         * el indicador en el acto. Lo único que queda debajo de este techo es que el trabajo NO
+         * LLEGUE A REGISTRARSE nunca, que desde fuera es indistinguible de "todavía no se registró"
+         * — y por eso hace falta un plazo y no una condición.
+         *
+         * O sea que es una decisión de INTERFAZ y no una estimación de descarga: un trabajo esperando
+         * su constraint de red puede tardar horas legítimamente, y pasado cierto punto un spinner
+         * deja de informar y empieza a parecer que la app se colgó. Cinco minutos es holgado frente a
+         * una descarga normal —así casi nunca corta una que iba bien— y corto frente a "esto se quedó
+         * ahí". Soltarlo NO cancela nada: el trabajo sigue su curso y la canción aparecerá descargada
+         * cuando termine.
+         */
+        const val REDOWNLOAD_WAIT_TIMEOUT_MS = 5 * 60_000L
+
+        /**
+         * Espera antes de consultar el buscador del selector de canciones. Absorbe la ráfaga de
+         * teclas de quien escribe seguido: cada emisión es una consulta a Room sobre la biblioteca
+         * entera, y sin esto se lanzaba una por letra para tirar todas menos la última.
+         */
+        const val SONG_PICKER_DEBOUNCE_MS = 200L
     }
 }

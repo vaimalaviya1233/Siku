@@ -14,7 +14,8 @@ sealed class Screen(val route: String) {
      */
     data object Onboarding : Screen("onboarding")
     data object Library : Screen("library")
-    data object NowPlaying : Screen("now_playing")
+    // El reproductor a pantalla completa NO es una ruta: es una capa que hace container transform con
+    // la píldora (ver [com.qhana.siku.ui.PlayerOverlay]), gobernada por `MusicAppState.playerExpanded`.
     data object Favorites : Screen("favorites")
     data object Settings : Screen("settings")
 
@@ -34,6 +35,7 @@ sealed class Screen(val route: String) {
     // se convierta en un muro de opciones (dos listas drag & drop la ocupaban entera).
     data object SettingsTabs : Screen("settings/tabs")
     data object SettingsPlayerBar : Screen("settings/player_bar")
+    data object SettingsProgressBar : Screen("settings/progress_bar")
 
     // Gestión de presets del EQ (ocultar/restaurar/borrar). Cuelga de Reproducción y no del hub:
     // es mantenimiento del ecualizador, no una categoría de ajustes por sí misma. Fuera de la hoja

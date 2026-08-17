@@ -22,7 +22,6 @@ import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -107,9 +106,9 @@ fun OneDriveFolderPickerSheet(
     viewModel: OneDriveFolderPickerViewModel = hiltViewModel()
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    AppModalSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+    // `skipPartiallyExpanded = true` ya es el default de AppModalSheet (evita el doble-back).
+    AppModalSheet(onDismissRequest = onDismiss) {
         // Confirmar la carpeta cierra la hoja desde dentro. Ver [LocalSheetCloser].
         val close = LocalSheetCloser.current
         Column(modifier = Modifier.padding(horizontal = 24.dp).padding(bottom = 24.dp)) {

@@ -45,15 +45,19 @@ import com.qhana.siku.R
 import com.qhana.siku.data.local.ArtistSummary
 import com.qhana.siku.data.model.ArtistSortOrder
 import com.qhana.siku.data.model.SongSourceFilter
+import com.qhana.siku.ui.components.ACCENT_SECONDARY_ALPHA
 import com.qhana.siku.ui.components.ComponentConfig
 import com.qhana.siku.ui.components.FilteredEmptyHint
+import com.qhana.siku.ui.components.GroupedListRow
 import com.qhana.siku.ui.components.SortChip
 import com.qhana.siku.ui.components.SourceFilterChips
 import com.qhana.siku.ui.components.MaterialSymbol
+import com.qhana.siku.ui.components.QueueOverflowButton
 import com.qhana.siku.ui.components.RoundedPolygonMaskTransformation
 import com.qhana.siku.ui.components.TonalChip
 import com.qhana.siku.ui.components.onContainerColor
 import com.qhana.siku.ui.components.rememberListItemShape
+import com.qhana.siku.ui.components.rememberRowActionColors
 import com.qhana.siku.ui.theme.AppBoundsTransform
 
 /**
@@ -76,6 +80,8 @@ fun ArtistsScreen(
     artists: List<ArtistSummary>,
     onArtistClick: (String) -> Unit,
     onPlayArtist: (String) -> Unit,
+    /** Encola TODAS las canciones del artista al final de la cola, desde el overflow de la fila. */
+    onAddArtistToQueue: (String) -> Unit,
     contentPadding: PaddingValues,
     sortOrder: ArtistSortOrder,
     onSortOrderChange: (ArtistSortOrder) -> Unit,
@@ -99,7 +105,7 @@ fun ArtistsScreen(
                 MaterialSymbol(
                     "artist",
                     size = 64.sp,
-                    color = colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                    color = colorScheme.outline
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
@@ -175,12 +181,23 @@ fun ArtistsScreen(
                 shape = rememberListItemShape(index = index, count = artists.size),
                 onClick = { onArtistClick(artist.name) },
                 onPlayClick = { onPlayArtist(artist.name) },
+                onAddToQueue = { onAddArtistToQueue(artist.name) },
                 sharedTransitionScope = sharedTransitionScope,
                 animatedVisibilityScope = animatedVisibilityScope
             )
         }
     }
 }
+
+/**
+ * Key de caché en memoria de la foto de un artista, ESTABLE por nombre. La comparten la fila de la
+ * pestaña Artistas (que la escribe con [ImageRequest.Builder.memoryCacheKey]) y el header del
+ * detalle (que la lee como `placeholderMemoryCacheKey`), para que pasar de la lista al detalle no
+ * dispare una nueva descarga de la foto. Por NOMBRE y no por URL porque las dos superficies usan
+ * resoluciones distintas de Deezer (thumb `pictureMedium` vs `pictureXl`); al refrescar la foto la
+ * fila reescribe el bitmap bajo la misma key, así que el placeholder nunca se queda viejo.
+ */
+internal fun artistPhotoCacheKey(name: String): String = "artist_photo_$name"
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class, ExperimentalSharedTransitionApi::class)
 @Composable
@@ -189,6 +206,7 @@ private fun ArtistRow(
     shape: androidx.compose.ui.graphics.Shape,
     onClick: () -> Unit,
     onPlayClick: () -> Unit,
+    onAddToQueue: () -> Unit,
     modifier: Modifier = Modifier,
     sharedTransitionScope: SharedTransitionScope? = null,
     animatedVisibilityScope: AnimatedVisibilityScope? = null
@@ -206,106 +224,122 @@ private fun ArtistRow(
             )
         }
     } else Modifier
-    // Mismo lenguaje visual que la lista de "Todas" (contenedor surfaceContainerHigh con
-    // esquinas agrupadas, espaciado, tipografía y colores del SongItem), con la foto en
-    // forma M3 Expressive en vez de círculo.
-    val isDarkTheme = isSystemInDarkTheme()
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            // Envoltorio idéntico al de SongItemOptimized: margen lateral + 2dp de gap entre
-            // filas, recorte agrupado y fondo de tarjeta.
-            .padding(horizontal = 16.dp, vertical = 1.dp)
-            .clip(shape)
-            .background(colorScheme.surfaceContainerHigh)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        // Sin clip en la fila: la forma cookie va HORNEADA en el bitmap (transformación de
-        // Coil, cacheada) — el clip de un Path arbitrario por fila se pagaba en cada frame
-        // del scroll y era el jank de esta pestaña. El placeholder (pocas filas) dibuja la
-        // forma como background fill, que es más barato que clipear una capa.
-        Box(
-            modifier = Modifier
-                .size(ComponentConfig.SongItemIconSize)
-                .then(sharedModifier),
-            contentAlignment = Alignment.Center
-        ) {
-            // Misma cascada que el detalle: foto del artista → carátula de alguno de sus álbumes
-            // → placeholder. Sin el paso intermedio, decir "ninguno de estos" en el picker dejaba
-            // la fila con el icono genérico, que se lee como un fallo de carga y no como la
-            // decisión que fue.
-            val artistArt = artist.thumbUrl ?: artist.fallbackArtUri
-            if (artistArt != null) {
-                val context = LocalContext.current
-                val request = remember(artistArt) {
-                    ImageRequest.Builder(context)
-                        .data(artistArt)
-                        // Thumbnail fijo (patrón de AlbumArt): decode chico y hit de caché
-                        // determinista, en vez de decodificar los 250px de Deezer.
-                        .size(ComponentConfig.ThumbnailSize)
-                        .transformations(CookieMask)
-                        .crossfade(200)
-                        .build()
-                }
-                AsyncImage(
-                    model = request,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(colorScheme.surfaceContainerHighest, MaterialShapes.Cookie6Sided.toShape()),
-                    contentAlignment = Alignment.Center
-                ) {
-                    MaterialSymbol("artist", color = colorScheme.onSurfaceVariant)
+    // Fila agrupada COMPARTIDA (GroupedListRow envuelve el ListItem real de M3): padding, anatomía
+    // y gap salen del spec, los mismos que Todas/Cola/Listas — ya no es un Row copiado a mano. La
+    // foto va en el slot leading con forma M3 Expressive en vez de círculo.
+    GroupedListRow(
+        shape = shape,
+        onClick = onClick,
+        modifier = modifier,
+        leadingContent = {
+            // Sin clip en la fila: la forma cookie va HORNEADA en el bitmap (transformación de
+            // Coil, cacheada) — el clip de un Path arbitrario por fila se pagaba en cada frame
+            // del scroll y era el jank de esta pestaña. El placeholder (pocas filas) dibuja la
+            // forma como background fill, que es más barato que clipear una capa.
+            Box(
+                modifier = Modifier
+                    .size(ComponentConfig.SongItemIconSize)
+                    .then(sharedModifier),
+                contentAlignment = Alignment.Center
+            ) {
+                // Misma cascada que el detalle: foto del artista → carátula de alguno de sus álbumes
+                // → placeholder. Sin el paso intermedio, decir "ninguno de estos" en el picker dejaba
+                // la fila con el icono genérico, que se lee como un fallo de carga y no como la
+                // decisión que fue.
+                val artistArt = artist.thumbUrl ?: artist.fallbackArtUri
+                if (artistArt != null) {
+                    val context = LocalContext.current
+                    val request = remember(artistArt, artist.name) {
+                        ImageRequest.Builder(context)
+                            .data(artistArt)
+                            // Thumbnail fijo (patrón de AlbumArt): decode chico y hit de caché
+                            // determinista, en vez de decodificar los 250px de Deezer.
+                            .size(ComponentConfig.ThumbnailSize)
+                            .transformations(CookieMask)
+                            // Key estable por artista: el header del detalle la reusa como
+                            // placeholder, así al abrir muestra al instante ESTE thumb ya decodificado
+                            // en vez de parpadear bajando la foto grande. Ver [artistPhotoCacheKey].
+                            .memoryCacheKey(artistPhotoCacheKey(artist.name))
+                            .crossfade(200)
+                            .build()
+                    }
+                    AsyncImage(
+                        model = request,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(colorScheme.surfaceContainerHighest, MaterialShapes.Cookie6Sided.toShape()),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        MaterialSymbol("artist", color = colorScheme.onSurfaceVariant)
+                    }
                 }
             }
-        }
-
-        Spacer(modifier = Modifier.width(16.dp))
-
-        Column(modifier = Modifier.weight(1f)) {
+        },
+        headlineContent = {
             Text(
                 text = artist.name.ifBlank { stringResource(R.string.common_unknown_artist) },
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium,
-                color = if (isDarkTheme) Color.White else Color(0xFF1A1A1A),
+                // Mismo rol que el headline de `SongItem` en reposo.
+                style = MaterialTheme.typography.bodyLargeEmphasized,
+                // Roles del tema, NO grises fijos: hasta el 10 ago 2026 esto era
+                // `Color.White`/`0xFF1A1A1A` y el subtítulo `0xFFB3B3B3`/`0xFF666666`, o sea la
+                // única lista de la app cuyos labels no se enteraban del color dinámico —
+                // `onSurface`/`onSurfaceVariant` llevan el tinte del seed de la carátula y esos
+                // hexes no, así que la pestaña Artistas se veía gris al lado de Todas y Álbumes.
+                color = colorScheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+        },
+        supportingContent = {
             val albumsText = pluralStringResource(R.plurals.album_count, artist.albumCount, artist.albumCount)
             val songsText = pluralStringResource(R.plurals.song_count, artist.songCount, artist.songCount)
             Text(
                 text = "$albumsText · $songsText",
                 style = MaterialTheme.typography.bodyMedium,
-                color = if (isDarkTheme) Color(0xFFB3B3B3) else Color(0xFF666666),
+                color = colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-        }
+        },
+        trailingContent = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // Quick-play de todo el artista. SIN fondo (IconButton estándar); el glifo
+                // `play_circle` (disco relleno) ya se lee como botón sin recargar la fila con una
+                // píldora. En primary.
+                IconButton(
+                    onClick = onPlayClick,
+                    shapes = IconButtonDefaults.shapes(),
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    MaterialSymbol(
+                        "play_circle",
+                        size = 30.sp,
+                        color = colorScheme.primary,
+                        fill = true
+                    )
+                }
 
-        Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(4.dp))
 
-        // Quick-play de todo el artista. SIN fondo (IconButton estándar); el glifo `play_circle`
-        // (disco relleno) ya se lee como botón sin recargar la fila con una píldora. En primary.
-        IconButton(
-            onClick = onPlayClick,
-            shapes = IconButtonDefaults.shapes(),
-            modifier = Modifier.size(40.dp)
-        ) {
-            MaterialSymbol(
-                "play_circle",
-                size = 30.sp,
-                color = colorScheme.primary,
-                fill = true
-            )
+                // Overflow: encolar el artista entero. Misma píldora vertical que el ⋮ de las filas
+                // de canción y con los colores derivados del fondo REAL de esta fila, para que las
+                // dos listas se lean igual. Va en el menú y no como cuarto control suelto porque
+                // encolar es una acción de segundo orden frente a "reproducir".
+                QueueOverflowButton(
+                    onAddToQueue = onAddToQueue,
+                    colors = rememberRowActionColors(colorScheme.surfaceContainerHigh),
+                    contentDescription = stringResource(R.string.common_artist_options),
+                    menuLabel = stringResource(R.string.detail_add_all_to_queue)
+                )
+            }
         }
-    }
+    )
 }
 
 /**
@@ -353,7 +387,7 @@ private fun ArtistPhotosMeteredBanner(
                 Text(
                     stringResource(R.string.artist_photos_metered_desc),
                     style = MaterialTheme.typography.bodySmall,
-                    color = accent.copy(alpha = 0.8f)
+                    color = accent.copy(alpha = ACCENT_SECONDARY_ALPHA)
                 )
                 Spacer(Modifier.height(8.dp))
                 Row(

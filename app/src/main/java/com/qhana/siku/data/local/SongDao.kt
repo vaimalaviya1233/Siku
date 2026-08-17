@@ -13,17 +13,22 @@ import com.qhana.siku.data.model.SongSourceFilter
 import com.qhana.siku.data.model.SourceType
 import kotlinx.coroutines.flow.Flow
 
-/**
- * DAO para canciones. En v13 los IDs pasaron a `TEXT` (era `INTEGER`): ahora son
- * el `remoteId` de OneDrive directo para canciones cloud, o `"local_<mediaStoreId>"`
- * para las locales.
- *
- * Las queries FTS4 fueron eliminadas — búsqueda ahora es LIKE (más robusto tras
- * migraciones, ver memoria del proyecto).
- */
 /** Par (perdedora → ganadora) de la resolución de duplicados entre fuentes. */
 data class DuplicatePair(val loserId: String, val winnerId: String)
 
+/**
+ * DAO para canciones.
+ *
+ * Los IDs son `TEXT` y **namespaced por fuente** (`SourceType.buildId`): `onedrive:<item.id>` y
+ * `local:<volumen>/<ruta>`. Ojo con las dos confusiones que este KDoc llegó a tener escritas:
+ * el id de una canción de nube NO es el `remoteId` a secas —ese es la columna aparte que se
+ * manda a Graph, sin prefijo— y el id local NO es `local_<mediaStoreId>`, que fue el esquema
+ * anterior a la v23; ahora es relativo al VOLUMEN para que SAF y MediaStore produzcan el mismo id
+ * (ver la sección de fuente local en CLAUDE.md).
+ *
+ * Las queries FTS4 fueron eliminadas — la búsqueda es LIKE (más robusto tras migraciones, ver
+ * memoria del proyecto).
+ */
 @Dao
 interface SongDao {
 
@@ -31,6 +36,16 @@ interface SongDao {
 
     @RawQuery(observedEntities = [SongEntity::class])
     fun getSongsPagingRaw(query: SupportSQLiteQuery): PagingSource<Int, SongEntity>
+
+    /**
+     * Texto buscable de cada canción, sin traerse la fila entera.
+     *
+     * Alimenta la búsqueda por aproximación, que compara en memoria: `SongEntity` arrastra letras,
+     * colores y rutas, así que cargar la biblioteca completa para mirar tres campos multiplicaría
+     * por mucho la memoria del rescate.
+     */
+    @Query("SELECT id, title, artist, album FROM songs")
+    suspend fun getSearchableText(): List<SongSearchText>
 
     /**
      * Versión no paginada del mismo query dinámico (mismo builder [buildPagingQuery]):
@@ -43,6 +58,10 @@ interface SongDao {
     /** Conteo reactivo con query dinámica (chip "N canciones" con filtros de origen). */
     @RawQuery(observedEntities = [SongEntity::class])
     fun getSongCountRawFlow(query: SupportSQLiteQuery): Flow<Int>
+
+    /** Conteo puntual (no reactivo): lo usa la decisión de si hace falta buscar por aproximación. */
+    @RawQuery
+    suspend fun getSongCountRaw(query: SupportSQLiteQuery): Int
 
     // ==================== DUPLICADOS ENTRE FUENTES (v23) ====================
 
@@ -138,12 +157,18 @@ interface SongDao {
          * @param sortColumn "title" o "dateAdded"
          * @param sortAsc true para ASC, false para DESC
          * @param sourceFilters Chips de origen de la pestaña Todas (vacío = sin filtro)
+         * @param approximateIds ids rescatados por la búsqueda tolerante a erratas (ver
+         *   `IMusicRepository.findApproximateSongIds`). Se SUMAN con OR a la coincidencia literal en
+         *   lugar de sustituirla, de modo que sigue siendo una única consulta: el paginado, el orden
+         *   y los filtros de origen no se enteran de por dónde entró cada fila. Casi siempre llega
+         *   vacío, porque solo se calcula cuando el LIKE no encontró nada.
          */
         fun buildPagingQuery(
             searchQuery: String,
             sortColumn: String,
             sortAsc: Boolean,
-            sourceFilters: Set<SongSourceFilter> = emptySet()
+            sourceFilters: Set<SongSourceFilter> = emptySet(),
+            approximateIds: List<String> = emptyList()
         ): SimpleSQLiteQuery {
             val sb = StringBuilder()
             val args = mutableListOf<Any>()
@@ -155,13 +180,20 @@ interface SongDao {
                 // por "100" y un "_" casaba con cualquier carácter. No es inyección (el texto va
                 // como bind), son resultados incorrectos.
                 sb.append(
-                    " AND (title LIKE ? ESCAPE '\\' OR artist LIKE ? ESCAPE '\\'" +
+                    " AND ((title LIKE ? ESCAPE '\\' OR artist LIKE ? ESCAPE '\\'" +
                         " OR album LIKE ? ESCAPE '\\')"
                 )
                 val likeQuery = "%${escapeLike(searchQuery)}%"
                 args.add(likeQuery)
                 args.add(likeQuery)
                 args.add(likeQuery)
+                if (approximateIds.isNotEmpty()) {
+                    sb.append(" OR id IN (")
+                    sb.append(approximateIds.joinToString(",") { "?" })
+                    sb.append(")")
+                    args.addAll(approximateIds)
+                }
+                sb.append(")")
             }
 
             appendSourceFilters(sb, args, sourceFilters)
@@ -184,6 +216,31 @@ interface SongDao {
         fun buildCountQuery(sourceFilters: Set<SongSourceFilter>): SimpleSQLiteQuery {
             val sb = StringBuilder("SELECT COUNT(*) FROM songs WHERE 1=1")
             val args = mutableListOf<Any>()
+            appendSourceFilters(sb, args, sourceFilters)
+            return SimpleSQLiteQuery(sb.toString(), args.toTypedArray())
+        }
+
+        /**
+         * Cuántas canciones casan LITERALMENTE con la búsqueda. Solo sirve para una pregunta:
+         * ¿hace falta el rescate por aproximación? Un `COUNT` con el mismo `WHERE` que
+         * [buildPagingQuery] responde sin traer filas ni tocar el paginado.
+         */
+        fun buildSearchCountQuery(
+            searchQuery: String,
+            sourceFilters: Set<SongSourceFilter>
+        ): SimpleSQLiteQuery {
+            val sb = StringBuilder("SELECT COUNT(*) FROM songs WHERE 1=1")
+            val args = mutableListOf<Any>()
+            if (searchQuery.isNotBlank()) {
+                sb.append(
+                    " AND (title LIKE ? ESCAPE '\\' OR artist LIKE ? ESCAPE '\\'" +
+                        " OR album LIKE ? ESCAPE '\\')"
+                )
+                val likeQuery = "%${escapeLike(searchQuery)}%"
+                args.add(likeQuery)
+                args.add(likeQuery)
+                args.add(likeQuery)
+            }
             appendSourceFilters(sb, args, sourceFilters)
             return SimpleSQLiteQuery(sb.toString(), args.toTypedArray())
         }
@@ -514,32 +571,43 @@ interface SongDao {
      * un álbum que de verdad no trae imagen se sella al leerlo y sale de la lista (mismo
      * criterio que en [getSongsWithPendingArtwork] — solo sella una lectura CONCLUYENTE).
      *
-     * El `needsMetadata = 1` de la primera condición es el sello equivalente para los TAGS, y lo
-     * aporta una columna que ya existía en vez de una nueva. Esa bandera la apaga
-     * [updateSongMetadata], o sea el análisis del archivo COMPLETO tras descargarlo
-     * (`MediaMetadataRetriever`, no los lectores parciales). Ese camino es estrictamente más
-     * capaz que esta fase —lee el archivo entero y no los primeros 256 KB—, así que si él no
-     * encontró artista, leer la cabecera no va a encontrarlo nunca: la fila se queda con el
-     * centinela para siempre y sin este filtro volvía a la lista en CADA sync.
+     * Los TAGS llevan DOS sellos, y hacen falta los dos porque llegan en momentos distintos:
      *
-     * Medido en la biblioteca del autor: 4 archivos sin ningún tag de artista (tres MP3 con un
-     * ID3v1 vacío y un WAV sin chunk de tags) hacían aparecer "leyendo datos de canciones" en
-     * cada arranque, sin nada que leer.
+     * - `needsMetadata = 0` lo pone [updateSongMetadata], o sea el análisis del archivo COMPLETO
+     *   tras descargarlo (`MediaMetadataRetriever`, no los lectores parciales). Ese camino es
+     *   estrictamente más capaz que esta fase —lee el archivo entero y no los primeros 256 KB—, así
+     *   que si él no encontró artista, leer la cabecera no va a encontrarlo nunca.
+     * - `lightTagsAttemptedAt` lo pone ESTA fase cuando la cabecera se leyó entera y no traía texto.
+     *   Cubre el hueco del anterior: mientras la canción siga SIN DESCARGAR, `needsMetadata` sigue
+     *   en 1 y la fila volvía a la lista en cada sync. Medido en la biblioteca del autor: 4 archivos
+     *   sin ningún tag (tres MP3 con un ID3v1 vacío y un WAV sin chunk) sacaban el banner "Leyendo
+     *   datos 1 de 4" y gastaban 4 peticiones de cabecera en CADA arranque en frío, para siempre.
      *
-     * Ojo con la tentación de sellar TODA fila que la fase no resuelva: una cuyos tags existen
-     * pero caen fuera del fragmento (bloque PICTURE gigante antes del comentario Vorbis) SÍ
-     * merece reintentarse, y la distingue justamente `needsMetadata = 1`.
+     * Ojo con la tentación de sellar TODA fila que la fase no resuelva: una cuyos tags existen pero
+     * caen fuera del fragmento (bloque PICTURE gigante antes del comentario Vorbis), o una que
+     * falló por red, SÍ merecen reintentarse — por eso el sello exige una lectura CONCLUYENTE y no
+     * simplemente "no salió nada".
      */
     @Query("""
         SELECT * FROM songs
         WHERE sourceType != 'LOCAL' AND isCorrupted = 0
           AND (
-            (artist = :unknownArtist AND needsMetadata = 1)
+            (artist = :unknownArtist AND needsMetadata = 1 AND lightTagsAttemptedAt IS NULL)
             OR ((albumArtUriString IS NULL OR albumArtUriString = '') AND artworkAttemptedAt IS NULL)
           )
         ORDER BY dateAdded DESC
     """)
     suspend fun getSongsNeedingLightMetadata(unknownArtist: String): List<SongEntity>
+
+    /**
+     * Sella la lectura de tags de la METADATA LIGERA (ver `SongEntity.lightTagsAttemptedAt`).
+     *
+     * Solo lo llama el caso concluyente: la fuente contestó y la cabecera no traía texto. Es el
+     * gemelo de [markArtworkAttempted] y lo que impide que un archivo sin tags vuelva a la lista en
+     * cada arranque mientras siga sin descargar.
+     */
+    @Query("UPDATE songs SET lightTagsAttemptedAt = :now WHERE id IN (:songIds)")
+    suspend fun markLightTagsAttempted(songIds: List<String>, now: Long)
 
     /**
      * Escribe los tags leídos de la cabecera. A diferencia de [updateSongMetadata] NO toca
@@ -756,8 +824,18 @@ interface SongDao {
      * Marca una canción como modificada en el origen (OneDrive): vacía la URI local
      * para forzar re-descarga, activa needsMetadata para que finalizeDownload re-extraiga
      * los nuevos tags ID3, y actualiza el tamaño esperado.
+     *
+     * También REABRE el sello de la metadata ligera (`lightTagsAttemptedAt = NULL`): ese sello dice
+     * "la cabecera de ESTE archivo no traía tags", y el archivo acaba de cambiar — el caso típico es
+     * justamente que el usuario lo re-etiquetara desde otro cliente, que es cuando más importa
+     * volver a leerlo. Sin esto, un archivo sellado quedaría sin texto hasta descargarse aunque sus
+     * tags nuevos ya estuvieran a un `Range` de distancia.
      */
-    @Query("UPDATE songs SET uriString = '', needsMetadata = 1, size = :newSize WHERE id = :songId")
+    @Query("""
+        UPDATE songs
+        SET uriString = '', needsMetadata = 1, lightTagsAttemptedAt = NULL, size = :newSize
+        WHERE id = :songId
+    """)
     suspend fun markSongAsModifiedForRedownload(songId: String, newSize: Long)
 
     // ==================== TOPE DE ALMACENAMIENTO (caché LRU) ====================
@@ -933,3 +1011,13 @@ data class GenreSummary(
     val arts: List<String>
         get() = albumArts?.split(SongDao.ARTS_SEPARATOR)?.filter { it.isNotBlank() } ?: emptyList()
 }
+
+/**
+ * Solo el texto por el que se busca una canción. Ver `SongDao.getSearchableText`.
+ */
+data class SongSearchText(
+    val id: String,
+    val title: String,
+    val artist: String,
+    val album: String
+)

@@ -9,6 +9,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import com.qhana.siku.data.model.PlaybackContext
+import com.qhana.siku.data.util.SnackbarManager
 import com.qhana.siku.ui.MusicAppState
 import com.qhana.siku.ui.PlayerArtOrigin
 import com.qhana.siku.ui.screens.AlbumDetailScreen
@@ -25,6 +26,7 @@ import com.qhana.siku.ui.screens.SettingsEqPresetsScreen
 import com.qhana.siku.ui.screens.SettingsGesturesScreen
 import com.qhana.siku.ui.screens.SettingsPlaybackScreen
 import com.qhana.siku.ui.screens.SettingsPlayerBarScreen
+import com.qhana.siku.ui.screens.SettingsProgressBarScreen
 import com.qhana.siku.ui.screens.SettingsScreen
 import com.qhana.siku.ui.screens.SettingsSourcesScreen
 import com.qhana.siku.ui.screens.SettingsTabsScreen
@@ -53,6 +55,9 @@ fun AppNavHost(
     appState: MusicAppState,
     startDestination: String,
     loggedIn: Boolean,
+    // Avatar de cuenta del header de la biblioteca (foto de perfil cacheada + inicial de fallback).
+    accountPhotoPath: String? = null,
+    accountInitial: String? = null,
     authLoading: Boolean,
     authError: String?,
     onConnectOneDrive: (Activity) -> Unit,
@@ -62,6 +67,7 @@ fun AppNavHost(
     playbackViewModel: PlaybackViewModel,
     libraryViewModel: LibraryViewModel,
     sourcesViewModel: SourcesViewModel,
+    snackbarManager: SnackbarManager,
     sharedTransitionScope: SharedTransitionScope
 ) {
     val navController = appState.navController
@@ -69,7 +75,6 @@ fun AppNavHost(
     // Estado compartido por varias rutas (cada capa lo colecta de su ViewModel; StateFlow
     // hace que ambas vean lo mismo sin acoplarse entre sí).
     val currentSong by playbackViewModel.currentSong.collectAsStateWithLifecycle()
-    val playbackState by playbackViewModel.playbackState.collectAsStateWithLifecycle()
     val libraryUiState by libraryViewModel.uiState.collectAsStateWithLifecycle()
 
     // Transiciones del grafo, declaradas UNA vez aquí y no ruta por ruta. Antes cada `composable`
@@ -81,6 +86,10 @@ fun AppNavHost(
     NavHost(
         navController = navController,
         startDestination = startDestination,
+        // Shared axis horizontal por defecto para TODA navegación entre pantallas. El reproductor ya
+        // no es una ruta (es una capa que hace container transform con la píldora), así que ninguna
+        // ruta necesita ya el caso especial "no mover la de debajo" que hacía falta cuando el player
+        // subía como hoja vertical.
         enterTransition = appNavForwardEnter,
         exitTransition = appNavForwardExit,
         popEnterTransition = appNavBackEnter,
@@ -118,6 +127,8 @@ fun AppNavHost(
         composable(route = Screen.Library.route) {
             LibraryScreen(
                 isLoggedIn = loggedIn,
+                accountPhotoPath = accountPhotoPath,
+                accountInitial = accountInitial,
                 onLogoutClick = onDisconnectOneDrive,
                 onDownloadManagerClick = { navController.navigate(Screen.DownloadManager.route) },
                 onPlaylistClick = { id, name -> navController.navigate(Screen.PlaylistDetail.createRoute(id, name)) },
@@ -153,7 +164,6 @@ fun AppNavHost(
                 playlistName = playlistName,
                 songs = playlistSongs,
                 currentSong = currentSong,
-                playbackState = playbackState,
                 isFavoritesList = false,
                 onBackClick = { navController.popBackStack() },
                 onPlayAll = { songs, index ->
@@ -171,6 +181,9 @@ fun AppNavHost(
                     appState.openPlayer()
                 },
                 onToggleFavorite = { libraryViewModel.toggleFavorite(it) },
+                onAddToQueue = { playbackViewModel.addToQueue(it) },
+                // Misma función, otra sobrecarga: la de lista cuenta cuántas entraron de verdad.
+                onAddAllToQueue = { playbackViewModel.addToQueue(it) },
                 onReorderSongs = { songIds -> libraryViewModel.reorderPlaylistSongs(playlistId, songIds) },
                 onRemoveSong = { songId -> libraryViewModel.removeSongFromPlaylist(playlistId, songId) },
                 onAddSongs = { appState.showAddSongsSheet = true }
@@ -186,7 +199,6 @@ fun AppNavHost(
             ArtistDetailScreen(
                 artistName = artistName,
                 currentSong = currentSong,
-                playbackState = playbackState,
                 favorites = libraryUiState.favorites,
                 playlists = libraryUiState.playlists,
                 onBackClick = { navController.popBackStack() },
@@ -206,6 +218,9 @@ fun AppNavHost(
                     appState.openPlayer()
                 },
                 onToggleFavorite = { libraryViewModel.toggleFavorite(it) },
+                onAddToQueue = { playbackViewModel.addToQueue(it) },
+                // Misma función, otra sobrecarga: la de lista cuenta cuántas entraron de verdad.
+                onAddAllToQueue = { playbackViewModel.addToQueue(it) },
                 onAddSongToPlaylist = { playlistId, songId -> libraryViewModel.addSongToPlaylist(playlistId, songId) },
                 onCreatePlaylist = { name, pendingSongId ->
                     libraryViewModel.createPlaylist(name) { id ->
@@ -226,7 +241,6 @@ fun AppNavHost(
             AlbumDetailScreen(
                 albumName = albumName,
                 currentSong = currentSong,
-                playbackState = playbackState,
                 favorites = libraryUiState.favorites,
                 playlists = libraryUiState.playlists,
                 onBackClick = { navController.popBackStack() },
@@ -246,6 +260,9 @@ fun AppNavHost(
                     appState.openPlayer()
                 },
                 onToggleFavorite = { libraryViewModel.toggleFavorite(it) },
+                onAddToQueue = { playbackViewModel.addToQueue(it) },
+                // Misma función, otra sobrecarga: la de lista cuenta cuántas entraron de verdad.
+                onAddAllToQueue = { playbackViewModel.addToQueue(it) },
                 onAddSongToPlaylist = { playlistId, songId -> libraryViewModel.addSongToPlaylist(playlistId, songId) },
                 onCreatePlaylist = { name, pendingSongId ->
                     libraryViewModel.createPlaylist(name) { id ->
@@ -266,7 +283,6 @@ fun AppNavHost(
             GenreDetailScreen(
                 genreName = genreName,
                 currentSong = currentSong,
-                playbackState = playbackState,
                 favorites = libraryUiState.favorites,
                 playlists = libraryUiState.playlists,
                 onBackClick = { navController.popBackStack() },
@@ -285,6 +301,9 @@ fun AppNavHost(
                     appState.openPlayer()
                 },
                 onToggleFavorite = { libraryViewModel.toggleFavorite(it) },
+                onAddToQueue = { playbackViewModel.addToQueue(it) },
+                // Misma función, otra sobrecarga: la de lista cuenta cuántas entraron de verdad.
+                onAddAllToQueue = { playbackViewModel.addToQueue(it) },
                 onAddSongToPlaylist = { playlistId, songId -> libraryViewModel.addSongToPlaylist(playlistId, songId) },
                 onCreatePlaylist = { name, pendingSongId ->
                     libraryViewModel.createPlaylist(name) { id ->
@@ -303,7 +322,6 @@ fun AppNavHost(
                 playlistName = "Favoritos",
                 songs = libraryUiState.favoriteSongs,
                 currentSong = currentSong,
-                playbackState = playbackState,
                 isFavoritesList = true,
                 onBackClick = { navController.popBackStack() },
                 onPlayAll = { songs, index ->
@@ -317,9 +335,16 @@ fun AppNavHost(
                     appState.openPlayer()
                 },
                 onToggleFavorite = { libraryViewModel.toggleFavorite(it) },
+                onAddToQueue = { playbackViewModel.addToQueue(it) },
+                // Misma función, otra sobrecarga: la de lista cuenta cuántas entraron de verdad.
+                onAddAllToQueue = { playbackViewModel.addToQueue(it) },
                 onAddSongs = { appState.showAddSongsSheet = true }
             )
         }
+
+        // El reproductor a pantalla completa YA NO es una ruta: es una capa que hace container
+        // transform con la píldora (ver [com.qhana.siku.ui.PlayerOverlay] / `NowPlayingLayer`). Se abre
+        // con `appState.openPlayer(...)` —que setea un booleano— desde los mismos call sites de siempre.
 
         composable(
             route = Screen.Settings.route
@@ -403,6 +428,12 @@ fun AppNavHost(
             route = Screen.SettingsPlayerBar.route
         ) {
             SettingsPlayerBarScreen(onBackClick = { navController.popBackStack() })
+        }
+
+        composable(
+            route = Screen.SettingsProgressBar.route
+        ) {
+            SettingsProgressBarScreen(onBackClick = { navController.popBackStack() })
         }
 
         composable(Screen.DownloadManager.route) {

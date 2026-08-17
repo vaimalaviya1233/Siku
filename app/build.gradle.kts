@@ -6,6 +6,8 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
     id("com.google.dagger.hilt.android")
+    // Consume el perfil que genera `:baselineprofile` y lo empaqueta en el APK/AAB.
+    id("androidx.baselineprofile")
 }
 
 
@@ -91,6 +93,13 @@ dependencies {
     // Core module (dominio: modelos puros)
     implementation(project(":core"))
 
+    // Baseline profile: el módulo que lo GENERA (no entra en el APK) y la librería que lo
+    // INSTALA en el dispositivo al primer arranque. `profileinstaller` llega como transitiva de
+    // Compose, pero se declara explícita porque sin ella el .prof empaquetado no se aplicaría en
+    // instalaciones fuera de Play — y esa dependencia implícita es justo la que se rompe sola.
+    baselineProfile(project(":baselineprofile"))
+    implementation("androidx.profileinstaller:profileinstaller:1.4.1")
+
     // Core Android
     implementation("androidx.core:core-ktx:1.17.0")
     // Splash screen retenido en arranque hasta resolver la sesión MSAL (evita flash del Login)
@@ -127,8 +136,9 @@ dependencies {
     // azúcar sobre lo que `MusicPlayerTheme` ya hace a mano.
     implementation("com.materialkolor:material-kolor:4.1.1")
 
-    // Haze - backdrop blur (vidrio esmerilado) para contenedores sobre la carátula en NowPlaying
-    implementation("dev.chrisbanes.haze:haze:1.7.2")
+    // (Haze — backdrop blur — se ELIMINÓ el 9 ago 2026: el vidrio esmerilado se había retirado
+    // del NowPlaying al adoptar "nada de glassmorphism", pero solo se quitaron los usos y quedó
+    // vivo el componente, la cadena de parámetros que lo alimentaba y esta dependencia.)
 
     // Glance - widgets de pantalla de inicio con sintaxis Compose
     implementation("androidx.glance:glance-appwidget:1.1.1")

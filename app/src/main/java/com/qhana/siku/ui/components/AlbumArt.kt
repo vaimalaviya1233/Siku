@@ -2,8 +2,8 @@ package com.qhana.siku.ui.components
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -12,21 +12,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import com.qhana.siku.R
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import coil3.request.crossfade
+import coil3.request.transformations
 
 // ============== CONSTANTES ==============
-
-private val PlaceholderDark = Color(0xFF2A2A2A)
-private val PlaceholderLight = Color(0xFFE0E0E0)
 
 // Anillo de progreso (modo cola): traza y holgura entre el aro y la carátula.
 private val RingStroke = 3.dp
@@ -42,7 +40,12 @@ fun AlbumArt(
     modifier: Modifier = Modifier,
     cornerRadius: Dp = 8.dp,
     shape: Shape? = null, // Si se pasa, tiene prioridad sobre cornerRadius
-    cacheKey: String? = null,
+    // Máscara de la carátula HORNEADA en el bitmap por Coil en la carga (una vez por imagen,
+    // cacheada) en vez de clipar la composición con [shape] en cada frame. OBLIGATORIO para formas
+    // CÓNCAVAS (cookie): su clip de path no tiene fast-path de hardware y en una lista se paga en
+    // cada frame del scroll. Cuando llega, la fila dibuja un bitmap plano SIN clip y [shape] se usa
+    // solo para el placeholder/velo (relleno `drawOutline`, barato). Debe corresponder a [shape].
+    maskTransformation: coil3.transform.Transformation? = null,
     // Resolución PEDIDA a Coil. El default (thumbnail de 156px) es correcto para list items
     // chicos, pero pixela en tarjetas grandes (p.ej. carruseles del home de 150dp ≈ 410px):
     // pasar `null` deja que Coil pida el tamaño MEDIDO del composable → nítido sin desperdiciar.
@@ -57,11 +60,14 @@ fun AlbumArt(
      */
     useRingProgress: Boolean = false
 ) {
-    val isDarkTheme = isSystemInDarkTheme()
     val primaryColor = MaterialTheme.colorScheme.primary
     // Velo sobre la carátula durante la descarga (M3 scrim token, no negro fijo).
     val scrimColor = MaterialTheme.colorScheme.scrim
-    val ringTrackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f)
+    // Track NO recorrido del aro: el MISMO acento del tramo recorrido (`primaryColor`), muy
+    // rebajado con la constante compartida, para que el aro se lea como una sola pieza —canal y
+    // relleno— igual que el resto de barras de progreso de la app. Antes era un `onSurface @ 0.18`
+    // (neutro y con alpha suelto), que rompía esa convención.
+    val ringTrackColor = primaryColor.copy(alpha = ACCENT_TRACK_ALPHA)
 
     val isDownloadState = isDownloading ||
         (downloadProgress != null && downloadProgress > 0f && downloadProgress < 1f)
@@ -70,12 +76,14 @@ fun AlbumArt(
     val ringActive = useRingProgress && isDownloadState && albumArtUri != null
     val artInset = if (ringActive) RingStroke + RingGap else 0.dp
 
-    val colors = remember(isDarkTheme) {
-        AlbumArtColors(
-            placeholderColor = if (isDarkTheme) PlaceholderDark else PlaceholderLight,
-            iconTint = if (isDarkTheme) Color(0xFFB3B3B3) else Color(0xFF666666)
-        )
-    }
+    // Par contenedor/contenido del TEMA, no dos grises fijos por modo. El hueco de una carátula
+    // que falta aparece en TODAS las listas de la app, así que era la superficie que más veces
+    // rompía el color dinámico: `#E0E0E0`/`#2A2A2A` son grises neutros y `surfaceContainerHighest`
+    // lleva el tinte del seed, igual que el contenedor de la fila sobre el que se apoya. Se leen
+    // sueltos y sin `remember`: leer dos roles del colorScheme no asigna nada, mientras que el
+    // objeto que los agrupaba sí lo hacía en cada recomposición desde que dejó de cachearse.
+    val placeholderColor = MaterialTheme.colorScheme.surfaceContainerHighest
+    val iconTint = MaterialTheme.colorScheme.onSurfaceVariant
 
     val density = LocalDensity.current
     val iconSizeSp = remember(size, density) { with(density) { (size / 2).toSp() } }
@@ -87,26 +95,39 @@ fun AlbumArt(
         modifier = modifier.size(size),
         contentAlignment = Alignment.Center
     ) {
+        val effShape = shape ?: RoundedCornerShape(cornerRadius)
         Box(
             modifier = Modifier
                 .size(size - artInset * 2)
-                .clip(shape ?: RoundedCornerShape(cornerRadius))
-                .background(colors.placeholderColor),
+                // Con máscara horneada NO se clipa: el bitmap ya llega con la forma y un clip de path
+                // cóncavo se pagaría por frame en el scroll. El placeholder se pinta con la forma como
+                // RELLENO (barato). Sin máscara, el comportamiento de siempre: clip + fondo liso.
+                .then(
+                    if (maskTransformation == null) Modifier.clip(effShape).background(placeholderColor)
+                    else Modifier.background(placeholderColor, effShape)
+                ),
             contentAlignment = Alignment.Center
         ) {
             if (albumArtUri != null) {
                 val context = LocalContext.current
-                val imageRequest = remember(albumArtUri, cacheKey, requestSizePx) {
+                // SIN memoryCacheKey/diskCacheKey propios: la clave la deriva Coil de la data (el
+                // URI) más el tamaño pedido y las transformaciones, que es EXACTAMENTE lo que
+                // distingue un bitmap de otro. Hasta el 9 ago 2026 aquí se pasaba el id de la
+                // CANCIÓN, y eso fragmentaba por canción una imagen que es del ÁLBUM: las 12 pistas
+                // de un disco metían 12 copias idénticas en el caché de memoria (el 25 % del heap),
+                // expulsando carátulas legítimas y forzando a redecodificar al scrollear. Desde la
+                // v25 el archivo se llama por su CONTENIDO (`covers/<sha1>.jpg`), así que el URI ya
+                // es la clave correcta: mismas portadas colapsan solas y una portada reparada
+                // cambia de nombre, o sea que la invalidación también sale gratis.
+                val imageRequest = remember(albumArtUri, requestSizePx, maskTransformation) {
                     ImageRequest.Builder(context)
                         .data(albumArtUri)
                         .apply {
                             // requestSizePx != null → tamaño fijo (thumbnails de listas). null → sin
                             // .size(), Coil resuelve al tamaño medido del composable (tarjetas grandes).
                             if (requestSizePx != null) size(requestSizePx)
-                            if (cacheKey != null) {
-                                memoryCacheKey(cacheKey)
-                                diskCacheKey(cacheKey)
-                            }
+                            // Máscara (cookie) horneada en el bitmap: la fila dibuja plano, sin clip.
+                            if (maskTransformation != null) transformations(maskTransformation)
                         }
                         .crossfade(200)
                         .build()
@@ -135,7 +156,9 @@ fun AlbumArt(
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .background(scrimColor.copy(alpha = 0.45f))
+                                // Con la forma como relleno: sin clip del contenedor, el velo debe
+                                // seguir la cookie por su cuenta (con clip es inocuo, ya va acotado).
+                                .background(scrimColor.copy(alpha = 0.45f), effShape)
                         )
                     }
                     // LoadingIndicator expressive (morfea entre MaterialShapes): determinado con
@@ -152,7 +175,7 @@ fun AlbumArt(
                 }
                 // Sin descarga y sin carátula: nota musical de relleno.
                 albumArtUri == null -> {
-                    MaterialSymbol(icon = "music_note", size = iconSizeSp, color = colors.iconTint)
+                    MaterialSymbol(icon = "music_note", size = iconSizeSp, color = iconTint)
                 }
             }
         }
@@ -192,8 +215,70 @@ fun AlbumArt(
     }
 }
 
-@Immutable
-private data class AlbumArtColors(
-    val placeholderColor: Color,
-    val iconTint: Color
-)
+// ============== AVATAR DE CUENTA ==============
+
+/**
+ * Avatar de la cuenta para el header de la biblioteca. Muestra la foto de perfil de Microsoft si
+ * está cacheada ([photoPath]); si no, un círculo con la inicial del nombre; y si tampoco hay
+ * nombre, un glifo de persona. El caso SIN cuenta (solo-local) NO llega aquí — el header pinta un
+ * engranaje de ajustes en su lugar.
+ *
+ * El círculo de la inicial va en `primary`/`onPrimary` a propósito: el header lo aloja sobre la
+ * píldora de búsqueda, que es `secondaryContainer`, así que un fondo `secondary*` se fundiría con
+ * ella; `primary` destaca como un chip de avatar.
+ */
+@Composable
+fun AccountAvatar(
+    photoPath: String?,
+    initial: String?,
+    modifier: Modifier = Modifier,
+    size: Dp = 28.dp
+) {
+    if (photoPath != null) {
+        val context = LocalContext.current
+        val request = remember(photoPath) {
+            val file = java.io.File(photoPath)
+            // El archivo SIEMPRE se llama igual (account/photo.jpg), así que el URI no distingue una
+            // foto de otra: sin una clave propia, cambiar de cuenta serviría la foto anterior desde
+            // el caché de Coil. La clave incluye el `lastModified`, que cambia al reescribir el
+            // archivo tras un re-login (el mismo cuidado que las carátulas por contenido).
+            val cacheKey = "account_photo_${file.lastModified()}"
+            ImageRequest.Builder(context)
+                // Mismo formato probado que las carátulas: URI `file://` (String), que Coil3 resuelve
+                // aquí; un `java.io.File` crudo no está garantizado como dato de coil3.
+                .data(android.net.Uri.fromFile(file).toString())
+                .memoryCacheKey(cacheKey)
+                .diskCacheKey(cacheKey)
+                .crossfade(true)
+                .build()
+        }
+        AsyncImage(
+            model = request,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = modifier.size(size).clip(CircleShape)
+        )
+    } else {
+        Box(
+            modifier = modifier
+                .size(size)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primary),
+            contentAlignment = Alignment.Center
+        ) {
+            if (!initial.isNullOrBlank()) {
+                Text(
+                    text = initial,
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    style = MaterialTheme.typography.labelLarge
+                )
+            } else {
+                MaterialSymbol(
+                    icon = "person",
+                    size = (size.value * 0.6f).sp,
+                    color = MaterialTheme.colorScheme.onPrimary
+                )
+            }
+        }
+    }
+}

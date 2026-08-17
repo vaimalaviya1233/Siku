@@ -22,9 +22,12 @@ import coil3.compose.AsyncImage
 import com.qhana.siku.R
 import com.qhana.siku.data.model.Playlist
 import com.qhana.siku.data.repository.PlaylistCoverMeta
+import com.qhana.siku.ui.components.ACCENT_SECONDARY_ALPHA
+import com.qhana.siku.ui.components.GroupedListRow
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.MenuItemIcon
 import com.qhana.siku.ui.components.rememberListItemShape
+import com.qhana.siku.ui.components.rememberRowActionColors
 
 /**
  * Pestaña Listas del home: Favoritos fijo arriba (contenedor de acento con corazón) y las
@@ -61,8 +64,9 @@ fun PlaylistList(
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
-        contentPadding = combinedPadding,
-        verticalArrangement = Arrangement.spacedBy(2.dp) // Reduced spacing for connected look
+        contentPadding = combinedPadding
+        // El gap de 2dp entre filas lo pone GroupedListRow (padding vertical 1dp por fila), igual
+        // que Todas/Artistas; sumar aquí spacedBy(2dp) lo duplicaría solo en esta lista.
     ) {
         // Favoritos siempre primero
         item(key = "favorites") {
@@ -188,7 +192,9 @@ private fun FavoritesItem(
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.size(48.dp)
             ) {
-                Box(contentAlignment = Alignment.Center) {
+                // fillMaxSize: sin él, el Box se ciñe al glifo y `Center` no centra nada dentro
+                // del badge de 48dp — el corazón quedaba pegado a la esquina superior izquierda.
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     MaterialSymbol("favorite", fill = true, size = 24.sp, color = MaterialTheme.colorScheme.onPrimary)
                 }
             }
@@ -203,7 +209,7 @@ private fun FavoritesItem(
                 Text(
                     text = pluralStringResource(R.plurals.song_count, count, count),
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
+                    color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = ACCENT_SECONDARY_ALPHA)
                 )
             }
         }
@@ -223,62 +229,73 @@ private fun PlaylistItem(
     onDelete: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Surface(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp), // Segmented margins
-        onClick = onClick,
+    // Fila agrupada COMPARTIDA (GroupedListRow envuelve el ListItem real de M3): padding, anatomía
+    // y gap salen del spec, los mismos que Todas/Cola/Artistas. El collage de carátulas va en el
+    // slot leading.
+    GroupedListRow(
         shape = shape,
-        color = MaterialTheme.colorScheme.surfaceContainerLow // Standard list item color
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            PlaylistThumb(arts = arts)
-
-            Spacer(modifier = Modifier.width(16.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = playlist.name,
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Text(
-                    text = pluralStringResource(R.plurals.song_count, songCount, songCount),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+        onClick = onClick,
+        modifier = modifier,
+        leadingContent = { PlaylistThumb(arts = arts) },
+        headlineContent = {
+            Text(
+                text = playlist.name,
+                style = MaterialTheme.typography.bodyLargeEmphasized,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+            )
+        },
+        supportingContent = {
+            Text(
+                text = pluralStringResource(R.plurals.song_count, songCount, songCount),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        },
+        trailingContent = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // SIN fondo (IconButton estándar); el glifo `play_circle` (disco relleno) se lee como
+                // botón sin píldora que recargue la fila. `iconButtonColors` para que el disabled
+                // (lista vacía) atenúe solo. Shape-morph Expressive al presionar.
+                IconButton(
+                    onClick = onPlay,
+                    enabled = songCount > 0,
+                    shapes = IconButtonDefaults.shapes(),
+                    colors = IconButtonDefaults.iconButtonColors(contentColor = MaterialTheme.colorScheme.primary),
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    MaterialSymbol("play_circle", size = 30.sp, fill = true)
+                }
+                Spacer(modifier = Modifier.width(4.dp))
+                PlaylistItemMenu(onRename = onRename, onDelete = onDelete)
             }
-            // SIN fondo (IconButton estándar); el glifo `play_circle` (disco relleno) se lee como
-            // botón sin píldora que recargue la fila. `iconButtonColors` para que el disabled
-            // (lista vacía) atenúe solo. Shape-morph Expressive al presionar.
-            IconButton(
-                onClick = onPlay,
-                enabled = songCount > 0,
-                shapes = IconButtonDefaults.shapes(),
-                colors = IconButtonDefaults.iconButtonColors(contentColor = MaterialTheme.colorScheme.primary),
-                modifier = Modifier.size(40.dp)
-            ) {
-                MaterialSymbol("play_circle", size = 30.sp, fill = true)
-            }
-            Spacer(modifier = Modifier.width(4.dp))
-            PlaylistItemMenu(onRename = onRename, onDelete = onDelete)
         }
-    }
+    )
 }
 
 /** Overflow de la fila: renombrar y borrar (el destructivo vive aquí, tras un toque intencional). */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun PlaylistItemMenu(onRename: () -> Unit, onDelete: () -> Unit) {
     var showMenu by remember { mutableStateOf(false) }
+    // Píldora vertical tonal, MISMO componente y colores que el ⋮ de "Todas"/Artistas
+    // (rememberRowActionColors sobre el fondo real de la fila): las listas de navegación comparten
+    // trailing. Antes era un IconButton pelado de 24sp sin contenedor, que rompía esa consistencia.
+    val colors = rememberRowActionColors(MaterialTheme.colorScheme.surfaceContainerHigh)
     Box {
-        IconButton(onClick = { showMenu = true }) {
-            MaterialSymbol("more_vert", color = MaterialTheme.colorScheme.onSurfaceVariant, size = 24.sp)
+        FilledIconButton(
+            onClick = { showMenu = true },
+            shapes = IconButtonDefaults.shapes(),
+            colors = IconButtonDefaults.filledIconButtonColors(
+                containerColor = colors.container,
+                contentColor = colors.content
+            ),
+            modifier = Modifier
+                .width(28.dp)
+                .height(44.dp)
+        ) {
+            MaterialSymbol("more_vert", size = 18.sp, color = colors.content)
         }
         // Menú SEGMENTADO (popup + grupo), no el `DropdownMenu` clásico: ver la nota en SortChip.
         DropdownMenuPopup(expanded = showMenu, onDismissRequest = { showMenu = false }) {
@@ -327,7 +344,7 @@ private fun PlaylistThumb(arts: List<String>, modifier: Modifier = Modifier) {
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 modifier = Modifier.matchParentSize()
             ) {
-                Box(contentAlignment = Alignment.Center) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     MaterialSymbol("playlist_play", fill = true, size = 24.sp, color = MaterialTheme.colorScheme.primary)
                 }
             }

@@ -90,7 +90,7 @@ fun FilteredEmptyHint() {
         MaterialSymbol(
             "filter_alt_off",
             size = 64.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+            color = MaterialTheme.colorScheme.outline
         )
         Spacer(modifier = Modifier.height(16.dp))
         Text(
@@ -102,7 +102,7 @@ fun FilteredEmptyHint() {
         Text(
             text = stringResource(R.string.filter_empty_subtitle),
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center
         )
     }

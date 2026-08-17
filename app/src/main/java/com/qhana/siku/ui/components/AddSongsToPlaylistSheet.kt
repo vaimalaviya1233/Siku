@@ -24,7 +24,6 @@ import androidx.compose.material3.MaterialTheme.colorScheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -58,15 +57,12 @@ fun AddSongsToPlaylistSheet(
     onConfirm: (List<String>) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     // La selección sobrevive a los cambios de búsqueda: se puede marcar una canción, buscar
     // otra cosa y seguir sumando antes de confirmar.
     var selectedIds by remember { mutableStateOf(emptySet<String>()) }
 
-    AppModalSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState
-    ) {
+    // `skipPartiallyExpanded = true` ya es el default de AppModalSheet (evita el doble-back).
+    AppModalSheet(onDismissRequest = onDismiss) {
         // Cierre animado para el botón de confirmar (ver [LocalSheetCloser]). Se lee AQUÍ dentro:
         // el local lo publica `AppModalSheet` y solo existe bajo su contenido.
         val close = LocalSheetCloser.current

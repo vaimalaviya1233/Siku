@@ -9,22 +9,26 @@ import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.SpringSpec
+import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MotionScheme
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.ReadOnlyComposable
 import androidx.navigation.NavBackStackEntry
 
@@ -312,17 +316,103 @@ val AppRevealSpec: FiniteAnimationSpec<Float> =
  * ajeno a la duración del `NavHost`. **Es un container transform, o sea una TRANSICIÓN**: por eso
  * lleva easing y duración y no un spring del `MotionScheme`.
  *
- * **La carátula píldora↔NowPlaying SÍ lo usa**, y es obligatorio: el slide del reproductor corre
- * con esta misma duración y curva, así que la carátula viaja acompasada con el fondo que sube. Con
- * el spring default de la API (que asienta en ~300 ms contra los 500 del slide) la carátula
- * aterrizaba primero y se quedaba flotando quieta mientras el resto del reproductor seguía
- * subiendo — el "flash" que reportó el usuario el 30 jul. Aquí NO se recorta el sobrepaso (ver
- * [ScreenSlideEasing]): un shared element viaja en el overlay y no destapa nada.
+ * **La carátula del reproductor (píldora/fila ↔ NowPlaying) YA NO lo usa** (16 ago): desde que el
+ * player es un container transform con [AppContainerBoundsTransform], la portada viaja con ESE mismo
+ * spring, para aterrizar con la superficie que la lleva. La lección que dejó esta constante sigue
+ * valiendo: un shared element tiene que asentar A LA VEZ que lo que lo transporta — cuando el player
+ * era un slide de 500 ms y la portada iba con el spring default de la API (~300 ms) aterrizaba primero
+ * y se quedaba flotando quieta, el "flash" del 30 jul; con el contenedor asentando a ~350 y la portada
+ * a 500 pasaba lo contrario. Aquí NO se recorta el sobrepaso (ver [ScreenSlideEasing]): un shared
+ * element viaja en el overlay y no destapa nada.
  */
 @OptIn(ExperimentalSharedTransitionApi::class)
 val AppBoundsTransform = BoundsTransform { _, _ ->
     tween(SCREEN_TRANSFORM_MS, easing = ExpressiveDefaultSpatialEasing)
 }
+
+/**
+ * BoundsTransform del *container transform* píldora/fila ↔ player (ver [com.qhana.siku.ui.PlayerOverlay]).
+ * Es el **spring SPATIAL *default* del [MotionScheme] STANDARD** de M3 — el recurso que la propia
+ * librería define para "animaciones que cambian la FORMA o los BOUNDS de un componente" (su KDoc,
+ * literal), que es exactamente este caso — **el MISMO en las dos direcciones**, con el umbral de
+ * visibilidad de `Rect` que la API de shared elements usa en su propio spring por defecto.
+ *
+ * **Por qué STANDARD y no el EXPRESSIVE que usa el resto de la app** ([AppBoundsTransform] /
+ * [AppMotionScheme]). Los dos son springs; la diferencia está en el damping (medido en las fuentes de
+ * material3 1.5.0-alpha24, `ExpressiveMotionTokens`/`StandardMotionTokens`):
+ *  - expressive default spatial: damping **0.8**, stiffness 380 → sobrepasa ~1.5 %: el REBOTE hero. En
+ *    una punta SÓLIDA que queda a la vista al final (el contenido de la píldora, entrante al CERRAR)
+ *    ese sobrepaso se ve como el contenido "rebotando" al asentarse.
+ *  - standard default spatial: damping **0.9**, stiffness **700** → sobrepaso ~0.15 % (imperceptible).
+ *    Constante de tiempo 1/(0.9·√700) ≈ 42 ms: el recorrido VISIBLE (al 95 %, 3τ) dura ~130 ms y
+ *    asienta a un píxel sobre ~2500 px (`ln(2500)` ≈ 7.8 constantes) en ~330 ms — MÁS ÁGIL que un
+ *    tween de [SCREEN_TRANSFORM_MS] sin sentirse lento, que es lo que un container transform pide.
+ *
+ * **El cierre NO va con el *fast*, y estuvo (17 ago, madrugada) — no reintroducirlo.** Se puso como
+ * remedio a un "lag al scrollear tras cerrar" que se atribuyó a la cola del morph pisada por el primer
+ * frame de scroll: acortar el cierre parecía sacarla del camino. Horas después Perfetto enseñó la causa
+ * REAL —buffer stuffing por productores continuos de frames (ver la sección Motion de CLAUDE.md)— y se
+ * arregló en su sitio, así que aquel acorte quedó como un parche sin enfermedad… y con un coste que sí
+ * se veía: con stiffness 1400 la constante de tiempo baja a ~30 ms y el recorrido visible a ~90 ms —
+ * once frames a 120 Hz—, o sea que el player se ESFUMABA en la píldora ("se perdió la animación de
+ * cierre", 17 ago). El "los cierres son más cortos" de la guía de Material (MDC 300/250, un 17 %) no se
+ * traduce con el token *fast* del scheme, que es el DOBLE de rigidez (el scheme no tiene un escalón
+ * intermedio, y fabricar uno sería un número a mano); con un solo spring standard el morph es
+ * simétrico, como el de la propia API (`sharedBounds` usa UN spring para ir y volver), y es la
+ * configuración que se validó en device el 15-16 ago antes de aquel desvío.
+ *
+ * **`Rect.VisibilityThreshold` (un píxel) es load-bearing y no un detalle**: el spec que devuelve el
+ * `MotionScheme` no trae umbral, y sin él un `SpringSpec` termina cuando cada componente baja de 0.01
+ * (`Spring.DefaultDisplacementThreshold`): sobre un rect de 2500 px eso son 12.4 constantes de tiempo,
+ * ~520 ms de transición de los cuales los últimos ~190 no mueven NI UN PÍXEL. Como el bounds es lo que
+ * mantiene viva la rama saliente del `AnimatedContent` (`KeepUntilTransitionsFinished`) y el overlay
+ * del `SharedTransitionScope` se redibuja en cada frame mientras corre, ese tramo era coste puro —
+ * frames de overlay para nada y el desmontaje del NowPlaying ~190 ms más tarde, más cerca del primer
+ * scroll. Es el mismo umbral que Compose pone en `DefaultBoundsAnimation` (`BoundsAnimation.kt`).
+ *
+ * Lo usan las tres puntas de cada morph —contenedor, sombra y carátula anidada— para que aterricen
+ * JUNTAS: es la lección de [AppBoundsTransform] (un shared element asienta a la vez que lo que lo
+ * transporta) aplicada dentro del container transform. Los fades del CONTENIDO
+ * ([appContainerContentExit], 300 / [appContainerContentExitFast], 150) sí son más cortos que el
+ * asentado del bounds a propósito: la superficie se disuelve antes de llegar y no deja residuo.
+ *
+ * Mismo criterio que [com.qhana.siku.ui.components.AppModalSheet], que ya usa `MotionScheme.standard()`
+ * para que las hojas no reboten al llegar. **Lección que costó dos intentos** (effects easing = sin
+ * rebote pero LENTO; luego spatial clampeado): "se siente lento" es la CURVA antes que la duración, y
+ * antes de fabricar una curva a mano conviene mirar si el `MotionScheme` ya trae el spec correcto.
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+val AppContainerBoundsTransform = BoundsTransform { _, _ -> ContainerBoundsSpec }
+
+/**
+ * El spring de [AppContainerBoundsTransform], construido UNA vez: los valores (damping/stiffness) son
+ * los del token y no se copian — se leen del `SpringSpec` que devuelve el scheme y solo se le añade el
+ * umbral de visibilidad de `Rect`. Si el scheme dejara de devolver un `SpringSpec`, se usa tal cual.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+private val ContainerBoundsSpec: FiniteAnimationSpec<Rect> =
+    MotionScheme.standard().defaultSpatialSpec<Rect>().let { spec ->
+        (spec as? SpringSpec<*>)
+            ?.let { spring<Rect>(it.dampingRatio, it.stiffness, Rect.VisibilityThreshold) }
+            ?: spec
+    }
+
+/**
+ * Cambio de COLOR que acompaña a una transición de pantalla — hoy, el `ColorScheme` propio de un
+ * detalle de artista o de álbum, que se deriva de la imagen de SU header (ver `DetailContentTheme`).
+ *
+ * Comparte [SCREEN_TRANSFORM_MS] con [AppBoundsTransform] y con el slide del `NavHost` por el mismo
+ * motivo que ellos entre sí: la carátula que viaja hacia el header y el color que sale de esa misma
+ * carátula son **una sola cosa** para quien mira. Si el color acabara antes, la pantalla ya estaría
+ * teñida mientras la portada todavía va por el aire; si acabara después, la portada aterrizaría y el
+ * color seguiría moviéndose por detrás.
+ *
+ * **La curva sí es distinta, y tiene que serlo**: los tokens *spatial* sobrepasan (y1 > 1) y eso
+ * sobre un color EXTRAPOLA fuera del segmento entre los dos valores — la regla de la sección de
+ * arriba. Se usa la curva de *effects* de la misma familia: misma duración, sin rebote.
+ */
+val AppScreenColorSpec: FiniteAnimationSpec<Color> =
+    tween(SCREEN_TRANSFORM_MS, easing = ExpressiveDefaultEffectsEasing)
 
 // ============================== APARICIÓN VERTICAL ==============================
 
@@ -407,70 +497,170 @@ fun appSheetExit(): ExitTransition =
     slideOutVertically(tween(SCREEN_EXIT_MS, easing = ScreenExitEasing)) { it } +
         fadeOut(tween(EXPRESSIVE_FAST_EFFECTS_MS, easing = ExpressiveFastEffectsEasing))
 
+/**
+ * Enter/exit de una superficie que HOSPEDA UNA PUNTA DE SHARED ELEMENT (hoy: la píldora, que morfa
+ * hacia el reproductor). Dos propiedades, y las dos son load-bearing:
+ *
+ * **1. Solo fundido, nunca slide.** Un slide del CONTENEDOR compite con el morph, que ya gobierna la
+ * posición — y peor, desplaza los bounds que el `SharedTransitionScope` lee, que es lo que hacía
+ * aterrizar la carátula desde el borde inferior al cerrar.
+ *
+ * **2. Dura [SCREEN_TRANSFORM_MS], igual que [AppBoundsTransform].** Un shared element vive atado a su
+ * `AnimatedVisibilityScope`: **cuando esa transición termina, la punta deja de participar**. Con el
+ * fundido en la duración de *effects* (200/150 ms) contra los 500 del morph, el shared element perdía
+ * una de sus dos puntas a un tercio del camino — la píldora ya se había asentado (o descompuesto)
+ * mientras la portada seguía viajando. Ese desajuste llevaba ahí desde siempre (`appSheetEnter/Exit`
+ * son 350/300) y es la razón de fondo de que el morph "no se viera": no es que estuviera mal
+ * configurado, es que se le cortaba el suelo.
+ *
+ * O sea que estas duraciones NO son de effects aunque lo único que se anime sea una opacidad: quien
+ * manda aquí es el morph al que acompañan. Si cambia [SCREEN_TRANSFORM_MS], cambian con él.
+ */
+fun appFadeEnter(): EnterTransition =
+    fadeIn(tween(SCREEN_TRANSFORM_MS, easing = ExpressiveDefaultEffectsEasing))
+
+/** Contrario de [appFadeEnter]. Misma duración: ver el porqué en su KDoc. */
+fun appFadeExit(): ExitTransition =
+    fadeOut(tween(SCREEN_TRANSFORM_MS, easing = ExpressiveDefaultEffectsEasing))
+
+/**
+ * Cruce de contenidos de un *container transform* (`sharedBounds`), variante **solo el saliente se
+ * disuelve** (el `FADE_MODE_OUT` de `MaterialContainerTransform`): el ENTRANTE aparece SÓLIDO
+ * ([EnterTransition.None]) y el SALIENTE se funde encima. El entrante no se funde porque el
+ * `sharedBounds` envuelve la superficie ENTERA (fondo incluido); un `fadeIn` la volvería translúcida y
+ * se vería "aparecer transparente y luego sólida" en vez de crecer sólida.
+ *
+ * **Las dos puntas usan exit con DURACIÓN DISTINTA, y no es capricho** — es lo que evita el mosaico de
+ * upscaling sin dejar nada vacío. Las dos usan `scaleToBounds`, que ESCALA el contenido en vez de
+ * re-medirlo, así que al agrandarse se pixela:
+ *  - **Píldora** (superficie chica) → [appContainerContentExitFast]: al ABRIR es la saliente y su rect
+ *    crece, así que se desvanece en el primer tramo, antes de que el mosaico se note.
+ *  - **Player** (superficie grande) → [appContainerContentExit] con el token *slow* de effects
+ *    ([EXPRESSIVE_SLOW_EFFECTS_MS], 300): al CERRAR es el saliente y su rect ENCOGE, así que no se
+ *    pixela y puede quedarse cubriendo a la píldora entrante —que arranca escalada— hasta que ésta
+ *    casi se asienta. **La duración va atada al bounds** ([AppContainerBoundsTransform], que asienta
+ *    a ~330 ms): apagarse un poco ANTES de que el bounds asiente, no después — con un fade más largo
+ *    (500) el player seguía visible encogido con el bounds ya quieto y su contenido (el chip de origen)
+ *    se veía como un RESIDUO sobre la píldora ya puesta; y más corto tampoco: estuvo en 200 (17 ago,
+ *    madrugada) acompañando al cierre acortado que se revirtió (ver ese KDoc), y a esa duración el
+ *    player se había disuelto cuando el morph apenas iba por la mitad — el cierre se leía como un
+ *    parpadeo, no como una superficie que encoge.
+ *
+ * El exit del saliente es además lo que MANTIENE VIVA su punta esos ms; con exit 0 el morph de bounds
+ * no tendría ventana y saltaría (por eso el rápido no es instantáneo).
+ */
+fun appContainerContentEnter(): EnterTransition = EnterTransition.None
+
+/** Exit del container transform para la superficie GRANDE (el player): dura casi lo que el bounds. Ver KDoc arriba. */
+fun appContainerContentExit(): ExitTransition =
+    fadeOut(tween(EXPRESSIVE_SLOW_EFFECTS_MS, easing = ExpressiveSlowEffectsEasing))
+
+/** Exit RÁPIDO del container transform, para la superficie CHICA (la píldora) — ver [appContainerContentExit]. */
+fun appContainerContentExitFast(): ExitTransition =
+    fadeOut(tween(EXPRESSIVE_FAST_EFFECTS_MS, easing = ExpressiveFastEffectsEasing))
+
+/*
+ * La RAMA saliente del `AnimatedContent` de la capa del reproductor NO lleva exit propio: usa
+ * `ExitTransition.KeepUntilTransitionsFinished` (ver `PlayerOverlay`), que la mantiene viva hasta que
+ * el bounds del `sharedBounds` asienta, por construcción y sin ninguna duración elegida a mano. Hubo
+ * aquí dos fades para eso (350 abriendo / 300 cerrando, derivados de los springs) y se quitaron el
+ * 17 ago: un fundido sobre una Box a pantalla completa obliga a HWUI a un `saveLayer` offscreen de la
+ * pantalla ENTERA por frame ("alpha caused saveLayer 1080x2400" en atrace), que era buena parte del
+ * coste del RenderThread durante el morph. Lo único que se funde es el CONTENIDO de la superficie.
+ */
+
+
 // ============================== NAVEGACIÓN ==============================
 
 /**
- * Divisor del recorrido horizontal de AMBAS pantallas: cada una se desplaza `ancho / 3`.
+ * Divisor del recorrido horizontal de AMBAS caras de un *shared axis X*: cada una se desplaza
+ * `ancho / 3`. Hoy lo usa el ONBOARDING (sus pasos son un flujo lateral, que es para lo que el spec
+ * reserva el eje X); el NavHost dejó de usarlo el 16 ago al pasar al eje Z (ver abajo).
  *
- * **Ninguna recorre el ancho completo, y eso es del spec, no una economía**: en el patrón *forward
- * and backward* de Material, Android acompaña el deslizamiento con un FADE precisamente para no
- * tener que mover las pantallas de un borde al otro. El desplazamiento comunica la dirección
- * (adelante / atrás) y la opacidad hace el trabajo de sustituir una por otra; con el ancho completo
- * el gesto se lee como dos hojas independientes cruzándose y se pierde la jerarquía.
- *
- * Que las dos recorran LO MISMO es lo que las convierte en un *shared axis* de verdad: se mueven
- * como una sola pieza en un eje, en vez de una tapando a la otra. (Hasta el 30 jul la entrante venía
- * desde `it` —el ancho entero— y solo la saliente cedía un tercio, o sea un paralaje; el kdoc de
- * entonces daba por bueno el ancho completo para la que llega, que es justo lo que el spec descarta.)
- *
- * Esto es además lo que hace que el **predictive back** tenga algo que enseñar: durante el gesto el
- * sistema recorre la transición hacia atrás, y sin `exitTransition`/`popEnterTransition` declaradas
- * el recorrido de la pantalla saliente es cero — el gesto arrastra una capa sobre un fondo quieto.
+ * **Ninguna recorre el ancho completo, y eso es del spec, no una economía**: Material acompaña el
+ * deslizamiento con un FADE precisamente para no tener que mover las caras de un borde al otro. El
+ * desplazamiento comunica la dirección y la opacidad hace el trabajo de sustituir una por otra; con
+ * el ancho completo el gesto se lee como dos hojas independientes cruzándose y se pierde la
+ * jerarquía. Que las dos recorran LO MISMO es lo que las convierte en un *shared axis* de verdad: se
+ * mueven como una sola pieza en un eje, en vez de una tapando a la otra.
  */
 const val SCREEN_SLIDE_DIVISOR = 3
 
+/**
+ * Escala de la que LLEGA al arrancar (adelante) y de la que se VA al terminar (atrás) en el shared
+ * axis Z: el hijo nace un poco más chico que la pantalla y crece hasta ocuparla. Es el
+ * `incomingStartScale` de `ScaleProvider` en MDC-Android (`MaterialSharedAxis` con eje Z), la
+ * implementación de referencia del patrón.
+ */
+const val SHARED_AXIS_Z_NEAR_SCALE = 0.8f
+
+/**
+ * Escala de la que se VA al terminar (adelante) y de la que LLEGA al arrancar (atrás): el padre se
+ * hunde "hacia el usuario", ligeramente más grande, mientras se funde. `outgoingEndScale` de ese
+ * mismo `ScaleProvider`.
+ */
+const val SHARED_AXIS_Z_FAR_SCALE = 1.1f
+
 /*
- * Patrón **shared axis X** del spec: las dos pantallas se desplazan en el mismo eje mientras cruzan
- * su opacidad. El MOVIMIENTO va con [SCREEN_TRANSFORM_MS] (default spatial) porque las rutas de
- * detalle llevan un shared element —la foto del artista, la portada del álbum— y su
+ * Patrón **shared axis Z** del spec: padre → hijo. Es el eje que Material asigna a la navegación
+ * jerárquica ("a parent-child navigation transitions along the z-axis"); el X es para flujos
+ * laterales (onboarding, pasos) y el Y para steppers. Hasta el 16 ago el NavHost usaba X — dos caras
+ * deslizándose un tercio— y con la fase 2 del container transform se corrigió el eje en vez de
+ * añadir otro patrón: abrir un artista, un álbum o un ajuste es bajar un nivel, no ir hacia un lado.
+ * Consecuencia práctica de elegir Z sobre un container transform por tile: **cero maquinaria por
+ * ítem** en grillas y carruseles (lo que acaba de costar el lag de scroll en "Todas"), y el
+ * predictive back recorre la misma escala que hace el sistema entre actividades.
+ *
+ * Al ir ADELANTE la que llega crece de [SHARED_AXIS_Z_NEAR_SCALE] a 1 y la que se va se hunde de 1 a
+ * [SHARED_AXIS_Z_FAR_SCALE]; al volver, exactamente al revés (el hijo se encoge hacia
+ * [SHARED_AXIS_Z_NEAR_SCALE], el padre vuelve desde [SHARED_AXIS_Z_FAR_SCALE]). El MOVIMIENTO —la
+ * escala— va con [SCREEN_TRANSFORM_MS] y [ScreenSlideEasing] (default spatial con el sobrepaso
+ * recortado: sobre una escala, un 1,4 % de exceso sería un latido de la pantalla entera) porque las
+ * rutas de detalle llevan un shared element —la foto del artista, la portada del álbum— y su
  * [AppBoundsTransform] tiene que durar exactamente lo mismo que la pantalla que lo transporta.
  *
- * La OPACIDAD va aparte y más corta (tokens de effects, 200 al entrar / 150 al salir), que es como
- * lo define el spec: la pantalla que llega se hace opaca mucho antes de terminar de moverse, así
- * que el usuario lee contenido y no un fantasma deslizándose media pantalla.
+ * La OPACIDAD va aparte y más corta (tokens de effects, 200 al entrar / 150 al salir), como en el X
+ * de antes: la que llega se hace opaca mucho antes de terminar de crecer, así que el usuario lee
+ * contenido y no un fantasma escalando media pantalla; la que se va se apaga rápido para que las dos
+ * no convivan semitransparentes una encima de la otra (en Z ocupan el mismo sitio, no lados
+ * distintos).
  */
 
-/** Adelante: la que llega entra desde la derecha, un tercio (ver [SCREEN_SLIDE_DIVISOR]). */
+/** Adelante: el hijo nace chico y crece hasta ocupar la pantalla. */
 val appNavForwardEnter: AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition = {
-    slideInHorizontally(tween(SCREEN_TRANSFORM_MS, easing = ScreenSlideEasing)) {
-        it / SCREEN_SLIDE_DIVISOR
-    } + fadeIn(tween(EXPRESSIVE_DEFAULT_EFFECTS_MS, easing = ExpressiveDefaultEffectsEasing))
+    scaleIn(
+        animationSpec = tween(SCREEN_TRANSFORM_MS, easing = ScreenSlideEasing),
+        initialScale = SHARED_AXIS_Z_NEAR_SCALE
+    ) + fadeIn(tween(EXPRESSIVE_DEFAULT_EFFECTS_MS, easing = ExpressiveDefaultEffectsEasing))
 }
 
-/** Adelante: la anterior cede hacia la izquierda el MISMO tercio. */
+/** Adelante: el padre se hunde hacia el usuario mientras se funde. */
 val appNavForwardExit: AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition = {
-    slideOutHorizontally(tween(SCREEN_TRANSFORM_MS, easing = ScreenSlideEasing)) {
-        -it / SCREEN_SLIDE_DIVISOR
-    } + fadeOut(tween(EXPRESSIVE_FAST_EFFECTS_MS, easing = ExpressiveFastEffectsEasing))
+    scaleOut(
+        animationSpec = tween(SCREEN_TRANSFORM_MS, easing = ScreenSlideEasing),
+        targetScale = SHARED_AXIS_Z_FAR_SCALE
+    ) + fadeOut(tween(EXPRESSIVE_FAST_EFFECTS_MS, easing = ExpressiveFastEffectsEasing))
 }
 
-/** Atrás: la anterior regresa desde la izquierda. */
+/** Atrás: el padre vuelve desde donde se había hundido. */
 val appNavBackEnter: AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition = {
-    slideInHorizontally(tween(SCREEN_TRANSFORM_MS, easing = ScreenSlideEasing)) {
-        -it / SCREEN_SLIDE_DIVISOR
-    } + fadeIn(tween(EXPRESSIVE_DEFAULT_EFFECTS_MS, easing = ExpressiveDefaultEffectsEasing))
+    scaleIn(
+        animationSpec = tween(SCREEN_TRANSFORM_MS, easing = ScreenSlideEasing),
+        initialScale = SHARED_AXIS_Z_FAR_SCALE
+    ) + fadeIn(tween(EXPRESSIVE_DEFAULT_EFFECTS_MS, easing = ExpressiveDefaultEffectsEasing))
 }
 
-/** Atrás: el detalle se va hacia la derecha, por donde vino. */
+/** Atrás: el hijo se encoge hacia donde nació y se funde. */
 val appNavBackExit: AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition = {
-    slideOutHorizontally(tween(SCREEN_TRANSFORM_MS, easing = ScreenSlideEasing)) {
-        it / SCREEN_SLIDE_DIVISOR
-    } + fadeOut(tween(EXPRESSIVE_FAST_EFFECTS_MS, easing = ExpressiveFastEffectsEasing))
+    scaleOut(
+        animationSpec = tween(SCREEN_TRANSFORM_MS, easing = ScreenSlideEasing),
+        targetScale = SHARED_AXIS_Z_NEAR_SCALE
+    ) + fadeOut(tween(EXPRESSIVE_FAST_EFFECTS_MS, easing = ExpressiveFastEffectsEasing))
 }
 
-// NO hay par vertical para el NavHost. El único destino con sensación de hoja es el reproductor, y
-// ese NO es una ruta: es una capa hermana del NavHost (ver `PlayerOverlay`). Declararlo "por si
-// acaso" es lo que convirtió el viejo objeto `Transitions` en seis lambdas que no usaba nadie.
+// El reproductor NO es una ruta del NavHost: es una capa que hace *container transform* con la
+// píldora (ver [com.qhana.siku.ui.PlayerOverlay]). Su morph lo pinta el `sharedBounds` de contenedor,
+// no una transición de este archivo; abrir/cerrar el player no es navegación.
 
 /**
  * Rutas sin dirección propia (hub ↔ hub): solo cruce de opacidad, el patrón *fade through* del spec.

@@ -8,6 +8,7 @@ import android.util.Log
 import com.qhana.siku.R
 import com.qhana.siku.data.config.AppConfig
 import com.qhana.siku.data.model.Song
+import com.qhana.siku.data.remote.HttpStatus
 import com.qhana.siku.data.repository.ArtworkRepository
 import com.qhana.siku.data.repository.IMusicRepository
 import com.qhana.siku.data.util.NetworkManager
@@ -180,9 +181,20 @@ class MusicDownloader @Inject constructor(
 
             return@withContext okHttpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    // 408/429/5xx son recuperables; el resto de 4xx solo se arregla con URL
-                    // fresca (lo maneja runDownloadWithRetry) — si reincide, es permanente.
-                    val kind = if (response.code == 408 || response.code == 429 || response.code >= 500) {
+                    // 408/5xx (transporte) y 429 (throttle) son recuperables; el resto de 4xx solo
+                    // se arregla con URL fresca (lo maneja runDownloadWithRetry) — si reincide, es
+                    // permanente. El 429 se compone EXPLÍCITO porque `isRetriableTransport` lo deja
+                    // fuera a propósito (ver [HttpStatus]): aquí sí entra, porque no se reintenta en
+                    // caliente sino que se reprograma con el `nextRetryAt` de la cola persistente,
+                    // que es justo esperar en vez de insistir.
+                    //
+                    // Aquí NO hace falta distinguir el 503-throttle del 503-caído como en la ruta de
+                    // Graph: los dos son transitorios y acaban en la misma cola. Y esta petición va
+                    // contra el host de CONTENIDO con una URL firmada, que no comparte el throttling
+                    // de la API.
+                    val kind = if (HttpStatus.isRetriableTransport(response.code) ||
+                        response.code == HttpStatus.TOO_MANY_REQUESTS
+                    ) {
                         ErrorKind.TRANSIENT
                     } else {
                         ErrorKind.PERMANENT
@@ -378,23 +390,27 @@ class MusicDownloader @Inject constructor(
 
             val newPath = "file://${finalFile.absolutePath}"
             musicRepository.updateSongUrl(song.id, newPath)
-            audioFileAnalyzer.updateSongWithAnalysis(song, newPath, analysis, musicRepository)
-            // Género PEGADO al resto de la metadata, y no al final del bloque: el tag ya lo trae
-            // este mismo análisis, pero entre medias se lee el ReplayGain (abre el archivo con
-            // JAudioTagger, puede lanzar) y cualquier fallo ahí dejaba la canción descargada y
-            // sin género para siempre. "" = analizado sin género.
-            musicRepository.updateGenre(song.id, analysis.genre ?: "")
-            // Bytes recién bajados de la fuente = la canción ya NO está corrupta. Sin esto,
-            // una marcada por PlaybackErrorRecoveryUseCase quedaba corrupta PARA SIEMPRE (no
-            // existía el camino de vuelta) y la reparación automática de SyncViewModel la
-            // redescargaba en CADA arranque de la app — bucle infinito.
-            musicRepository.clearCorrupted(song.id)
 
-            // ReplayGain: leer los tags del archivo local ya descargado y persistirlos.
-            // Solo se hace una vez (al indexar); la reproducción luego solo lee de la DB.
-            val rg = com.qhana.siku.data.util.ReplayGainReader.read(finalFile.absolutePath)
-            if (!rg.isEmpty || rg.trackPeak != null || rg.albumPeak != null) {
-                musicRepository.updateReplayGain(song.id, rg.trackGainDb, rg.trackPeak, rg.albumGainDb, rg.albumPeak)
+            // A PARTIR DE AQUÍ LA CANCIÓN YA ESTÁ DESCARGADA: el archivo está en disco y el path en
+            // BD es `file://`. Todo lo que sigue es ENRIQUECIMIENTO (metadata, género, ReplayGain), y
+            // su fallo NO puede convertir una descarga buena en un `Result.Error`. Antes iba en el
+            // try exterior, así que un throw de `ReplayGainReader.read` (JAudioTagger abre el archivo,
+            // lanza en algunos) devolvía Error DESPUÉS de haber commiteado el path — el chip decía
+            // "Descargado" y el snackbar "Fallo" sobre la MISMA descarga. `clearCorrupted` va primero
+            // (crítico: sin él, una canción marcada corrupta se redescargaría en cada arranque).
+            runCatching {
+                musicRepository.clearCorrupted(song.id)
+                audioFileAnalyzer.updateSongWithAnalysis(song, newPath, analysis, musicRepository)
+                musicRepository.updateGenre(song.id, analysis.genre ?: "") // "" = analizado sin género
+                // ReplayGain: leer los tags del archivo local ya descargado y persistirlos.
+                // Solo se hace una vez (al indexar); la reproducción luego solo lee de la DB.
+                val rg = com.qhana.siku.data.util.ReplayGainReader.read(finalFile.absolutePath)
+                if (!rg.isEmpty || rg.trackPeak != null || rg.albumPeak != null) {
+                    musicRepository.updateReplayGain(song.id, rg.trackGainDb, rg.trackPeak, rg.albumGainDb, rg.albumPeak)
+                }
+            }.onFailure { e ->
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                Log.w(TAG, "Enriquecimiento tras descargar ${song.title} falló; la canción está descargada y es reproducible", e)
             }
 
             val finalSong = musicRepository.getSongById(song.id).getOrNull() ?: song.copy(path = newPath)

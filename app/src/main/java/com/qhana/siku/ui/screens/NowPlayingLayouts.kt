@@ -7,6 +7,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.qhana.siku.data.model.PlaybackOrigin
 import com.qhana.siku.data.model.PlaybackState
@@ -15,7 +16,6 @@ import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.model.ToolbarActionState
 import com.qhana.siku.ui.components.*
 import com.qhana.siku.ui.state.NowPlayingUiState
-import dev.chrisbanes.haze.HazeState
 import kotlinx.coroutines.flow.StateFlow
 
     // --- Orientation Layouts ---
@@ -53,6 +53,8 @@ internal fun NowPlayingPortrait(
     onToggleDetailedFormat: () -> Unit,
     /** Ajustes → Reproducción: barra de progreso ondulada (Expressive). */
     wavyProgress: Boolean,
+    /** Grosor de la barra de progreso (Ajustes -> Apariencia); vale para los dos modos. */
+    progressThickness: Dp,
     playerActions: PlayerActions,
     onArtistClick: (String) -> Unit,
     onAlbumClick: (String) -> Unit,
@@ -64,8 +66,6 @@ internal fun NowPlayingPortrait(
     onSleepTimerClick: () -> Unit,
     onShareSong: () -> Unit,
     toolbarConfig: List<ToolbarActionState>,
-    hazeState: HazeState,
-    glassTint: Color,
     sharedTransitionScope: SharedTransitionScope?,
     artSharedKey: Any?,
     animatedVisibilityScope: AnimatedVisibilityScope?,
@@ -120,12 +120,13 @@ internal fun NowPlayingPortrait(
             showBuffer = showBuffer,
             onSeek = playerActions.onSeek,
             trackColor = playButtonColor,
-            inactiveTrackColor = playButtonColor.copy(alpha = 0.2f),
+            inactiveTrackColor = playButtonColor,
             textColor = variantColor,
             format = format,
             detailedFormat = detailedFormat,
             onToggleDetailedFormat = onToggleDetailedFormat,
             wavy = wavyProgress,
+            trackHeight = progressThickness,
             isPlaying = isPlayingOrBuffering
         )
 
@@ -139,7 +140,8 @@ internal fun NowPlayingPortrait(
             songId = song.id,
             accent = revealAccent,
             accentContent = playButtonContentColor,
-            // Sin reveal mientras el player sube desde la píldora (mismo criterio que el blur).
+            // Sin reveal mientras el player sube desde la píldora: la transición ya está moviendo
+            // toda la pantalla y encadenar encima el barrido de acento se lee como un tirón.
             revealEnabled = animatedVisibilityScope?.transition?.let {
                 it.currentState == it.targetState
             } ?: true,
@@ -223,14 +225,16 @@ internal fun NowPlayingLandscape(
     // Acento TARGET sin animar: lo consume AccentRevealGroup (la ventana es la transición).
     revealAccent: Color,
     origin: PlaybackOrigin,
-    /** Fondo sólido vs degradado: el chip de origen lo necesita para no fundirse con el fondo. */
-    solidBackground: Boolean,
+    /** Color real bajo la barra: de él deriva el chip de origen su relleno para no fundirse. */
+    backgroundColor: Color,
     format: AudioFormatInfo,
     /** Chip de formato con ficha técnica (bitrate/bits + frecuencia) en vez de solo el contenedor. */
     detailedFormat: Boolean,
     onToggleDetailedFormat: () -> Unit,
     /** Ajustes → Reproducción: barra de progreso ondulada (Expressive). */
     wavyProgress: Boolean,
+    /** Grosor de la barra de progreso (Ajustes -> Apariencia); vale para los dos modos. */
+    progressThickness: Dp,
     playerActions: PlayerActions,
     onArtistClick: (String) -> Unit,
     onAlbumClick: (String) -> Unit,
@@ -244,8 +248,6 @@ internal fun NowPlayingLandscape(
     onSleepTimerClick: () -> Unit,
     onShareSong: () -> Unit,
     toolbarConfig: List<ToolbarActionState>,
-    hazeState: HazeState,
-    glassTint: Color,
     sharedTransitionScope: SharedTransitionScope?,
     artSharedKey: Any?,
     animatedVisibilityScope: AnimatedVisibilityScope?,
@@ -288,10 +290,8 @@ internal fun NowPlayingLandscape(
                 onBackClick = onBackClick,
                 contentColor = contentColor,
                 accentColor = playButtonColor,
-                hazeState = hazeState,
-                glassTint = glassTint,
                 origin = origin,
-                solidBackground = solidBackground,
+                backgroundColor = backgroundColor,
                 onAmbientMode = onAmbientMode,
                 // El chip pierde su etiqueta: en esta columna el ancho es la mitad y con texto
                 // empujaba a los botones contra los bordes.
@@ -383,12 +383,13 @@ internal fun NowPlayingLandscape(
                 showBuffer = showBuffer,
                 onSeek = playerActions.onSeek,
                 trackColor = playButtonColor,
-                inactiveTrackColor = playButtonColor.copy(alpha = 0.2f),
+                inactiveTrackColor = playButtonColor,
                 textColor = variantColor,
                 format = format,
                 detailedFormat = detailedFormat,
                 onToggleDetailedFormat = onToggleDetailedFormat,
                 wavy = wavyProgress,
+                trackHeight = progressThickness,
                 isPlaying = isPlayingOrBuffering
             )
 
@@ -401,7 +402,8 @@ internal fun NowPlayingLandscape(
                 songId = song.id,
                 accent = revealAccent,
                 accentContent = playButtonContentColor,
-                // Sin reveal mientras el player sube desde la píldora (mismo criterio que el blur).
+                // Sin reveal mientras el player sube desde la píldora: la transición ya está moviendo
+            // toda la pantalla y encadenar encima el barrido de acento se lee como un tirón.
                 revealEnabled = animatedVisibilityScope?.transition?.let {
                     it.currentState == it.targetState
                 } ?: true,

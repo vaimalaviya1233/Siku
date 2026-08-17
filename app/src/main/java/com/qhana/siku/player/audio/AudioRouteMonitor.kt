@@ -13,7 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.awaitClose
-import kotlinx.coroutines.flow.SharingStarted
+import com.qhana.siku.data.util.WhileUiSubscribed
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -50,7 +50,7 @@ enum class AudioRoute(internal val priority: Int, val absoluteVolumeLikely: Bool
 /**
  * Observa la ruta de salida de audio activa.
  *
- * El flow es FRÍO hasta que alguien lo colecta ([SharingStarted.WhileSubscribed]): el callback del
+ * El flow es FRÍO hasta que alguien lo colecta ([WhileUiSubscribed]): el callback del
  * sistema solo queda registrado mientras hay quien pregunte. Un singleton escuchando cambios de
  * dispositivo para siempre sería gasto puro con la app cerrada.
  *
@@ -83,7 +83,10 @@ class AudioRouteMonitor @Inject constructor(
         awaitClose { audioManager.unregisterAudioDeviceCallback(callback) }
     }
         .distinctUntilChanged()
-        .stateIn(scope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), currentRoute())
+        // Misma política que el resto del estado de la app ([WhileUiSubscribed]): el margen antes
+        // de soltar el callback existe para no desregistrarlo y volver a registrarlo en el sistema
+        // por una rotación, que es el mismo hueco entre colectores que cubre allí.
+        .stateIn(scope, WhileUiSubscribed, currentRoute())
 
     private fun currentRoute(): AudioRoute {
         // API 31+ sabe la respuesta EXACTA: qué dispositivo recibiría audio con estos atributos.
@@ -131,12 +134,4 @@ class AudioRouteMonitor @Inject constructor(
         else -> AudioRoute.OTHER
     }
 
-    private companion object {
-        /**
-         * Margen antes de soltar el callback al dejar de colectar. Cubre el cambio de
-         * configuración (rotar la pantalla recompone la hoja) sin desregistrar y volver a
-         * registrar en el sistema.
-         */
-        const val STOP_TIMEOUT_MS = 5_000L
-    }
 }

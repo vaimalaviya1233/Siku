@@ -16,6 +16,7 @@
     <string name="common_remove_from_favorites">Remove from favorites</string>
     <string name="common_redownload">Download again</string>
     <string name="common_add_to_playlist">Add to playlist</string>
+    <string name="common_add_to_queue">Add to queue</string>
     <string name="common_connecting">Connecting…</string>
     <string name="common_verifying">Verifying…</string>
     <string name="common_recovering">Recovering…</string>
@@ -24,7 +25,7 @@
     <string name="common_create">Create</string>
     <string name="common_save">Save</string>
     <string name="common_back">Back</string>
-    <string name="common_search_songs">Search songs, albums or artists</string>
+    <string name="common_search_songs">Search library</string>
     <string name="common_clear_search">Clear search</string>
     <string name="common_pause">Pause</string>
     <string name="common_next">Next song</string>
@@ -33,6 +34,9 @@
     <string name="common_album_art">Album art</string>
     <string name="common_delete">Delete</string>
     <string name="common_song_options">Song options</string>
+    <string name="common_artist_options">Artist options</string>
+    <string name="common_album_options">Album options</string>
+    <string name="common_genre_options">Genre options</string>
     <string name="common_start">Start</string>
     <string name="common_duration">Duration: %1$s</string>
     <string name="common_unknown">Unknown</string>
@@ -94,6 +98,7 @@
     <!-- ==================== Detail actions (artist/album/playlist) ==================== -->
     <string name="detail_play_all">Play all</string>
     <string name="detail_shuffle">Shuffle</string>
+    <string name="detail_add_all_to_queue">Add all to queue</string>
 
     <!-- ==================== Download manager ==================== -->
     <string name="download_title">Downloads</string>
@@ -125,6 +130,7 @@
     <string name="download_msg_unknown">Download: %1$s (unknown state)</string>
     <string name="download_msg_failed_reason">Failed: %1$s (%2$s)</string>
     <string name="download_msg_failed">Failed: %1$s</string>
+    <string name="download_msg_auto_failed">Couldn\'t download “%1$s” for offline; it\'ll keep streaming</string>
 
     <!-- Download control: pause / stop / storage cap -->
     <string name="download_pause">Pause</string>
@@ -244,6 +250,20 @@
     <string name="queue_empty">The queue is empty</string>
     <string name="queue_save_as_playlist">Save as playlist</string>
     <string name="queue_remove_song">Remove from queue</string>
+    <string name="queue_clear">Clear the queue</string>
+    <!-- SHORT labels for the queue action bar; the full phrase lives in each contentDescription. -->
+    <string name="queue_save_short">Save</string>
+    <string name="queue_clear_short">Clear</string>
+    <string name="queue_cleared">Queue cleared</string>
+    <string name="common_undo">Undo</string>
+    <string name="queue_added">Added to queue</string>
+    <string name="queue_already_in">Already in the queue</string>
+    <!-- Queueing a whole detail screen. %1$d = how many were ACTUALLY added (duplicates excluded). -->
+    <plurals name="queue_added_count">
+        <item quantity="one">%1$d song added to the queue</item>
+        <item quantity="other">%1$d songs added to the queue</item>
+    </plurals>
+    <string name="queue_all_already_in">They are all in the queue already</string>
     <string name="np_close_desc">Close player</string>
     <string name="np_ambient_mode_desc">Ambient mode</string>
     <string name="np_chip_local">LOCAL</string>
@@ -324,6 +344,10 @@
     <string name="lyrics_error_offline_subtitle">Go online to look up the lyrics for this song</string>
     <string name="lyrics_error_provider_title">Couldn\'t load the lyrics</string>
     <string name="lyrics_error_provider_subtitle">LrcLib didn\'t respond</string>
+    <string name="lyrics_error_timeout">The request timed out</string>
+    <string name="lyrics_error_network">Network error</string>
+    <string name="lyrics_error_server">The lyrics server failed</string>
+    <string name="lyrics_error_unknown">Couldn\'t fetch the lyrics</string>
     <string name="common_retry">Retry</string>
     <string name="lyrics_refresh_updated">Lyrics updated</string>
     <string name="lyrics_refresh_unchanged">No changes on LrcLib</string>
@@ -398,7 +422,6 @@
 
     <string name="eq_protection_section">Level protection</string>
     <string name="eq_preamp">Preamp</string>
-    <string name="eq_preamp_apply_suggested">Suggested: %1$s dB</string>
     <string name="eq_limiter">Limiter</string>
     <string name="eq_limiter_desc">Pulls down peaks above the threshold. At 0 dB it only prevents clipping; lower, it compresses.</string>
     <string name="eq_limiter_threshold">Threshold</string>
@@ -406,6 +429,12 @@
     <string name="eq_limiter_meter">Reduction</string>
     <string name="eq_limiter_meter_would">Would reduce</string>
     <string name="eq_limiter_idle">Idle</string>
+
+    <!-- Clarity (harmonic exciter) -->
+    <string name="clarity_section">Clarity</string>
+    <string name="clarity_desc">Adds brightness up top with gentle saturation.</string>
+    <string name="clarity_amount">Amount</string>
+
     <string name="eq_preset_flat">Flat</string>
     <string name="eq_preset_rock">Rock</string>
     <string name="eq_preset_pop">Pop</string>
@@ -416,10 +445,19 @@
     <string name="eq_preset_bass">Bass</string>
     <string name="eq_preset_treble">Treble</string>
     <string name="eq_preset_vocal">Vocal</string>
-    <string name="eq_preset_save">Save preset</string>
-    <string name="eq_preset_save_title">Save preset</string>
-    <string name="eq_preset_name_label">Preset name</string>
-    <string name="eq_preset_label">Preset</string>
+    <string name="eq_profile_save_title">Save profile</string>
+    <string name="eq_profile_name_label">Profile name</string>
+    <string name="eq_profile_save_hint">Saves the whole current sound: the curve, the boosters, the preamp and the limiter.</string>
+    <!-- First step when saving while a profile is already applied. %1$s = its name. -->
+    <string name="eq_profile_update_message">“%1$s” is currently applied. Update it with the current sound, or save a new one?</string>
+    <string name="eq_profile_update_confirm">Update</string>
+    <string name="eq_profile_save_as_new">Save as new</string>
+    <!-- Warning when saving with a name already in use. %1$s = the existing name. -->
+    <string name="eq_profile_overwrite_message">A profile named “%1$s” already exists. Overwrite it with the current sound?</string>
+    <string name="eq_profile_overwrite_confirm">Overwrite</string>
+    <string name="eq_selector_preset">Preset: %1$s</string>
+    <string name="eq_selector_profile">Profile: %1$s</string>
+    <string name="eq_profile_none">—</string>
     <string name="eq_preset_custom">Custom</string>
     <string name="eq_preset_save_short">Save</string>
     <string name="eq_system_short">System</string>
@@ -435,13 +473,11 @@
     <string name="settings_use_system_eq">Use the system equalizer</string>
     <string name="settings_use_system_eq_desc">The player\'s equalizer button opens the system panel (MIUI/manufacturer) instead of the built-in equalizer. Turning this on switches off the built-in one.</string>
 
-    <!-- Per-output EQ profiles and preset management -->
-    <string name="settings_eq_route_profiles">Remember equalizer per device</string>
-    <string name="settings_eq_route_profiles_desc">Keeps separate settings for wired headphones, Bluetooth, USB and the phone speaker. Connecting one restores whatever you last had on it.</string>
-    <string name="settings_eq_presets">Equalizer presets</string>
+    <!-- EQ preset management -->
+    <string name="settings_eq_presets">Equalizer presets and profiles</string>
     <string name="settings_eq_presets_desc">Choose which ones show up in the picker</string>
-    <string name="settings_eq_presets_hint">Hidden presets are not listed in the equalizer, but they are not deleted: you can bring them back whenever you want.</string>
-    <string name="settings_eq_presets_own">Your presets</string>
+    <string name="settings_eq_presets_hint">A preset saves the band curve only; a profile also saves the boosters, the preamp and the limiter. Hidden ones are not listed in the equalizer, but they are not deleted: you can bring them back whenever you want.</string>
+    <string name="settings_eq_profiles_own">Your profiles</string>
     <string name="settings_eq_presets_restore_all">Show the %1$d hidden ones</string>
     <string name="eq_presets_all_hidden">All presets are hidden (Settings → Playback)</string>
 
@@ -475,13 +511,14 @@
     <string name="settings_source_onedrive">OneDrive</string>
     <string name="settings_source_local">Local folder</string>
     <string name="settings_cat_backup_desc">Export or import your playlists on OneDrive</string>
-    <string name="settings_cat_playback_desc">Volume normalization (ReplayGain)</string>
+    <string name="settings_cat_playback_desc">Equalizer, volume and lyrics</string>
     <string name="settings_cat_downloads_desc">Storage cap for downloads</string>
     <string name="settings_cat_appearance_desc">Player colors and background</string>
     <string name="settings_cat_gestures_desc">Swiping and tapping in the player</string>
     <string name="settings_gestures_header">Gestures</string>
     <string name="settings_downloads_header">Downloads</string>
-    <string name="settings_volume_header">Volume (ReplayGain)</string>
+    <string name="settings_volume_header">Audio</string>
+    <string name="settings_replaygain_header">Volume normalization</string>
     <string name="settings_volume_desc">Evens out perceived loudness across songs using the file\'s ReplayGain tags. It only attenuates, never boosts.</string>
     <string name="settings_rg_off">Off</string>
     <string name="settings_rg_track">Per track</string>
@@ -606,6 +643,11 @@
     <string name="settings_solid_bg_desc">Uses a solid theme color instead of the album art gradient.</string>
     <string name="settings_wavy_progress">Wavy progress bar</string>
     <string name="settings_wavy_progress_desc">Uses the animated Material 3 wave in the player. The mini player keeps the thin bar.</string>
+    <string name="settings_progress_bar_header">Progress bar</string>
+    <string name="settings_progress_bar_desc">Mode (flat or wavy) and thickness, with live preview.</string>
+    <string name="settings_progress_thickness">Bar thickness</string>
+    <string name="settings_progress_thickness_desc">Applies to both the flat and the wavy player bar.</string>
+    <string name="settings_progress_thickness_value">%1$d dp</string>
     <string name="settings_mini_player_rect">Rectangular mini player</string>
     <string name="settings_mini_player_rect_desc">Uses rounded corners on the floating bar instead of the pill shape.</string>
     <string name="settings_player_gestures">Player gestures</string>
@@ -778,7 +820,34 @@
     <string name="error_playback_network_persistent">Persistent network error</string>
     <string name="error_playback_file_not_found">File not found</string>
     <string name="error_playback_format_unsupported">This format can\'t be played</string>
+    <string name="error_download_link_failed">Couldn\'t get the download link</string>
+
+    <!-- Authentication (OneDrive / MSAL) -->
+    <string name="error_auth_unavailable">The sign-in service is unavailable</string>
+    <string name="error_auth_signin_failed">Couldn\'t sign in</string>
+    <string name="error_auth_consent_failed">Couldn\'t grant the permission</string>
+    <string name="error_auth_no_account">No account is signed in</string>
+    <string name="error_auth_token_refresh">Your session expired. Sign in again</string>
+    <string name="error_auth_generic">Couldn\'t complete sign-in</string>
+
+    <!-- Generic errors (AppError) -->
+    <string name="error_generic">Something went wrong</string>
+    <string name="error_network_generic">Connection error</string>
+    <string name="error_network_timeout">The request timed out</string>
+    <string name="error_data_generic">Data error</string>
+    <string name="error_notfound_generic">Not found</string>
+    <string name="error_session_generic">Session problem. Reconnect OneDrive</string>
 
     <!-- ==================== Permissions ==================== -->
 
+
+    <!-- Slow session restore at startup (see AuthViewModel.sessionRestoreSlow) -->
+    <string name="session_restore_slow_title">We\'re having trouble getting your session</string>
+    <string name="session_restore_slow_body">We\'re still trying. This can happen if the phone\'s storage is nearly full or the system is busy.</string>
+
+    <!-- Scan given up on (see ScanWorker.recordingFailure) -->
+    <string name="sync_failed_auth">Couldn\'t sync: reconnect your OneDrive account</string>
+    <string name="sync_failed_network">Couldn\'t sync: connection problem</string>
+    <string name="sync_failed_server">Couldn\'t sync: OneDrive isn\'t responding</string>
+    <string name="sync_failed_generic">Couldn\'t sync your library</string>
 </resources>

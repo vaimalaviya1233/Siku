@@ -21,7 +21,8 @@ import javax.inject.Singleton
  * baratas cuando no hay nada que hacer:
  *
  *  - [heal] en cada arranque: URIs que apuntan a un archivo que ya no existe (una limpieza de
- *    caché del sistema, un borrado externo).
+ *    caché del sistema, un borrado externo). Va GATEADO por el conteo del directorio de covers —
+ *    ver su kdoc: barato de verdad solo desde que existe ese gate.
  *  - [resolvePendingArtwork] al final de cada sync: canciones sin portada cuya resolución sigue
  *    pendiente. Cubre por igual a las recién indexadas y a las que arrastran el fallo de
  *    escritura de la 1.0.1, sin un camino especial para estas últimas.
@@ -45,6 +46,7 @@ class ArtworkHealingManager @Inject constructor(
     private val musicRepository: IMusicRepository,
     private val artworkRepository: ArtworkRepository,
     private val audioFileAnalyzer: AudioFileAnalyzer,
+    private val musicPreferences: com.qhana.siku.data.preferences.MusicPreferences,
     private val appLogger: AppLogger
 ) {
     companion object { private const val TAG = "ArtworkHealing" }
@@ -67,8 +69,38 @@ class ArtworkHealingManager @Inject constructor(
         data object Unavailable : Extraction
     }
 
-    suspend fun heal() = mutex.withLock {
-        withContext(Dispatchers.IO) { healOrphans() }
+    /**
+     * Barrido de carátulas huérfanas, GATEADO por el conteo de archivos del directorio de covers.
+     *
+     * Corría entero en cada arranque del PROCESO —que no es cada vez que el usuario abre la app: lo
+     * levanta también un worker, el widget o la notificación—, y "entero" es una consulta sin
+     * índice sobre `songs` que devuelve las ENTIDADES completas de casi toda la biblioteca más un
+     * `stat` por fila. Con 777 canciones eso son 777 objetos y 777 syscalls por arranque para
+     * atender un caso que ocurre casi nunca (limpiar la caché del sistema, un borrado externo).
+     *
+     * La señal correcta es la que ya usa el refresco local: un huérfano solo puede aparecer si un
+     * archivo DESAPARECIÓ del directorio, así que basta comparar cuántos hay con cuántos había
+     * ([AudioFileAnalyzer.coverFileCount], una operación de disco). Se barre si el conteo BAJÓ, si
+     * nunca se midió, o si el directorio no se pudo listar — las tres son "no puedo descartar que
+     * haya huérfanos", que es la única respuesta segura.
+     *
+     * La marca se actualiza SIEMPRE, también cuando el conteo sube: las carátulas nuevas de un sync
+     * no invalidan ningún URI, y `pruneCovers` solo borra lo que ya no referencia nadie, así que
+     * ninguna de las dos variaciones normales crea huérfanos.
+     *
+     * @param force salta el gate. Lo usa el PULL-TO-REFRESH, que es un gesto explícito de "repara lo
+     *        que esté roto": ahí el coste es lo que el usuario está pidiendo pagar, y descartarlo
+     *        por una heurística dejaría sin salida al único caso que la heurística no ve (un archivo
+     *        que desaparece y otro que se añade entre dos comprobaciones, empatando el conteo).
+     */
+    suspend fun heal(force: Boolean = false) = mutex.withLock {
+        withContext(Dispatchers.IO) {
+            val current = audioFileAnalyzer.coverFileCount()
+            val previous = musicPreferences.loadCoverFileCount()
+            val mustScan = force || current < 0 || previous < 0 || current < previous
+            if (mustScan) healOrphans()
+            if (current >= 0 && current != previous) musicPreferences.saveCoverFileCount(current)
+        }
     }
 
     /**

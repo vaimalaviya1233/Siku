@@ -123,9 +123,9 @@ object AppModule {
         // y ralentiza tanto el escaneo delta como la resolución de URLs. HTTP/1.1 abre una
         // conexión por request con su propia ventana → escaneo y descargas vuelven a ir rápido.
         return OkHttpClient.Builder()
-            .connectTimeout(AppConfig.API_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-            .readTimeout(AppConfig.API_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-            .writeTimeout(AppConfig.API_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .connectTimeout(AppConfig.API_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .readTimeout(AppConfig.API_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .writeTimeout(AppConfig.API_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .protocols(listOf(Protocol.HTTP_1_1))
             .addInterceptor(authRefreshInterceptor)
@@ -154,7 +154,7 @@ object AppModule {
         // la descarga), lo mismo que el watchdog anti-stall de MusicDownloader: se derivan de
         // él para que un cuelgue lo diagnostique siempre el watchdog, que sabe clasificarlo.
         return OkHttpClient.Builder()
-            .connectTimeout(AppConfig.API_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .connectTimeout(AppConfig.API_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .readTimeout(MusicDownloader.SOCKET_IDLE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             .writeTimeout(MusicDownloader.SOCKET_IDLE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             .retryOnConnectionFailure(true)
@@ -211,8 +211,11 @@ object AppModule {
     ): DataSource.Factory {
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs((AppConfig.API_TIMEOUT_SECONDS * 1000).toInt())
-            .setReadTimeoutMs((AppConfig.API_TIMEOUT_SECONDS * 1000).toInt())
+            // La conversión va por `TimeUnit` y no por un `* 1000` escrito a mano: el factor
+            // deja de ser un literal que hay que reconocer, y el tipo de la unidad viaja con
+            // la llamada.
+            .setConnectTimeoutMs(TimeUnit.SECONDS.toMillis(AppConfig.API_CONNECT_TIMEOUT_SECONDS).toInt())
+            .setReadTimeoutMs(TimeUnit.SECONDS.toMillis(AppConfig.API_READ_TIMEOUT_SECONDS).toInt())
         val defaultFactory = androidx.media3.datasource.DefaultDataSource.Factory(context, httpDataSourceFactory)
         // ResolvingDataSource intercepta URIs onedrive://<remoteId> y las convierte
         // a URLs firmadas reales en el momento de apertura. Ya no pre-fetcheamos URLs.

@@ -50,6 +50,18 @@ import com.qhana.siku.data.repository.ArtworkRepository
 
 class QueueWidgetReceiver : GlanceAppWidgetReceiver() {
     override val glanceAppWidget: GlanceAppWidget = QueueWidget()
+
+    // Ver [PlayerWidgetReceiver]: alta/baja de widgets despierta o duerme la observación de
+    // [WidgetBridge] a través de [WidgetPresence].
+    override fun onEnabled(context: Context) {
+        super.onEnabled(context)
+        WidgetPresence.notifyChanged()
+    }
+
+    override fun onDisabled(context: Context) {
+        super.onDisabled(context)
+        WidgetPresence.notifyChanged()
+    }
 }
 
 /**
@@ -117,6 +129,10 @@ private fun QueueWidgetContent(snapshot: WidgetSnapshot, artwork: Bitmap?) {
         if (snapshot.songId == null) {
             // Empty state tonal (no una línea suelta): nota musical en círculo
             // secondaryContainer + título + pista de acción. Todo el área abre la app.
+            //
+            // Aquí SÍ se abre la biblioteca y no el reproductor (al revés que el resto del widget):
+            // sin nada sonando, mandar al NowPlaying dejaría al usuario en una pantalla vacía en vez
+            // de donde puede elegir música.
             Box(
                 modifier = GlanceModifier
                     .fillMaxSize()
@@ -179,7 +195,7 @@ private fun ColumnScope.QueueWidgetBody(snapshot: WidgetSnapshot, artwork: Bitma
                 contentScale = ContentScale.Crop,
                 modifier = GlanceModifier
                     .size(48.dp)
-                    .clickable(actionStartActivity<MainActivity>())
+                    .clickable(openNowPlayingAction(context))
             )
         } else {
             Box(
@@ -187,7 +203,7 @@ private fun ColumnScope.QueueWidgetBody(snapshot: WidgetSnapshot, artwork: Bitma
                     .size(48.dp)
                     .cornerRadius(12.dp)
                     .background(GlanceTheme.colors.surfaceVariant)
-                    .clickable(actionStartActivity<MainActivity>()),
+                    .clickable(openNowPlayingAction(context)),
                 contentAlignment = Alignment.Center
             ) {
                 Image(
@@ -202,7 +218,7 @@ private fun ColumnScope.QueueWidgetBody(snapshot: WidgetSnapshot, artwork: Bitma
         Column(
             modifier = GlanceModifier
                 .defaultWeight()
-                .clickable(actionStartActivity<MainActivity>())
+                .clickable(openNowPlayingAction(context))
         ) {
             Text(
                 text = snapshot.title.orEmpty(),

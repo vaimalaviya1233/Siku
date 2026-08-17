@@ -259,7 +259,7 @@ private fun DrawScope.drawCurve(
     // Se atenúa, NO se esconde: sigue siendo lo que suena, y el sentido del resalte es justamente
     // poder comparar cuánto de ella pone el refuerzo. Con la total desaparecida no habría nada
     // contra qué comparar.
-    val alpha = (if (enabled) 1f else DisabledAlpha) * lerp(1f, FocusedDimAlpha, focus)
+    val alpha = (if (enabled) 1f else DISABLED_CONTENT_ALPHA) * lerp(1f, FocusedDimAlpha, focus)
 
     fun yFor(db: Float): Float =
         zeroY - (db / rangeDb).coerceIn(-1f, 1f) * (size.height / 2f)
@@ -317,7 +317,7 @@ private fun DrawScope.drawBoostCurve(
     val zeroY = size.height / 2f
     // Con foco sube a opacidad plena y engorda hasta el grosor de la curva total: sigue siendo
     // punteada —es lo que la distingue cuando se solapan— pero deja de ser la línea secundaria.
-    val alpha = (if (enabled) 1f else DisabledAlpha) * lerp(BoostCurveAlpha, 1f, focus)
+    val alpha = (if (enabled) 1f else DISABLED_CONTENT_ALPHA) * lerp(BoostCurveAlpha, 1f, focus)
     val width = lerp(BoostCurveWidth.toPx(), CurveWidth.toPx(), focus)
 
     val path = Path()
@@ -456,7 +456,6 @@ private const val GridAlpha = 0.5f
 private const val FrameAlpha = 0.12f
 private const val FillAlphaTop = 0.28f
 private const val FillAlphaBottom = 0.04f
-private const val DisabledAlpha = 0.38f
 
 private const val DashOn = 4f
 private const val DashOff = 6f

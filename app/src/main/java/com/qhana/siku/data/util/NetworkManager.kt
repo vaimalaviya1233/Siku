@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.os.Handler
+import android.os.HandlerThread
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -78,9 +80,24 @@ class NetworkManager @Inject constructor(
         override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) = refresh()
     }
 
+    /**
+     * Hilo propio para los callbacks del sistema.
+     *
+     * `registerDefaultNetworkCallback` sin handler entrega en el hilo PRINCIPAL, y
+     * `onCapabilitiesChanged` no llega solo cuando cambia la red: el sistema lo dispara cada vez
+     * que revisa su estimación de ancho de banda del enlace, que en móvil es muy a menudo. Cada
+     * uno cuesta dos llamadas binder ([queryNetworkState]) cuyo resultado casi siempre es idéntico
+     * al anterior y el StateFlow descarta — trabajo tirado, pero en el hilo que dibuja. Aquí no
+     * hace falta el main: [_status] es un StateFlow y sus consumidores ya eligen dónde colectar.
+     */
+    private val callbackThread = HandlerThread("NetworkManager").apply { start() }
+
     init {
         try {
-            connectivityManager.registerDefaultNetworkCallback(callback)
+            connectivityManager.registerDefaultNetworkCallback(
+                callback,
+                Handler(callbackThread.looper)
+            )
             observing = true
         } catch (e: Exception) {
             // Documentado como posible si la app supera el límite de callbacks del sistema.

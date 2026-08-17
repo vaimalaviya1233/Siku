@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.qhana.siku.R
+import com.qhana.siku.data.coordinator.SyncManager
 import com.qhana.siku.data.local.AlbumSummary
 import com.qhana.siku.data.local.ArtistEntity
 import com.qhana.siku.data.local.ArtistSummary
@@ -14,6 +15,7 @@ import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.model.SongSourceFilter
 import com.qhana.siku.data.preferences.MusicPreferences
 import com.qhana.siku.data.repository.ArtistImageRepository
+import com.qhana.siku.data.repository.ArtworkRepository
 import com.qhana.siku.data.repository.BrowseRepository
 import com.qhana.siku.data.repository.DeezerArtistCandidate
 import com.qhana.siku.data.util.SnackbarManager
@@ -24,7 +26,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
+import com.qhana.siku.data.util.WhileUiSubscribed
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
@@ -53,9 +55,17 @@ class BrowseViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val browseRepository: BrowseRepository,
     private val artistImageRepository: ArtistImageRepository,
+    // Extracción del seed de la foto de artista para el tema local del detalle (ver [artistSeed]).
+    private val artworkRepository: ArtworkRepository,
     private val musicPreferences: MusicPreferences,
-    private val snackbarManager: SnackbarManager
+    private val snackbarManager: SnackbarManager,
+    // Solo para saber cuándo la biblioteca está en movimiento y espaciar las consultas de
+    // agregación mientras tanto (ver [sampledDuringSync]). No se sincroniza nada desde aquí.
+    syncManager: SyncManager
 ) : ViewModel() {
+
+    /** Ver [settlingFlow] y [sampledDuringSync]. */
+    private val libraryIsSettling = syncManager.settlingFlow()
 
     init {
         // Backfill de fotos pendientes al arrancar la sesión de navegación: cubre bibliotecas
@@ -63,6 +73,13 @@ class BrowseViewModel @Inject constructor(
         // Idempotente y con rate-limit en el repo; dispararlo dos veces es gratis.
         viewModelScope.launch(Dispatchers.IO) {
             artistImageRepository.backfillMissingImages()
+        }
+        // Re-disparo del backfill al cambiar la red, colgado del ciclo de vida de ESTA pantalla y no
+        // del singleton: antes vivía en un `init` de por vida y salía a Deezer en cada salto
+        // WiFi↔datos aunque nadie hubiera abierto nunca la pestaña Artistas (proceso de un worker).
+        // Ver [ArtistImageRepository.backfillOnNetworkChanges].
+        viewModelScope.launch(Dispatchers.IO) {
+            artistImageRepository.backfillOnNetworkChanges().collect { }
         }
     }
 
@@ -112,17 +129,23 @@ class BrowseViewModel @Inject constructor(
     // cada not-found persiste su intento en `artists` → requery → lista IGUAL (thumbUrl sigue
     // null) → recomposición inútil en pleno scroll. Los flows de álbumes lo heredan gratis
     // (playCount escribe en `songs` sin cambiar los agregados).
+    //
+    // `sampledDuringSync` ataca lo que el `distinctUntilChanged` no puede: ese descarta el
+    // RESULTADO repetido, pero la consulta —un GROUP BY sobre la tabla entera— ya se ejecutó. Son
+    // las dos agregaciones más caras de la app y la biblioteca las tiene colectadas siempre.
     val artists: StateFlow<List<ArtistSummary>> =
         combine(_artistSortOrder, _artistSourceFilters) { sort, filters -> sort to filters }
             .flatMapLatest { (sort, filters) -> browseRepository.getArtists(sort, filters) }
+            .sampledDuringSync(libraryIsSettling)
             .distinctUntilChanged()
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+            .stateIn(viewModelScope, WhileUiSubscribed, emptyList())
 
     val albums: StateFlow<List<AlbumSummary>> =
         combine(_albumSortOrder, _albumSourceFilters) { sort, filters -> sort to filters }
             .flatMapLatest { (sort, filters) -> browseRepository.getAlbums(sort, filters) }
+            .sampledDuringSync(libraryIsSettling)
             .distinctUntilChanged()
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+            .stateIn(viewModelScope, WhileUiSubscribed, emptyList())
 
     // --- Géneros ---
 
@@ -133,7 +156,7 @@ class BrowseViewModel @Inject constructor(
     val genrePartialMatch: StateFlow<Boolean> = musicPreferences.genrePartialMatchFlow
         .stateIn(
             viewModelScope,
-            SharingStarted.WhileSubscribed(5_000),
+            WhileUiSubscribed,
             musicPreferences.loadGenrePartialMatch()
         )
 
@@ -155,8 +178,9 @@ class BrowseViewModel @Inject constructor(
                 genre.copy(songCount = total)
             }
         }
+            .sampledDuringSync(libraryIsSettling)
             .distinctUntilChanged()
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+            .stateIn(viewModelScope, WhileUiSubscribed, emptyList())
 
     /** Canciones de un género para su detalle; sigue en vivo el ajuste de coincidencia parcial. */
     fun getGenreSongs(genre: String): Flow<List<Song>> =
@@ -164,8 +188,9 @@ class BrowseViewModel @Inject constructor(
 
     /** Álbumes del momento (por total de reproducciones) para la sección de la home. */
     val topAlbums: StateFlow<List<AlbumSummary>> = browseRepository.getTopAlbums(TOP_ALBUMS_LIMIT)
+        .sampledDuringSync(libraryIsSettling)
         .distinctUntilChanged()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+        .stateIn(viewModelScope, WhileUiSubscribed, emptyList())
 
     // --- Detalle (coleccionar con collectAsStateWithLifecycle en la pantalla) ---
 
@@ -177,6 +202,41 @@ class BrowseViewModel @Inject constructor(
     fun getArtistInfo(artist: String): Flow<ArtistEntity?> = browseRepository.getArtistInfo(artist)
 
     fun getAlbumSongs(album: String): Flow<List<Song>> = browseRepository.getSongsByAlbum(album)
+
+    // --- Seed del tema local del detalle de artista ---
+
+    /**
+     * Color del que el detalle de artista seedea su tema (ver `DetailContentTheme`). `null` = esa
+     * pantalla no tiene imagen de la que sacar color y se queda con el tema global.
+     *
+     * A diferencia del detalle de álbum —cuyo seed viaja YA extraído en `Song.colors`— la foto de
+     * un artista no pertenece a ninguna fila de `songs`, así que hay que extraerlo de la imagen.
+     * Es un `StateFlow` y no un valor porque la foto puede **llegar tarde**: la baja el backfill de
+     * Deezer y puede aparecer con la pantalla ya abierta.
+     */
+    private val _artistSeed = MutableStateFlow<Int?>(null)
+    val artistSeed: StateFlow<Int?> = _artistSeed.asStateFlow()
+
+    private var artistSeedJob: Job? = null
+
+    /**
+     * Pide el seed de [imageUrl], que debe ser **la imagen que la pantalla está mostrando de
+     * verdad** — o sea el resultado de la cascada foto → carátula de un álbum suyo, no la foto a
+     * secas. Si el color saliera de otra imagen, el tema no tendría que ver con lo que se ve.
+     *
+     * Cancela la petición anterior: al cambiar la imagen, el seed de la vieja ya no interesa y
+     * dejarlo correr podría pisar al nuevo si termina después.
+     */
+    fun requestArtistSeed(imageUrl: String?) {
+        artistSeedJob?.cancel()
+        if (imageUrl == null) {
+            _artistSeed.value = null
+            return
+        }
+        artistSeedJob = viewModelScope.launch {
+            _artistSeed.value = artworkRepository.seedForImage(imageUrl)
+        }
+    }
 
     // --- Banner "fotos en pausa por red móvil" (pestaña Artistas) ---
 

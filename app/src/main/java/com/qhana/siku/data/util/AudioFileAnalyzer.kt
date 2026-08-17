@@ -156,6 +156,19 @@ class AudioFileAnalyzer @Inject constructor(
      * Llamarlo cuando no haya un escaneo a medias sigue siendo lo correcto: sus lotes escriben
      * la carátula antes de insertar la fila, y esa ventana no la cierra ningún orden de lectura.
      */
+    /**
+     * Cuántos archivos hay en el directorio de carátulas, o −1 si no se pudo listar.
+     *
+     * Es la señal barata con la que `ArtworkHealingManager.heal()` decide si tiene algo que buscar:
+     * una carátula huérfana solo puede aparecer si un archivo DESAPARECIÓ del directorio, y eso se
+     * ve en el conteo con una sola operación de disco, en vez de con una consulta de la tabla
+     * entera más un `stat` por canción. Que el conteo SUBA (un sync que añade portadas) no crea
+     * huérfanos, y `pruneUnreferencedCovers` solo borra lo que ya no referencia nadie, así que
+     * tampoco: las bajadas que importan son las de fuera de la app (limpiar datos, borrado
+     * externo) y esas son masivas, no de un archivo.
+     */
+    fun coverFileCount(): Int = coversDir.list()?.size ?: -1
+
     suspend fun pruneUnreferencedCovers(fetchReferencedUris: suspend () -> Set<String>): Int {
         val files = coversDir.listFiles() ?: return 0
         if (files.isEmpty()) return 0
@@ -374,7 +387,7 @@ class AudioFileAnalyzer @Inject constructor(
          * Retrievers en paralelo. `MediaMetadataRetriever` abre un decoder por instancia, así
          * que el límite real es la CPU del dispositivo: se deriva de los núcleos en vez de
          * fijar un número que sería pesimista en gama alta y optimista en gama baja (mismo
-         * criterio que `SyncManager.computeParallelism`, que mide el enlace en vez de fijarlo).
+         * criterio que `SyncManager.initialParallelism`, que mide el enlace en vez de fijarlo).
          * Se reserva capacidad para el resto del pipeline de sync, con un mínimo de 2.
          */
         private val MAX_CONCURRENT_RETRIEVERS =

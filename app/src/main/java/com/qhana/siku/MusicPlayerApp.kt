@@ -28,6 +28,29 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 /**
+ * Retraso inicial del backfill de colores: margen para que la primera pantalla —biblioteca,
+ * restauración de sesión, escaneo local— tenga la CPU y el disco para ella sola.
+ *
+ * `ArtworkWorker` recorre las canciones que TIENEN carátula pero aún no tienen color guardado, y por
+ * cada una decodifica la imagen y corre el pipeline de cuantización. Es trabajo de CPU y disco sobre
+ * la biblioteca entera, así que arrancarlo pegado al inicio del proceso compite con lo que el
+ * usuario está esperando ver.
+ *
+ * **El valor no es crítico, y eso es a propósito**: quien de verdad decide si es buen momento es el
+ * propio worker, que se aparta y deja que WorkManager lo reprograme si encuentra un sync en marcha
+ * (ver `ArtworkWorker`). Este plazo solo cubre el tramo en que la UI se está componiendo, que es
+ * corto y no tiene señal observable desde `Application`; el competidor grande —el escaneo, que dura
+ * minutos— se esquiva por condición, no por reloj.
+ *
+ * De hecho, treinta segundos **protegía del competidor equivocado**: a esa altura la UI hace rato
+ * que arrancó y lo que está ocupando disco y BD es el `ScanWorker` que la propia pantalla encoló.
+ * Diez segundos siguen dando varias veces el arranque en frío típico, y el trabajo es PRESCINDIBLE
+ * de todos modos: el color de una canción se extrae solo al reproducirla (caché RAM → BD → extraer),
+ * así que esto no habilita nada, únicamente lo precalcula para que el acento no parpadee.
+ */
+private const val ARTWORK_BACKFILL_DELAY_SECONDS = 10L
+
+/**
  * Application class con Coil 3 para carga de imágenes.
  * Implementa SingletonImageLoader.Factory (Coil 3) en vez del antiguo ImageLoaderFactory.
  */
@@ -70,16 +93,20 @@ class MusicPlayerApp : Application(), Configuration.Provider, SingletonImageLoad
         // No bloquea el arranque; corre en background al iniciar el proceso.
         appScope.launch { artworkHealingManager.heal() }
 
-        // Programar worker de colores en background con restricciones de batería
-        // Solo ejecutar cuando: batería OK, dispositivo idle (para no interferir con uso activo)
+        // Worker de colores en background, con restricción de batería pero SIN exigir dispositivo
+        // inactivo. `setRequiresDeviceIdle` suena prudente y en la práctica es una condición que
+        // puede no cumplirse en días: pide Doze de verdad, no "pantalla apagada", así que en un
+        // teléfono de uso frecuente el backfill de colores se quedaba pendiente indefinidamente y
+        // la biblioteca sin acento. Con "batería no baja" el trabajo llega a correr y sigue sin
+        // pelearse por CPU cuando el usuario la necesita: es un lote acotado y WorkManager ya lo
+        // programa en un momento oportuno.
         val constraints = Constraints.Builder()
             .setRequiresBatteryNotLow(true)
-            .setRequiresDeviceIdle(true) // Solo cuando el dispositivo está inactivo
             .build()
 
         val request = OneTimeWorkRequestBuilder<ArtworkWorker>()
             .setConstraints(constraints)
-            .setInitialDelay(30, java.util.concurrent.TimeUnit.SECONDS) // Esperar 30s después de inicio
+            .setInitialDelay(ARTWORK_BACKFILL_DELAY_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
             .build()
 
         WorkManager.getInstance(this).enqueueUniqueWork(

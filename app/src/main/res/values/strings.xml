@@ -17,6 +17,7 @@
     <string name="common_remove_from_favorites">Quitar de favoritos</string>
     <string name="common_redownload">Redescargar</string>
     <string name="common_add_to_playlist">Añadir a lista de reproducción</string>
+    <string name="common_add_to_queue">Añadir a la cola</string>
     <string name="common_connecting">Conectando…</string>
     <string name="common_verifying">Verificando…</string>
     <string name="common_recovering">Recuperando…</string>
@@ -25,7 +26,7 @@
     <string name="common_create">Crear</string>
     <string name="common_save">Guardar</string>
     <string name="common_back">Volver</string>
-    <string name="common_search_songs">Buscar canciones, álbumes o artistas</string>
+    <string name="common_search_songs">Buscar en biblioteca</string>
     <string name="common_clear_search">Borrar búsqueda</string>
     <string name="common_pause">Pausar</string>
     <string name="common_next">Siguiente canción</string>
@@ -34,6 +35,9 @@
     <string name="common_album_art">Carátula del álbum</string>
     <string name="common_delete">Eliminar</string>
     <string name="common_song_options">Opciones de la canción</string>
+    <string name="common_artist_options">Opciones del artista</string>
+    <string name="common_album_options">Opciones del álbum</string>
+    <string name="common_genre_options">Opciones del género</string>
     <string name="common_start">Iniciar</string>
     <!-- %1$s = duración formateada -->
     <string name="common_duration">Duración: %1$s</string>
@@ -109,6 +113,7 @@
     <!-- ==================== Acciones de detalle (artista/álbum/lista) ==================== -->
     <string name="detail_play_all">Reproducir todo</string>
     <string name="detail_shuffle">Reproducir en aleatorio</string>
+    <string name="detail_add_all_to_queue">Añadir todo a la cola</string>
 
     <!-- ==================== Gestor de descargas ==================== -->
     <string name="download_title">Descargas</string>
@@ -146,6 +151,7 @@
     <string name="download_msg_unknown">Descarga: %1$s (estado desconocido)</string>
     <string name="download_msg_failed_reason">Falló: %1$s (%2$s)</string>
     <string name="download_msg_failed">Falló: %1$s</string>
+    <string name="download_msg_auto_failed">No se pudo descargar «%1$s» para offline; seguirá en streaming</string>
 
     <!-- Control de descargas: pausa / stop / tope de almacenamiento -->
     <string name="download_pause">Pausar</string>
@@ -275,6 +281,21 @@
     <string name="queue_empty">La lista está vacía</string>
     <string name="queue_save_as_playlist">Guardar como lista</string>
     <string name="queue_remove_song">Quitar de la cola</string>
+    <string name="queue_clear">Vaciar la cola</string>
+    <!-- Etiquetas CORTAS de la barra de acciones de la cola: la frase completa va en el
+         contentDescription de cada botón, que es quien tiene que decirlo entero. -->
+    <string name="queue_save_short">Guardar</string>
+    <string name="queue_clear_short">Vaciar</string>
+    <string name="queue_cleared">Cola vaciada</string>
+    <string name="common_undo">Deshacer</string>
+    <string name="queue_added">Añadida a la cola</string>
+    <string name="queue_already_in">Ya está en la cola</string>
+    <!-- Encolar un detalle entero. %1$d = cuántas se añadieron DE VERDAD (sin las repetidas). -->
+    <plurals name="queue_added_count">
+        <item quantity="one">%1$d canción añadida a la cola</item>
+        <item quantity="other">%1$d canciones añadidas a la cola</item>
+    </plurals>
+    <string name="queue_all_already_in">Todas están ya en la cola</string>
     <string name="np_close_desc">Cerrar reproductor</string>
     <string name="np_ambient_mode_desc">Modo ambiente</string>
     <!-- Chip de origen (Fase 5). %1$s = formato de audio (FLAC/MP3…) -->
@@ -360,6 +381,10 @@
     <string name="lyrics_error_offline_subtitle">Conéctate para buscar la letra de esta canción</string>
     <string name="lyrics_error_provider_title">No se pudo cargar la letra</string>
     <string name="lyrics_error_provider_subtitle">LrcLib no respondió</string>
+    <string name="lyrics_error_timeout">Se agotó el tiempo de espera</string>
+    <string name="lyrics_error_network">Error de red</string>
+    <string name="lyrics_error_server">El servidor de letras falló</string>
+    <string name="lyrics_error_unknown">No se pudieron obtener las letras</string>
     <string name="common_retry">Reintentar</string>
     <string name="lyrics_refresh_updated">Letra actualizada</string>
     <string name="lyrics_refresh_unchanged">Sin cambios desde LrcLib</string>
@@ -444,7 +469,6 @@
 
     <string name="eq_protection_section">Protección de nivel</string>
     <string name="eq_preamp">Preamp</string>
-    <string name="eq_preamp_apply_suggested">Sugerido: %1$s dB</string>
     <string name="eq_limiter">Limitador</string>
     <string name="eq_limiter_desc">Baja los picos que pasan del umbral. En 0 dB solo evita el recorte; más abajo, comprime.</string>
     <string name="eq_limiter_threshold">Umbral</string>
@@ -452,6 +476,13 @@
     <string name="eq_limiter_meter">Reducción</string>
     <string name="eq_limiter_meter_would">Reduciría</string>
     <string name="eq_limiter_idle">Sin actuar</string>
+
+    <!-- Clarity (exciter armonico). La descripcion dice ABIERTAMENTE que anade contenido: es el
+         unico modulo no lineal de la app y quien lo enciende tiene que saber que hace. -->
+    <string name="clarity_section">Clarity</string>
+    <string name="clarity_desc">Añade brillo a la parte alta con una saturación suave.</string>
+    <string name="clarity_amount">Cantidad</string>
+
     <string name="eq_preset_flat">Plano</string>
     <string name="eq_preset_rock">Rock</string>
     <string name="eq_preset_pop">Pop</string>
@@ -462,10 +493,24 @@
     <string name="eq_preset_bass">Bajos</string>
     <string name="eq_preset_treble">Agudos</string>
     <string name="eq_preset_vocal">Voz</string>
-    <string name="eq_preset_save">Guardar preset</string>
-    <string name="eq_preset_save_title">Guardar preset</string>
-    <string name="eq_preset_name_label">Nombre del preset</string>
-    <string name="eq_preset_label">Preset</string>
+    <!-- Lo que se guarda es siempre un PERFIL (sonido completo); los presets son los de fábrica -->
+    <string name="eq_profile_save_title">Guardar perfil</string>
+    <string name="eq_profile_name_label">Nombre del perfil</string>
+    <string name="eq_profile_save_hint">Se guarda todo el sonido actual: la curva, los refuerzos, la preamplificación y el limitador.</string>
+    <!-- Primer paso al guardar cuando ya hay un perfil puesto. %1$s = su nombre. -->
+    <string name="eq_profile_update_message">Tienes puesto «%1$s». ¿Actualizarlo con el sonido actual o guardar uno nuevo?</string>
+    <string name="eq_profile_update_confirm">Actualizar</string>
+    <string name="eq_profile_save_as_new">Guardar como nuevo</string>
+    <!-- Aviso al guardar con un nombre ya usado. %1$s = el nombre existente. -->
+    <string name="eq_profile_overwrite_message">Ya existe un perfil «%1$s». ¿Sobrescribirlo con el sonido actual?</string>
+    <string name="eq_profile_overwrite_confirm">Sobrescribir</string>
+    <!-- Valor de cada desplegable. Con DOS controles el nombre va delante: "Rock" y "Mi mezcla"
+         solos no dicen cuál es cuál. %1$s = el elegido. -->
+    <string name="eq_selector_preset">Preset: %1$s</string>
+    <string name="eq_selector_profile">Perfil: %1$s</string>
+    <!-- Ningún perfil aplicado. NO es "Personalizado": eso describe la curva, y aquí lo que se dice
+         es que ninguno de los tuyos está puesto. -->
+    <string name="eq_profile_none">—</string>
     <string name="eq_preset_custom">Personalizado</string>
     <string name="eq_preset_save_short">Guardar</string>
     <string name="eq_system_short">Sistema</string>
@@ -482,13 +527,11 @@
     <string name="settings_use_system_eq">Usar ecualizador del sistema</string>
     <string name="settings_use_system_eq_desc">El botón de ecualizador del reproductor abre el panel del sistema (MIUI/fabricante) en vez del ecualizador propio. Al activarlo, el ecualizador propio se apaga.</string>
 
-    <!-- Perfiles del EQ por ruta de salida y gestión de presets -->
-    <string name="settings_eq_route_profiles">Recordar el ecualizador por dispositivo</string>
-    <string name="settings_eq_route_profiles_desc">Guarda por separado lo que dejes puesto con los auriculares con cable, por Bluetooth, por USB y en el altavoz del teléfono. Al conectar uno, vuelve su última configuración.</string>
-    <string name="settings_eq_presets">Presets del ecualizador</string>
+    <!-- Gestión de presets del EQ -->
+    <string name="settings_eq_presets">Presets y perfiles del ecualizador</string>
     <string name="settings_eq_presets_desc">Elegir cuáles aparecen en el selector</string>
-    <string name="settings_eq_presets_hint">Los presets ocultos no se listan en el ecualizador, pero no se borran: puedes volver a mostrarlos cuando quieras.</string>
-    <string name="settings_eq_presets_own">Tus presets</string>
+    <string name="settings_eq_presets_hint">Un preset guarda solo la curva de bandas; un perfil guarda además los refuerzos, la preamplificación y el limitador. Los que ocultes no se listan en el ecualizador, pero no se borran: puedes volver a mostrarlos cuando quieras.</string>
+    <string name="settings_eq_profiles_own">Tus perfiles</string>
     <string name="settings_eq_presets_restore_all">Mostrar los %1$d ocultos</string>
     <string name="eq_presets_all_hidden">Todos los presets están ocultos (Ajustes → Reproducción)</string>
 
@@ -524,13 +567,14 @@
     <string name="settings_source_onedrive">OneDrive</string>
     <string name="settings_source_local">Carpeta local</string>
     <string name="settings_cat_backup_desc">Exporta o importa tus listas en OneDrive</string>
-    <string name="settings_cat_playback_desc">Normalización de volumen (ReplayGain)</string>
+    <string name="settings_cat_playback_desc">Ecualizador, volumen y letras</string>
     <string name="settings_cat_downloads_desc">Tope de almacenamiento para descargas</string>
     <string name="settings_cat_appearance_desc">Colores del reproductor y fondo</string>
     <string name="settings_cat_gestures_desc">Deslizar y tocar en el reproductor</string>
     <string name="settings_gestures_header">Gestos</string>
     <string name="settings_downloads_header">Descargas</string>
-    <string name="settings_volume_header">Volumen (ReplayGain)</string>
+    <string name="settings_volume_header">Audio</string>
+    <string name="settings_replaygain_header">Normalización de volumen</string>
     <string name="settings_volume_desc">Iguala el volumen percibido entre canciones según los tags ReplayGain del archivo. Solo atenúa, nunca sube.</string>
     <string name="settings_rg_off">Desactivado</string>
     <string name="settings_rg_track">Por pista</string>
@@ -660,6 +704,11 @@
     <string name="settings_solid_bg_desc">Usa un color sólido del tema en lugar del degradado de la carátula.</string>
     <string name="settings_wavy_progress">Barra de progreso ondulada</string>
     <string name="settings_wavy_progress_desc">Usa la onda animada de Material 3 en el reproductor. El miniplayer mantiene la barra fina.</string>
+    <string name="settings_progress_bar_header">Barra de progreso</string>
+    <string name="settings_progress_bar_desc">Modo (plana u ondulada) y grosor, con vista previa.</string>
+    <string name="settings_progress_thickness">Grosor de la barra</string>
+    <string name="settings_progress_thickness_desc">Vale para la barra plana y la ondulada del reproductor.</string>
+    <string name="settings_progress_thickness_value">%1$d dp</string>
     <string name="settings_mini_player_rect">Miniplayer rectangular</string>
     <string name="settings_mini_player_rect_desc">Usa esquinas redondeadas en la barra flotante en vez de la forma de píldora.</string>
     <string name="settings_player_gestures">Gestos del reproductor</string>
@@ -846,7 +895,34 @@
     <string name="error_playback_network_persistent">Error de red persistente</string>
     <string name="error_playback_file_not_found">Archivo no encontrado</string>
     <string name="error_playback_format_unsupported">No se puede reproducir este formato</string>
+    <string name="error_download_link_failed">No se pudo obtener el enlace de descarga</string>
+
+    <!-- Autenticación (OneDrive / MSAL) -->
+    <string name="error_auth_unavailable">El servicio de inicio de sesión no está disponible</string>
+    <string name="error_auth_signin_failed">No se pudo iniciar sesión</string>
+    <string name="error_auth_consent_failed">No se pudo conceder el permiso</string>
+    <string name="error_auth_no_account">No hay ninguna sesión iniciada</string>
+    <string name="error_auth_token_refresh">Tu sesión expiró. Vuelve a iniciar sesión</string>
+    <string name="error_auth_generic">No se pudo completar el inicio de sesión</string>
+
+    <!-- Errores genéricos (AppError) -->
+    <string name="error_generic">Algo salió mal</string>
+    <string name="error_network_generic">Error de conexión</string>
+    <string name="error_network_timeout">Se agotó el tiempo de espera</string>
+    <string name="error_data_generic">Error de datos</string>
+    <string name="error_notfound_generic">No se encontró</string>
+    <string name="error_session_generic">Problema con la sesión. Vuelve a conectar OneDrive</string>
 
     <!-- ==================== Permisos ==================== -->
 
+
+    <!-- Restauración de sesión lenta al arrancar (ver AuthViewModel.sessionRestoreSlow) -->
+    <string name="session_restore_slow_title">Estamos teniendo problemas para obtener tu sesión</string>
+    <string name="session_restore_slow_body">Seguimos intentándolo. Puede pasar si el almacenamiento del teléfono está muy lleno o el sistema anda ocupado.</string>
+
+    <!-- Escaneo que se dio por perdido (ver ScanWorker.recordingFailure) -->
+    <string name="sync_failed_auth">No se pudo sincronizar: vuelve a conectar tu cuenta de OneDrive</string>
+    <string name="sync_failed_network">No se pudo sincronizar: problema de conexión</string>
+    <string name="sync_failed_server">No se pudo sincronizar: OneDrive no responde</string>
+    <string name="sync_failed_generic">No se pudo sincronizar tu biblioteca</string>
 </resources>

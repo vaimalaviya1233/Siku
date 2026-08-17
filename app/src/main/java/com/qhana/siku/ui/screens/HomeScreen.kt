@@ -390,7 +390,6 @@ private fun SongCarousel(
             val song = songs[i]
             HomeCarouselCard(
                 art = song.albumArtUri?.toString(),
-                cacheKey = song.id,
                 title = song.title,
                 subtitle = song.artist,
                 isCurrent = song.id == currentSongId,
@@ -442,7 +441,6 @@ private fun ContextCarousel(
             }
             HomeCarouselCard(
                 art = ctx.coverUri(),
-                cacheKey = ctx.key,
                 title = ctx.displayTitle(),
                 subtitle = ctx.displaySubtitle(),
                 badgeIcon = ctx.typeIcon(),
@@ -536,7 +534,6 @@ private fun AlbumCarousel(
                 } else Modifier
             HomeCarouselCard(
                 art = album.albumArtUri,
-                cacheKey = "album_${album.name}",
                 title = album.name.ifBlank { stringResource(R.string.common_unknown_album) },
                 subtitle = album.artist,
                 onClick = { onAlbumClick(album.name) },
@@ -574,7 +571,6 @@ private fun CarouselItemScope.labelAlpha(): () -> Float = {
 @Composable
 private fun HomeCarouselCard(
     art: String?,
-    cacheKey: String?,
     title: String,
     subtitle: String,
     onClick: () -> Unit,
@@ -602,20 +598,15 @@ private fun HomeCarouselCard(
             !collage.isNullOrEmpty() -> AdaptiveCollage(collage, Modifier.fillMaxSize())
             art != null -> {
                 val context = LocalContext.current
+                // Sin clave propia: la de Coil (data + tamaño + transformaciones) ya es la
+                // correcta. La versión anterior componía `<identidad de la tarjeta>@<uri>` para que
+                // un cambio de imagen invalidara la entrada —la foto del artista que llega del
+                // backfill, "ninguno de estos", una carátula reparada—, pero el URI SOLO consigue
+                // eso mismo (si la imagen cambia, cambia la clave) sin el efecto secundario que
+                // traía el prefijo: dos tarjetas que muestran la misma portada guardaban dos copias
+                // del mismo bitmap. Ver el kdoc de la petición en [AlbumArt].
                 val request = ImageRequest.Builder(context)
                     .data(art)
-                    .apply {
-                        if (cacheKey != null) {
-                            // La clave lleva la IMAGEN, no solo la identidad de la tarjeta. Con
-                            // `artist:Nombre` a secas, cambiar lo que la tarjeta muestra —la foto
-                            // del artista que llega del backfill, "ninguno de estos", una carátula
-                            // reparada— seguía sirviendo la anterior desde el caché de memoria y
-                            // el de DISCO, que además sobrevive al reinicio.
-                            val key = "$cacheKey@$art"
-                            memoryCacheKey(key)
-                            diskCacheKey(key)
-                        }
-                    }
                     .crossfade(200)
                     .build()
                 AsyncImage(
@@ -717,7 +708,7 @@ private fun HomeEmptyState(modifier: Modifier, contentPadding: PaddingValues) {
             MaterialSymbol(
                 "music_note",
                 size = 64.sp,
-                color = colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                color = colorScheme.outline
             )
             Spacer(Modifier.height(16.dp))
             Text(

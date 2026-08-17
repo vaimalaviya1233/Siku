@@ -33,7 +33,6 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.qhana.siku.R
-import com.qhana.siku.data.model.PlaybackState
 import com.qhana.siku.data.model.Playlist
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.ui.components.AddToPlaylistBottomSheet
@@ -43,6 +42,7 @@ import com.qhana.siku.ui.components.CreatePlaylistDialog
 import com.qhana.siku.ui.components.DetailPlayButtons
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.SongItem
+import com.qhana.siku.ui.components.SongRowContainer
 import com.qhana.siku.ui.components.SongOverflowButton
 import com.qhana.siku.ui.components.songRowBackground
 import com.qhana.siku.ui.components.TonalChip
@@ -62,18 +62,20 @@ import com.qhana.siku.ui.theme.AppBoundsTransform
  * Las canciones salen de [BrowseViewModel.getGenreSongs], que sigue en vivo el ajuste "incluir
  * géneros compuestos": activarlo desde la pestaña reordena esta lista sin salir de la pantalla.
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
 fun GenreDetailScreen(
     genreName: String,
     currentSong: Song?,
-    playbackState: PlaybackState,
     favorites: Set<String>,
     playlists: List<Playlist>,
     onBackClick: () -> Unit,
     onPlayAll: (List<Song>, Int) -> Unit,
     onShufflePlay: (List<Song>) -> Unit,
     onToggleFavorite: (String) -> Unit,
+    onAddToQueue: (Song) -> Unit,
+    /** Encolar TODAS las canciones del género, desde la botonera de la cabecera. */
+    onAddAllToQueue: (List<Song>) -> Unit,
     onAddSongToPlaylist: (Long, String) -> Unit,
     /** Crear lista nueva; [pendingSongId] = canción del flujo "agregar a lista" que debe nacer dentro. */
     onCreatePlaylist: (name: String, pendingSongId: String?) -> Unit,
@@ -98,7 +100,7 @@ fun GenreDetailScreen(
 
     // Título viajero: mismas anclas y mismo criterio de snap que el detalle de álbum.
     val listState = rememberLazyListState()
-    val titleFadePx = with(LocalDensity.current) { TITLE_FADE_RANGE.toPx() }
+    val titleFadePx = with(LocalDensity.current) { ComponentConfig.DetailTitleFadeRange.toPx() }
     val rawTitleFraction by remember {
         derivedStateOf {
             if (listState.firstVisibleItemIndex > 0) 1f
@@ -122,6 +124,13 @@ fun GenreDetailScreen(
     var headerTitleHeight by remember { mutableIntStateOf(0) }
     var barTitleAnchor by remember { mutableStateOf(Offset.Zero) }
 
+    // Estado compartido del collage del header, HOISTADO: la cabecera lo usa para su `sharedBounds`
+    // y el título/topbar para saber si elevarse al overlay (solo si morfa de verdad, o sea si
+    // venimos de la pestaña Géneros — ver `overSharedElementsModifier`).
+    val headerImageSharedState = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
+        with(sharedTransitionScope) { rememberSharedContentState(key = "genre_image_$genreName") }
+    } else null
+
     Scaffold(
         modifier = modifier,
         contentWindowInsets = WindowInsets(0, 0, 0, 0)
@@ -137,7 +146,7 @@ fun GenreDetailScreen(
                     MaterialSymbol(
                         "genres",
                         size = 64.sp,
-                        color = colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                        color = colorScheme.outline
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
@@ -168,6 +177,7 @@ fun GenreDetailScreen(
                             artistCount = artistCount,
                             sharedTransitionScope = sharedTransitionScope,
                             animatedVisibilityScope = animatedVisibilityScope,
+                            headerImageSharedState = headerImageSharedState,
                             onTitlePositioned = { pos, height ->
                                 headerTitleAnchor = pos
                                 headerTitleHeight = height
@@ -179,6 +189,7 @@ fun GenreDetailScreen(
                         DetailPlayButtons(
                             onPlayAll = { onPlayAll(songs, 0) },
                             onShuffle = { onShufflePlay(songs) },
+                            onAddToQueue = { onAddAllToQueue(songs) },
                             modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp)
                         )
                     }
@@ -187,29 +198,42 @@ fun GenreDetailScreen(
                         items = songs,
                         key = { _, song -> song.id }
                     ) { index, song ->
-                        val isPlaying = currentSong?.id == song.id && playbackState == PlaybackState.PLAYING
+                        // La canción actual, esté sonando o en PAUSA: mismo criterio que la cola y
+                        // la lista de canciones (el resaltado marca "cargada", no "sonando ahora").
+                        val isPlaying = currentSong?.id == song.id
                         val rowBackground = songRowBackground(colorScheme.surfaceContainer, isPlaying)
-                        Surface(
-                            color = colorScheme.surfaceContainer,
-                            shape = rememberListItemShape(index, songs.size),
+                        // Punta ORIGEN del container transform hacia el reproductor: la fila crece
+                        // hasta ser el player. Fuera del envoltorio va lo que la coloca en la lista;
+                        // dentro, la superficie que morfa (ver [SongRowContainer]).
+                        SongRowContainer(
+                            songId = song.id,
                             modifier = Modifier
                                 .animateItem()
                                 .fillMaxWidth()
                                 .padding(horizontal = 16.dp, vertical = 1.dp)
                         ) {
-                            SongItem(
-                                song = song,
-                                isPlaying = isPlaying,
-                                modifier = Modifier.clickable { onPlayAll(songs, index) },
-                                trailingContent = {
-                                    SongOverflowButton(
-                                        isFavorite = song.id in favorites,
-                                        onToggleFavorite = { onToggleFavorite(song.id) },
-                                        onAddToPlaylist = { songIdForPlaylist = song.id },
-                                        rowBackground = rowBackground
-                                    )
-                                }
-                            )
+                            Surface(
+                                color = colorScheme.surfaceContainer,
+                                // isActive: el ítem en reproducción usa la forma redondeada (16 dp),
+                                // igual que en la cola y la lista de canciones.
+                                shape = rememberListItemShape(index, songs.size, isActive = isPlaying),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                SongItem(
+                                    song = song,
+                                    isPlaying = isPlaying,
+                                    modifier = Modifier.clickable { onPlayAll(songs, index) },
+                                    trailingContent = {
+                                        SongOverflowButton(
+                                            isFavorite = song.id in favorites,
+                                            onToggleFavorite = { onToggleFavorite(song.id) },
+                                            onAddToPlaylist = { songIdForPlaylist = song.id },
+                                            onAddToQueue = { onAddToQueue(song) },
+                                            rowBackground = rowBackground
+                                        )
+                                    }
+                                )
+                            }
                         }
                     }
                 }
@@ -218,7 +242,7 @@ fun GenreDetailScreen(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .fillMaxWidth()
-                        .then(overSharedElementsModifier(sharedTransitionScope, animatedVisibilityScope))
+                        .then(overSharedElementsModifier(sharedTransitionScope, animatedVisibilityScope, headerImageSharedState))
                         .background(colorScheme.surface.copy(alpha = topBarAlpha))
                 ) {
                     Row(
@@ -255,7 +279,7 @@ fun GenreDetailScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(end = 40.dp)
-                        .then(overSharedElementsModifier(sharedTransitionScope, animatedVisibilityScope))
+                        .then(overSharedElementsModifier(sharedTransitionScope, animatedVisibilityScope, headerImageSharedState))
                         .graphicsLayer {
                             val f = FastOutSlowInEasing.transform(topBarAlpha)
                             // titleMedium (16sp) / headlineLarge (32sp)
@@ -316,12 +340,14 @@ private fun GenreImmersiveHeader(
     artistCount: Int,
     sharedTransitionScope: SharedTransitionScope? = null,
     animatedVisibilityScope: AnimatedVisibilityScope? = null,
+    // HOISTADO desde el parent (mismo objeto que gatea la elevación del título).
+    headerImageSharedState: SharedTransitionScope.SharedContentState? = null,
     onTitlePositioned: (Offset, Int) -> Unit = { _, _ -> }
 ) {
-    val sharedModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
+    val sharedModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null && headerImageSharedState != null) {
         with(sharedTransitionScope) {
             Modifier.sharedBounds(
-                sharedContentState = rememberSharedContentState(key = "genre_image_$genreName"),
+                sharedContentState = headerImageSharedState,
                 animatedVisibilityScope = animatedVisibilityScope,
                 // Spring del tema en vez del default de la API (ver AppBoundsTransform).
                 boundsTransform = AppBoundsTransform
@@ -332,7 +358,7 @@ private fun GenreImmersiveHeader(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(HEADER_HEIGHT)
+            .height(ComponentConfig.DetailHeaderHeight)
             .then(sharedModifier)
     ) {
         if (arts.isEmpty()) {
@@ -405,8 +431,4 @@ private fun GenreImmersiveHeader(
 /** Portadas del collage del header (las mismas que la tarjeta de la pestaña). */
 private const val HEADER_ARTS = 4
 
-/** Alto del header inmersivo, igual que en artista/álbum. */
-private val HEADER_HEIGHT = 380.dp
 
-/** Recorrido de scroll en el que el título viaja del header a la topbar. */
-private val TITLE_FADE_RANGE = 300.dp

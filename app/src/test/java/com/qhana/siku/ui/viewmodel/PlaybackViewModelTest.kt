@@ -53,6 +53,10 @@ class PlaybackViewModelTest {
     @RelaxedMockK lateinit var audioRouteMonitor: com.qhana.siku.player.audio.AudioRouteMonitor
     @RelaxedMockK lateinit var eqProfileManager: com.qhana.siku.player.audio.EqProfileManager
 
+
+    /** DSP puro sin dependencias de Android: va real, no mockeado. */
+    private val clarity = com.qhana.siku.player.audio.clarity.Clarity()
+
     private lateinit var viewModel: PlaybackViewModel
     private val testDispatcher = UnconfinedTestDispatcher()
 
@@ -80,6 +84,12 @@ class PlaybackViewModelTest {
         every { audioRouteMonitor.route } returns
             MutableStateFlow(com.qhana.siku.player.audio.AudioRoute.WIRED)
         every { eqProfileManager.applied } returns MutableSharedFlow()
+        // Clarity: los `load*` alimentan los valores iniciales y los `*Flow` se colectan
+        // con stateIn; un relaxed mock devolveria null en el enum y un flow que no emite.
+        every { musicPreferences.loadClarityEnabled() } returns false
+        every { musicPreferences.loadClarityGain() } returns
+            com.qhana.siku.player.audio.clarity.Clarity.DEFAULT_GAIN_DB
+        every { musicPreferences.clarityEnabledFlow } returns MutableStateFlow(false)
 
         viewModel = PlaybackViewModel(
             musicController = musicController,
@@ -99,7 +109,8 @@ class PlaybackViewModelTest {
             downloadScheduler = downloadScheduler,
             snackbarManager = snackbarManager,
             syncManager = syncManager,
-            equalizerProcessor = com.qhana.siku.player.audio.EqualizerAudioProcessor(),
+            equalizerProcessor = com.qhana.siku.player.audio.EqualizerAudioProcessor(clarity),
+            clarity = clarity,
             audioRouteMonitor = audioRouteMonitor,
             eqProfileManager = eqProfileManager,
             context = context,

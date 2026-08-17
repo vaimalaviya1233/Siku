@@ -1,6 +1,11 @@
 package com.qhana.siku.widget
 
 import android.content.Context
+import android.content.Intent
+import androidx.glance.action.Action
+import androidx.glance.appwidget.action.actionStartActivity
+import com.qhana.siku.MainActivity
+import com.qhana.siku.service.MusicPlaybackService
 import androidx.glance.GlanceId
 import androidx.glance.action.ActionParameters
 import androidx.glance.appwidget.action.ActionCallback
@@ -14,6 +19,25 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+
+/**
+ * Abre la app DIRECTAMENTE en el reproductor, igual que tocar la notificación.
+ *
+ * `actionStartActivity<MainActivity>()` a secas —que es lo que había— lanza la Activity sin acción,
+ * así que aterrizaba en la biblioteca: para quien toca la carátula del widget de lo que está
+ * sonando, ese es el sitio equivocado. La acción ya existía y la consumen las dos puertas de
+ * `MainActivity` (el arranque en frío y `onNewIntent`), solo que los widgets nunca la mandaban.
+ *
+ * Los flags son los mismos de la notificación. `CLEAR_TOP` importa con `launchMode="singleTask"`:
+ * sin él, con la app abierta en una pantalla de detalle el intent llegaría igual pero por encima de
+ * una pila que no se ha tocado.
+ */
+internal fun openNowPlayingAction(context: Context): Action = actionStartActivity(
+    Intent(context, MainActivity::class.java).apply {
+        action = MusicPlaybackService.ACTION_SHOW_NOW_PLAYING
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+    }
+)
 
 /**
  * Acciones de los widgets. Corren en el proceso de la app (broadcast de Glance), así que

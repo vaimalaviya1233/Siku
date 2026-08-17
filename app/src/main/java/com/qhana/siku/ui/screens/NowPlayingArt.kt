@@ -3,7 +3,6 @@ package com.qhana.siku.ui.screens
 import androidx.compose.animation.*
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -38,11 +37,10 @@ import coil3.request.crossfade
 import com.qhana.siku.data.model.PlaybackOrigin
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.ui.components.*
-import dev.chrisbanes.haze.HazeState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-import com.qhana.siku.ui.theme.AppBoundsTransform
+import com.qhana.siku.ui.theme.AppContainerBoundsTransform
 import com.qhana.siku.ui.theme.appSpatialSpec
 import com.qhana.siku.ui.theme.appFastSpatialSpec
 import com.qhana.siku.ui.theme.appSlowSpatialSpec
@@ -65,11 +63,9 @@ internal fun NowPlayingTopBar(
     onBackClick: () -> Unit,
     contentColor: Color,
     accentColor: Color,
-    hazeState: HazeState,
-    glassTint: Color,
     origin: PlaybackOrigin,
-    /** Fondo sólido vs degradado: el chip de origen necesita saberlo para no fundirse con él. */
-    solidBackground: Boolean,
+    /** Color real bajo la barra: de él deriva el chip de origen su relleno para no fundirse. */
+    backgroundColor: Color,
     onAmbientMode: () -> Unit,
     /** Chip de origen sin etiqueta: en horizontal la barra vive en media pantalla. */
     compactChip: Boolean = false,
@@ -79,6 +75,16 @@ internal fun NowPlayingTopBar(
      */
     applyStatusBarPadding: Boolean = true
 ) {
+    // Los dos iconos de la barra van con el ACENTO del álbum, no con `onSurface`. Con onSurface (un
+    // neutro casi acromático) se leían como un GRIS suelto al lado del resto de la barra, que va todo
+    // teñido —el play, el corazón, el toolbar, el chip—: el problema no era de contraste (sobre un
+    // fondo claro onSurface contrasta de sobra) sino de COLOR. Se parte del acento y se pasa por la
+    // misma garantía de contraste que el chip (`ensureContrast`) para que siga siendo legible sobre
+    // el tope del fondo en cualquier paleta y en los dos temas.
+    val iconColor = remember(accentColor, backgroundColor) {
+        ensureContrast(accentColor, backgroundColor, TopBarIconMinContrast)
+    }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -93,7 +99,7 @@ internal fun NowPlayingTopBar(
             onClick = onBackClick,
             icon = "keyboard_arrow_down",
             description = stringResource(R.string.np_close_desc),
-            contentColor = contentColor,
+            contentColor = iconColor,
             iconSize = 32.sp
         )
 
@@ -101,9 +107,7 @@ internal fun NowPlayingTopBar(
             origin = origin,
             contentColor = contentColor,
             accentColor = accentColor,
-            hazeState = hazeState,
-            glassTint = glassTint,
-            solidBackground = solidBackground,
+            backgroundColor = backgroundColor,
             compact = compactChip
         )
 
@@ -111,7 +115,7 @@ internal fun NowPlayingTopBar(
             onClick = onAmbientMode,
             icon = "expand_content",
             description = stringResource(R.string.np_ambient_mode_desc),
-            contentColor = contentColor,
+            contentColor = iconColor,
             iconSize = 28.sp
         )
     }
@@ -119,9 +123,9 @@ internal fun NowPlayingTopBar(
 
 /**
  * Chip de ORIGEN del NowPlaying (compartido portrait/landscape): de dónde sale el audio que
- * suena. Pastilla de VIDRIO ESMERILADO ([GlassSurface]) — informativa, no accionable — con
- * sello M3 Expressive: el icono va sentado en una forma orgánica de [MaterialShapes]
- * (cookie) del color del contenido, que además MORFA de forma al cambiar el origen.
+ * suena. Pastilla de contenedor SÓLIDO tonal — informativa, no accionable — con sello M3
+ * Expressive: el icono va sentado en una forma orgánica de [MaterialShapes] (cookie) del color del
+ * acento, que además MORFA de forma al cambiar el origen.
  *
  * El FORMATO del archivo ya no vive acá: es otro dato (qué suena, no de dónde) y tiene su
  * propio chip centrado entre los tiempos del [ProgressSlider].
@@ -136,35 +140,31 @@ internal fun PlaybackSourceChip(
     origin: PlaybackOrigin,
     contentColor: Color,
     accentColor: Color,
-    hazeState: HazeState,
-    glassTint: Color,
     /**
-     * Fondo del reproductor en modo SÓLIDO. El relleno del chip NO depende de esto (es el mismo
-     * en ambos); lo que decide es el relieve —borde y sombra— con el que se despega del fondo.
-     * Ver más abajo: es un problema real de contraste, no una preferencia estética.
+     * Color que hay REALMENTE debajo del chip: el sólido, o el arranque del degradado (que es donde
+     * vive la barra superior). De él sale el relleno, así que la separación está garantizada en los
+     * dos modos sin ramas. Es un `Color` y no un Boolean a propósito: quien elige el fondo es
+     * `NowPlayingScreen`, y con un Boolean el chip tenía que RECONSTRUIR ese color por su cuenta.
      */
-    solidBackground: Boolean,
+    backgroundColor: Color,
     compact: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    // El relleno es el MISMO en los dos fondos: `secondaryContainer`, teñido por el álbum. El
-    // neutro `surfaceContainerHighest` que llevaba con degradado resolvía el contraste pero
-    // dejaba un chip GRIS al lado de un reproductor entero a color, y esa era la queja.
+    // Relleno DERIVADO del fondo real (hue y croma de `secondaryContainer`, tono a 8 puntos del
+    // fondo): sigue teñido por el álbum y no puede coincidir con lo que tiene detrás.
     //
-    // El problema que aquel neutro atacaba sigue siendo real: el degradado ARRANCA en
-    // `secondaryContainer` —es el color del tope, justo donde vive este chip—, así que relleno y
-    // fondo coinciden. Lo que separa el chip ahí no es el color sino el RELIEVE: borde `outline`
-    // (en vez del `outlineVariant` tenue) y sombra, que es exactamente el recurso que M3 usa
-    // para superficies del mismo tono. Con fondo sólido no hace falta ninguno de los dos: el
-    // contraste ya lo da el color, y la sombra solo ensuciaría.
-    val chipContainerColor = MaterialTheme.colorScheme.secondaryContainer
-    val chipContentColor = MaterialTheme.colorScheme.onSecondaryContainer
-    val chipBorderColor = if (solidBackground) {
-        MaterialTheme.colorScheme.outlineVariant
-    } else {
-        MaterialTheme.colorScheme.outline
-    }
-    val chipShadow = if (solidBackground) 0.dp else ChipGradientShadowElevation
+    // Antes el relleno era `secondaryContainer` fijo, y con degradado ese es EXACTAMENTE el color
+    // del tope —el degradado arranca ahí, justo donde vive este chip—, así que chip y fondo eran el
+    // mismo color y lo único visible era el borde. Ni el borde `outline` ni la sombra podían
+    // arreglarlo: separaban por RELIEVE lo que no se separaba por color, y en tema oscuro una sombra
+    // sobre un fondo ya oscuro no se lee. Con el relleno derivado sobran los dos.
+    //
+    // El neutro `surfaceContainerHighest` que se probó antes que aquello sí resolvía el contraste,
+    // pero dejaba un chip GRIS al lado de un reproductor entero a color — esta vía conserva el
+    // tinte porque hue y croma los sigue poniendo el rol.
+    val chipColors = rememberTonalLayerColors(backgroundColor)
+    val chipContainerColor = chipColors.container
+    val chipContentColor = chipColors.content
 
     // Forma expressive del asiento del icono, una por origen: cookie de 9 lados en local (disco
     // "dentado"), soft burst en descargado, sunny en stream (rayos). El cambio
@@ -190,8 +190,6 @@ internal fun PlaybackSourceChip(
     Surface(
         shape = RoundedCornerShape(50),
         color = chipContainerColor,
-        border = BorderStroke(1.dp, chipBorderColor),
-        shadowElevation = chipShadow,
         modifier = modifier.height(if (compact) 36.dp else 40.dp)
     ) {
         Row(
@@ -212,7 +210,12 @@ internal fun PlaybackSourceChip(
             ) {
                 MaterialSymbol(
                     originIcon,
-                    color = onContainerColor(accentColor),
+                    // El asiento es el acento (mismo color que el play), así que el icono va con el
+                    // MISMO criterio que el glifo del play: blanco/negro por CONTRASTE real
+                    // (`maxContrastOn`), no por el umbral de luminancia 0.5 de `onContainerColor` —ese
+                    // sobre un acento medio elegía blanco cuando el negro contrasta el doble, y el
+                    // icono salía claro sobre un acento claro mientras el play, al lado, iba oscuro.
+                    color = maxContrastOn(accentColor),
                     size = if (compact) 13.sp else 15.sp,
                     fill = true
                 )
@@ -294,15 +297,33 @@ internal fun AlbumArtSection(
         val sharedElementModifier =
             if (sharedTransitionScope != null && animatedVisibilityScope != null && artSharedKey != null) {
                 with(sharedTransitionScope) {
-                    Modifier.sharedElement(
+                    // Visibilidad GESTIONADA POR NOSOTROS, igual que en el otro extremo del par (ver el
+                    // comentario largo en `MiniPlayer`): del scope se lee solo la INTENCIÓN
+                    // (`targetState`), nunca su duración. Atar la punta al scope hacía que el morph
+                    // muriera cuando esa transición terminaba —y la del player y la de la píldora ni
+                    // duran lo mismo ni arrancan a la vez, porque viven en sistemas distintos—, así que
+                    // la portada acababa apareciendo quieta en su destino.
+                    val artVisible =
+                        animatedVisibilityScope.transition.targetState == EnterExitState.Visible
+                    Modifier.sharedElementWithCallerManagedVisibility(
                         // La key la ELIGE quien abrió el reproductor: la constante de la píldora o
-                        // la de la fila tocada (ver `artSharedKey` en PlayerOverlay). Es lo que
+                        // la de la fila tocada (ver `artSharedKey` en NowPlayingRoute). Es lo que
                         // decide de cuál de las dos puntas —ambas declaradas de antes— sale la
                         // portada.
                         sharedContentState = rememberSharedContentState(key = artSharedKey),
-                        animatedVisibilityScope = animatedVisibilityScope,
-                        // Acoplado al slide del player; ver el otro extremo del par en MiniPlayer.
-                        boundsTransform = AppBoundsTransform
+                        visible = artVisible,
+                        // El MISMO spring que la superficie que la lleva (píldora o fila): la portada
+                        // aterriza CON el contenedor, no 150 ms después. Con el tween de 500 de
+                        // `AppBoundsTransform` (el de los shared elements de navegación) el contenedor
+                        // asentaba a ~350 y la portada seguía flotando sola el resto — y esa cola era
+                        // además lo que mantenía activo el `SharedTransitionScope` (overlay por frame)
+                        // ya con todo quieto.
+                        boundsTransform = AppContainerBoundsTransform,
+                        // Por encima de las dos superficies del container transform; ver
+                        // [CONTAINER_ART_OVERLAY_Z]. Vale igual para los dos orígenes: desde la
+                        // píldora y desde una fila la portada viaja ANIDADA dentro de una superficie
+                        // que morfa, así que en ninguno de los dos casos puede ir por debajo.
+                        zIndexInOverlay = CONTAINER_ART_OVERLAY_Z
                     )
                 }
             } else Modifier
@@ -316,8 +337,9 @@ internal fun AlbumArtSection(
         var incomingArt by remember { mutableStateOf<Pair<String, String?>?>(null) }
         val reveal = remember { Animatable(0f) }
 
-        // ¿El reproductor ya está ABIERTO y quieto, o todavía subiendo desde la píldora? Misma
-        // señal que apaga el blur durante la apertura (ver `glassBlurEnabled` en NowPlayingScreen).
+        // ¿El reproductor ya está ABIERTO y quieto, o todavía subiendo desde la píldora? El mismo
+        // gate lo usa el reveal del transporte en [NowPlayingLayouts]: durante el slide la pantalla
+        // entera ya se está moviendo y encadenar encima otra animación se lee como un tirón.
         val playerSettled = animatedVisibilityScope?.transition?.let {
             it.currentState == it.targetState
         } ?: true
@@ -392,7 +414,6 @@ internal fun AlbumArtSection(
             ) {
                 // Carátula base (la mostrada).
                 NowPlayingArtImage(
-                    artId = displayedArt.first,
                     artUri = displayedArt.second,
                     albumName = song.album,
                     variantColor = variantColor
@@ -423,7 +444,6 @@ internal fun AlbumArtSection(
                                 }
                         ) {
                             NowPlayingArtImage(
-                                artId = inc.first,
                                 artUri = inc.second,
                                 albumName = song.album,
                                 variantColor = variantColor
@@ -471,7 +491,6 @@ internal fun AlbumArtSection(
 
 @Composable
 private fun NowPlayingArtImage(
-    artId: String,
     artUri: String?,
     albumName: String,
     variantColor: Color
@@ -479,21 +498,24 @@ private fun NowPlayingArtImage(
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         if (artUri != null) {
             val context = LocalContext.current
-            // memoryCacheKey/diskCacheKey por song.id: reusa bitmap decodificado entre
-            // navegaciones Library ↔ NowPlaying y con el MiniPlayer (misma canción).
-            val request = remember(artId, artUri) {
+            // Sin clave propia: la de Coil (URI + tamaño) reúne solo lo que de verdad produce el
+            // mismo bitmap. La clave por CANCIÓN que había aquí guardaba una copia de 800×800
+            // (2,5 MB en ARGB_8888) por cada pista de un mismo álbum, y encima no compartía nada
+            // con el MiniPlayer, que usaba otro prefijo y otro tamaño — el "reuso" que prometía no
+            // existía. Ver [AlbumArt] para el porqué completo.
+            val request = remember(artUri) {
                 ImageRequest.Builder(context)
                     .data(artUri)
                     .crossfade(false)
-                    .size(800)
-                    .memoryCacheKey("song_art_$artId")
-                    .diskCacheKey("song_art_$artId")
+                    .size(ComponentConfig.NowPlayingArtDecodePx)
                     .build()
             }
             AsyncImage(
                 model = request,
                 contentDescription = stringResource(R.string.album_art_desc, albumName),
                 contentScale = ContentScale.Crop,
+                // Sonda (solo debug): cuándo aterriza el bitmap grande respecto del tap.
+                onSuccess = { com.qhana.siku.data.util.JankProbe.mark { "carátula 800px lista (${it.result.dataSource})" } },
                 modifier = Modifier.fillMaxSize()
             )
         } else {
@@ -524,7 +546,8 @@ internal fun SongInfoSection(
             Text(
                 text = song.title,
                 style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Medium),
-                color = contentColor,
+                // EXPERIMENTO: título/artista/álbum en primary/secondary/tertiary.
+                color = MaterialTheme.colorScheme.primary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE)
@@ -533,7 +556,7 @@ internal fun SongInfoSection(
             Text(
                 text = song.artist.ifBlank { stringResource(R.string.common_unknown_artist) },
                 style = MaterialTheme.typography.titleMedium,
-                color = variantColor,
+                color = MaterialTheme.colorScheme.secondary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
@@ -545,7 +568,7 @@ internal fun SongInfoSection(
                 Text(
                     text = song.album,
                     style = MaterialTheme.typography.titleSmall,
-                    color = variantColor.copy(alpha = variantColor.alpha * 0.8f),
+                    color = MaterialTheme.colorScheme.secondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
@@ -667,10 +690,12 @@ private val SeekFlashSidePadding = 12.dp
  */
 private const val SEEK_FLASH_SCRIM_ALPHA = 0.45f
 
+// El chip de origen ya no lleva sombra ni borde: su relleno se DERIVA del fondo (ver
+// [PlaybackSourceChip]), así que se separa por color y no por relieve.
+
 /**
- * Sombra del chip de origen cuando el reproductor va en DEGRADADO (ver [PlaybackSourceChip]).
- * Es lo que despega el chip de un fondo de su mismo color, ya que el relleno no cambia entre
- * los dos modos. 3dp: suficiente para que el borde se lea como canto y no como línea pintada,
- * y por debajo del umbral en el que la sombra se nota como tal sobre un fondo oscuro.
+ * Contraste mínimo (WCAG) de los iconos de la barra superior contra el fondo real bajo ellos.
+ * 3:1 = umbral de objetos gráficos no textuales (los glifos son grandes), suficiente para que
+ * cerrar / modo inmersivo se lean sobre CUALQUIER paleta sin oscurecer el resto.
  */
-private val ChipGradientShadowElevation = 3.dp
+private const val TopBarIconMinContrast = 3f

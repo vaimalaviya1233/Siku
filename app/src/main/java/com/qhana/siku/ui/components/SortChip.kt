@@ -22,8 +22,9 @@ import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
 
 /**
- * Chip de ORDEN con menú desplegable, genérico sobre el tipo de orden. Reemplazó al
- * [SortMenuIconButton] (icono suelto) para unificar Todas/Artistas/Álbumes: las tres
+ * Chip de ORDEN con menú desplegable, genérico sobre el tipo de orden. Sustituyó a un icono suelto
+ * (`SortMenuIconButton`, ya eliminado — sin corchetes, que sugieren un símbolo al que se puede ir)
+ * para unificar Todas/Artistas/Álbumes: las tres
  * pantallas llevan sus controles como chips en la fila sobre el contenido. Muestra el
  * criterio activo ("Ordenar: Nombre ▾") y abre el mismo menú al tocarlo. Relleno tonal
  * (secondaryContainer), igual que el chip de conteo y los de origen.

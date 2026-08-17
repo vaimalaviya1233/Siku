@@ -21,7 +21,6 @@ import androidx.glance.ImageProvider
 import androidx.glance.LocalContext
 import androidx.glance.LocalSize
 import androidx.glance.action.actionParametersOf
-import androidx.glance.action.actionStartActivity
 import androidx.glance.action.clickable
 import androidx.glance.appwidget.GlanceAppWidget
 import androidx.glance.appwidget.GlanceAppWidgetReceiver
@@ -38,12 +37,24 @@ import androidx.glance.layout.Box
 import androidx.glance.layout.ContentScale
 import androidx.glance.layout.fillMaxSize
 import androidx.glance.layout.size
-import com.qhana.siku.MainActivity
 import com.qhana.siku.R
 import java.io.File
 
 class PlayerWidgetReceiver : GlanceAppWidgetReceiver() {
     override val glanceAppWidget: GlanceAppWidget = PlayerWidget()
+
+    // Alta del primer widget / baja del último: avisa a [WidgetBridge] (vía [WidgetPresence]) para
+    // que empiece o deje de observar el estado del reproductor. Sin esto, añadir un widget en
+    // caliente no lo actualizaría hasta el próximo arranque del proceso.
+    override fun onEnabled(context: android.content.Context) {
+        super.onEnabled(context)
+        WidgetPresence.notifyChanged()
+    }
+
+    override fun onDisabled(context: android.content.Context) {
+        super.onDisabled(context)
+        WidgetPresence.notifyChanged()
+    }
 }
 
 /**
@@ -107,7 +118,7 @@ private fun PlayerWidgetCanvas(
     context: Context
 ) {
     Box(modifier = GlanceModifier.size(side)) {
-        // Carátula circular centrada (abre la app).
+        // Carátula circular centrada: abre directamente el REPRODUCTOR (ver openNowPlayingAction).
         Box(modifier = GlanceModifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             if (artwork != null) {
                 Image(
@@ -116,7 +127,7 @@ private fun PlayerWidgetCanvas(
                     contentScale = ContentScale.Crop,
                     modifier = GlanceModifier
                         .size(artSize)
-                        .clickable(actionStartActivity<MainActivity>())
+                        .clickable(openNowPlayingAction(context))
                 )
             } else {
                 Box(
@@ -124,7 +135,7 @@ private fun PlayerWidgetCanvas(
                         .size(artSize)
                         .cornerRadius(artSize / 2)
                         .background(GlanceTheme.colors.surfaceVariant)
-                        .clickable(actionStartActivity<MainActivity>()),
+                        .clickable(openNowPlayingAction(context)),
                     contentAlignment = Alignment.Center
                 ) {
                     Image(

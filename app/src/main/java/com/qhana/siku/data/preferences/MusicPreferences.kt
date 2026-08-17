@@ -20,9 +20,11 @@ import com.qhana.siku.data.model.AlbumSortOrder
 import com.qhana.siku.data.model.ArtistSortOrder
 import com.qhana.siku.data.model.DownloadControlState
 import com.qhana.siku.data.model.DuplicatePolicy
-import com.qhana.siku.data.model.EqCustomPreset
+import com.qhana.siku.data.model.EqProfile
 import com.qhana.siku.data.model.EqSettings
 import com.qhana.siku.data.model.LibraryTabState
+import com.qhana.siku.player.audio.EqualizerAudioProcessor
+import com.qhana.siku.player.audio.clarity.Clarity
 import com.qhana.siku.data.model.LibraryTabsConfig
 import com.qhana.siku.data.model.LyricsSaveMode
 import com.qhana.siku.data.model.PlaybackContext
@@ -216,6 +218,14 @@ class MusicPreferences(context: Context) {
 
     fun loadKeepScreenOn(): Boolean = cache[KEY_KEEP_SCREEN_ON] ?: false
 
+    // --- Carátulas: cuántos archivos había en el directorio la última vez que se comprobó ---
+    // Lo usa ArtworkHealingManager para saltarse el barrido de huérfanas cuando nada desapareció.
+    // −1 = nunca medido (primer arranque tras la actualización), y entonces sí se barre.
+
+    fun loadCoverFileCount(): Int = cache[KEY_COVER_FILE_COUNT] ?: -1
+
+    fun saveCoverFileCount(count: Int) = update { it[KEY_COVER_FILE_COUNT] = count }
+
     // --- Colores manuales ---
     // Ids de canciones cuyo color eligió el USUARIO (picker del NowPlaying). Vive en DataStore,
     // no como columna de `songs`, por dos razones: no fuerza un bump destructivo del schema, y
@@ -395,10 +405,11 @@ class MusicPreferences(context: Context) {
      * ¿Indexar TODA la música del dispositivo (MediaStore) en vez de carpetas concretas?
      * Es el único modo local que necesita permiso de lectura de audio.
      */
-    fun loadScanWholeDevice(): Boolean = cache[KEY_SCAN_WHOLE_DEVICE] == true
+    fun loadScanWholeDevice(): Boolean = cache[KEY_SCAN_WHOLE_DEVICE] ?: DEFAULT_SCAN_WHOLE_DEVICE
 
     /** Reactivo, por el mismo motivo que [localFolderUrisFlow]. */
-    val scanWholeDeviceFlow: Flow<Boolean> = prefFlow { it[KEY_SCAN_WHOLE_DEVICE] == true }
+    val scanWholeDeviceFlow: Flow<Boolean> =
+        prefFlow { it[KEY_SCAN_WHOLE_DEVICE] ?: DEFAULT_SCAN_WHOLE_DEVICE }
 
     fun saveScanWholeDevice(enabled: Boolean) = update {
         it[KEY_SCAN_WHOLE_DEVICE] = enabled
@@ -443,7 +454,7 @@ class MusicPreferences(context: Context) {
     // --- Ecualizador ---
 
     fun saveEqEnabled(enabled: Boolean) = update { it[KEY_EQ_ENABLED] = enabled }
-    fun loadEqEnabled(): Boolean = cache[KEY_EQ_ENABLED] ?: false
+    fun loadEqEnabled(): Boolean = cache[KEY_EQ_ENABLED] ?: DEFAULT_EQ_ENABLED
 
     /**
      * Flow reactivo del toggle del EQ: lo cambia PlaybackViewModel (hoja del NowPlaying) y lo
@@ -451,7 +462,7 @@ class MusicPreferences(context: Context) {
      * recuperar el offload) cuando cambia.
      */
     val eqEnabledFlow: Flow<Boolean> =
-        prefFlow { it[KEY_EQ_ENABLED] ?: false }
+        prefFlow { it[KEY_EQ_ENABLED] ?: DEFAULT_EQ_ENABLED }
 
     // --- Toolbar del NowPlaying (orden + barra/overflow de cada acción) ---
     // Reactivo: el NowPlaying observa el flow y la barra se reordena en vivo al guardar en Ajustes.
@@ -481,7 +492,9 @@ class MusicPreferences(context: Context) {
 
     /** Nº de bandas del EQ propio (5 o 10). */
     fun saveEqBandCount(count: Int) = update { it[KEY_EQ_BAND_COUNT] = count }
-    fun loadEqBandCount(): Int = (cache[KEY_EQ_BAND_COUNT] ?: 5).let { if (it == 10) 10 else 5 }
+    fun loadEqBandCount(): Int = EqualizerAudioProcessor.normalizedBandCount(
+        cache[KEY_EQ_BAND_COUNT] ?: EqualizerAudioProcessor.BANDS_5_COUNT
+    )
 
     // Refuerzos de graves/agudos: NO van por modo de bandas (a diferencia de las ganancias), son
     // dos peakings anchos que se suman a cualquier curva, así que alternar 5↔10 los conserva.
@@ -517,7 +530,7 @@ class MusicPreferences(context: Context) {
      * pantalla. Coste asumido: ese usuario se queda sin red hasta que lea el aviso.
      */
     fun saveEqLimiterEnabled(enabled: Boolean) = update { it[KEY_EQ_LIMITER] = enabled }
-    fun loadEqLimiterEnabled(): Boolean = cache[KEY_EQ_LIMITER] ?: false
+    fun loadEqLimiterEnabled(): Boolean = cache[KEY_EQ_LIMITER] ?: DEFAULT_EQ_LIMITER_ENABLED
 
     /**
      * Reactivo por el mismo motivo que [eqEnabledFlow]: conviven varias instancias de
@@ -525,7 +538,7 @@ class MusicPreferences(context: Context) {
      * por instancia son dos verdades para el mismo ajuste — la que no recibió el toque se queda
      * con el valor viejo y lo reimpone al reconstruirse.
      */
-    val eqLimiterEnabledFlow: Flow<Boolean> = prefFlow { it[KEY_EQ_LIMITER] ?: false }
+    val eqLimiterEnabledFlow: Flow<Boolean> = prefFlow { it[KEY_EQ_LIMITER] ?: DEFAULT_EQ_LIMITER_ENABLED }
 
     /**
      * Umbral del limitador en dBFS. 0 = fondo de escala (pura protección); por debajo se convierte
@@ -548,21 +561,50 @@ class MusicPreferences(context: Context) {
     fun saveEqLimiterThresholdAuto(auto: Boolean) =
         update { it[KEY_EQ_LIMITER_THRESHOLD_AUTO] = auto }
 
-    fun loadEqLimiterThresholdAuto(): Boolean = cache[KEY_EQ_LIMITER_THRESHOLD_AUTO] ?: true
+    fun loadEqLimiterThresholdAuto(): Boolean =
+        cache[KEY_EQ_LIMITER_THRESHOLD_AUTO] ?: DEFAULT_EQ_LIMITER_THRESHOLD_AUTO
 
     /** Reactivo por el mismo motivo que [eqLimiterEnabledFlow]. */
     val eqLimiterThresholdAutoFlow: Flow<Boolean> =
-        prefFlow { it[KEY_EQ_LIMITER_THRESHOLD_AUTO] ?: true }
+        prefFlow { it[KEY_EQ_LIMITER_THRESHOLD_AUTO] ?: DEFAULT_EQ_LIMITER_THRESHOLD_AUTO }
 
 
     // Las ganancias se guardan POR MODO (clave distinta para 5 y 10 bandas): al alternar
     // el nº de bandas se recupera la curva que el usuario tenía en ese modo, en vez de
     // truncar/estirar una a la otra (las frecuencias centrales no se corresponden).
     private fun eqGainsKey(bandCount: Int) =
-        if (bandCount == 10) KEY_EQ_GAINS_10 else KEY_EQ_GAINS
+        if (bandCount == EqualizerAudioProcessor.BANDS_10_COUNT) KEY_EQ_GAINS_10 else KEY_EQ_GAINS
 
     fun saveEqBandGains(bandCount: Int, gains: FloatArray) = update {
         it[eqGainsKey(bandCount)] = gains.joinToString(",")
+    }
+
+    /**
+     * Persiste una config COMPLETA del EQ en UNA sola escritura (un único volcado a disco).
+     *
+     * Sustituye a la cascada de ~10 `saveEqX` que hacían `applyEqProfile`/`resetEq`/el manager por
+     * ruta: como cada volcado reescribe el snapshot ENTERO (ver la cola FIFO), diez `saveX` seguidos
+     * eran diez `clear()`+dump y, peor, NO atómicos — un crash a mitad dejaba un perfil aplicado a
+     * medias en disco. Aquí el estado del EQ pasa de un config a otro de golpe.
+     *
+     * Las ganancias se guardan bajo la clave del modo de [EqSettings.bandCount] (ver [eqGainsKey]).
+     * Los campos nullable (centros de refuerzo, umbral) se escriben solo si vienen resueltos: los
+     * llamadores pasan valores no nulos cuando quieren un default determinista — igual que hacían al
+     * llamar a los setters individuales, que tampoco aceptan null.
+     */
+    fun saveEqSettings(s: EqSettings) = update { m ->
+        m[eqGainsKey(s.bandCount)] = s.gains.joinToString(",")
+        m[KEY_EQ_BAND_COUNT] = s.bandCount
+        m[KEY_EQ_BASS_BOOST] = s.bassBoostDb
+        m[KEY_EQ_TREBLE_BOOST] = s.trebleBoostDb
+        s.bassFreqHz?.let { m[KEY_EQ_BASS_FREQ] = it }
+        s.trebleFreqHz?.let { m[KEY_EQ_TREBLE_FREQ] = it }
+        m[KEY_EQ_PREAMP] = s.preampDb
+        m[KEY_EQ_LIMITER] = s.limiterEnabled
+        s.limiterThresholdDb?.let { m[KEY_EQ_LIMITER_THRESHOLD] = it }
+        m[KEY_EQ_LIMITER_THRESHOLD_AUTO] = s.limiterThresholdAuto
+        m[KEY_CLARITY_ENABLED] = s.clarityEnabled
+        m[KEY_CLARITY_GAIN] = s.clarityGainDb
     }
 
     /** Ganancias (dB) del modo de [bandCount] bandas; ceros si nunca se configuró. */
@@ -576,34 +618,39 @@ class MusicPreferences(context: Context) {
         }
     }
 
-    // --- Presets personalizados del EQ ---
+    // --- Perfiles del EQ guardados por el usuario ---
     // Se serializan como un JSON array en una sola clave (org.json, sin Gson → sin regla
-    // ProGuard). Cada preset guarda su configuración COMPLETA ([EqSettings]: curva cruda, modo de
-    // bandas de captura, refuerzos, preamp y limitador); el nombre puede contener comas/saltos,
-    // por eso NO se usa el encoding delimitado de las ganancias.
+    // ProGuard). Cada perfil guarda su [EqSettings] COMPLETO (curva cruda, modo de bandas de
+    // captura, refuerzos, preamp y limitador); el nombre puede contener comas/saltos, por eso NO se
+    // usa el encoding delimitado de las ganancias.
+    //
+    // Solo hay perfiles: los *presets* (curva sola) son los de fábrica y no se guardan nunca, así
+    // que no hace falta ningún campo que distinga el tipo — lo que hay aquí es de una sola clase.
+    //
+    // La CLAVE de DataStore no cambia con el renombrado: es el formato en disco de una app
+    // publicada, y tocarla habría dejado sin sus perfiles a quien actualice.
 
-    fun loadCustomEqPresets(): List<EqCustomPreset> =
-        parseCustomPresets(cache[KEY_EQ_CUSTOM_PRESETS])
+    fun loadEqProfiles(): List<EqProfile> = parseEqProfiles(cache[KEY_EQ_CUSTOM_PRESETS])
 
-    fun saveCustomEqPresets(presets: List<EqCustomPreset>) = update {
+    fun saveEqProfiles(profiles: List<EqProfile>) = update {
         val arr = JSONArray()
-        presets.forEach { p ->
+        profiles.forEach { p ->
             arr.put(encodeEqSettings(p.settings).put("id", p.id).put("name", p.name))
         }
         it[KEY_EQ_CUSTOM_PRESETS] = arr.toString()
     }
 
-    /** Reactivo: la hoja del EQ edita/aplica presets; puede haber varias instancias del ViewModel. */
-    val customEqPresetsFlow: Flow<List<EqCustomPreset>> =
-        prefFlow { parseCustomPresets(it[KEY_EQ_CUSTOM_PRESETS]) }
+    /** Reactivo: la hoja del EQ edita/aplica perfiles; puede haber varias instancias del ViewModel. */
+    val eqProfilesFlow: Flow<List<EqProfile>> =
+        prefFlow { parseEqProfiles(it[KEY_EQ_CUSTOM_PRESETS]) }
 
-    private fun parseCustomPresets(raw: String?): List<EqCustomPreset> {
+    private fun parseEqProfiles(raw: String?): List<EqProfile> {
         if (raw.isNullOrBlank()) return emptyList()
         return try {
             val arr = JSONArray(raw)
             (0 until arr.length()).map { i ->
                 val o = arr.getJSONObject(i)
-                EqCustomPreset(
+                EqProfile(
                     id = o.getString("id"),
                     name = o.getString("name"),
                     settings = decodeEqSettings(o)
@@ -629,6 +676,12 @@ class MusicPreferences(context: Context) {
             .put("preamp", s.preampDb.toDouble())
             .put("lim", s.limiterEnabled)
             .put("limAuto", s.limiterThresholdAuto)
+            // Clarity: por defecto apagado/0, y en ese caso se OMITE igual que los nullables, de modo
+            // que un perfil guardado antes de que Clarity formara parte del sonido se lee idéntico.
+            .apply {
+                if (s.clarityEnabled) put("clarity", true)
+                if (s.clarityGainDb != 0f) put("clarityDb", s.clarityGainDb.toDouble())
+            }
         s.bassFreqHz?.let { o.put("bassHz", it) }
         s.trebleFreqHz?.let { o.put("trebleHz", it) }
         s.limiterThresholdDb?.let { o.put("limDb", it.toDouble()) }
@@ -644,7 +697,7 @@ class MusicPreferences(context: Context) {
     private fun decodeEqSettings(o: JSONObject): EqSettings {
         val g = o.getJSONArray("gains")
         return EqSettings(
-            bandCount = if (o.getInt("bandCount") == 10) 10 else 5,
+            bandCount = EqualizerAudioProcessor.normalizedBandCount(o.getInt("bandCount")),
             gains = FloatArray(g.length()) { g.getDouble(it).toFloat() },
             bassBoostDb = o.optDouble("bass", 0.0).toFloat(),
             trebleBoostDb = o.optDouble("treble", 0.0).toFloat(),
@@ -653,19 +706,21 @@ class MusicPreferences(context: Context) {
             preampDb = o.optDouble("preamp", 0.0).toFloat(),
             limiterEnabled = o.optBoolean("lim", false),
             limiterThresholdDb = if (o.has("limDb")) o.getDouble("limDb").toFloat() else null,
-            limiterThresholdAuto = o.optBoolean("limAuto", true)
+            limiterThresholdAuto = o.optBoolean("limAuto", true),
+            clarityEnabled = o.optBoolean("clarity", false),
+            clarityGainDb = o.optDouble("clarityDb", 0.0).toFloat()
         )
     }
 
-    // --- Presets ocultos ---
+    // --- Entradas ocultas ---
 
     /**
-     * Ids de los presets que NO se listan en el selector del EQ. Un solo conjunto para los dos
-     * tipos, porque el selector los pinta en una sola lista y el criterio de "no me lo muestres" es
-     * el mismo; conviven sin ambigüedad porque los de fábrica van NAMESPACED (`EqPresets.hideKey`,
-     * prefijo `builtin:`) y los propios son UUIDs.
+     * Ids de lo que NO se lista en el selector del EQ. Un solo conjunto para presets de fábrica y
+     * perfiles propios, porque el criterio de "no me lo muestres" es el mismo y el selector los
+     * pinta en un solo menú aunque los agrupe; conviven sin ambigüedad porque los presets van
+     * NAMESPACED (`EqPresets.hideKey`, prefijo `builtin:`) y los perfiles son UUIDs.
      *
-     * Ocultar NO es borrar, y esa es toda la razón de que exista: el preset sigue guardado y se
+     * Ocultar NO es borrar, y esa es toda la razón de que exista: la entrada sigue guardada y se
      * restaura desde Ajustes. Por eso los de fábrica necesitaron una clave propia — su `labelRes`
      * es un id de recurso que AAPT/R8 pueden reasignar entre builds, así que persistirlo habría
      * hecho que una actualización ocultara un preset distinto sin fallar en compilación.
@@ -717,20 +772,27 @@ class MusicPreferences(context: Context) {
 
     fun saveLastEqRoute(routeKey: String) = update { it[KEY_EQ_LAST_ROUTE] = routeKey }
 
-    fun clearLastEqRoute() = update { it.remove(KEY_EQ_LAST_ROUTE) }
+    // La memoria por ruta ya no es opcional (antes: `eq_route_profiles_enabled`, default OFF). El
+    // `EqProfileManager` observa siempre, así que no hay flag que consultar ni ruta que "olvidar" al
+    // desactivar. La clave vieja en disco queda huérfana y es inocua.
 
-    /**
-     * Perfiles por ruta on/off (Ajustes). Apagado, el EQ se comporta como siempre: una sola
-     * configuración global que no cambia al conectar nada.
-     */
-    fun saveEqRouteProfilesEnabled(enabled: Boolean) =
-        update { it[KEY_EQ_ROUTE_PROFILES_ENABLED] = enabled }
+    // --- Clarity (realce de agudos) ---
+    //
+    // Clarity SÍ forma parte de [EqSettings] (ver su kdoc): entra en los perfiles del usuario y en
+    // los perfiles por ruta de salida, porque es un ajuste de TIMBRE y por tanto parte del sonido
+    // que se recuerda por dispositivo. Estos setters sueltos siguen existiendo para el control en
+    // vivo de la hoja (toggle y slider); la persistencia dentro de un perfil pasa por
+    // [encodeEqSettings]/[saveEqSettings], que escriben las MISMAS claves (`KEY_CLARITY_*`).
 
-    fun loadEqRouteProfilesEnabled(): Boolean = cache[KEY_EQ_ROUTE_PROFILES_ENABLED] ?: false
+    fun saveClarityEnabled(enabled: Boolean) = update { it[KEY_CLARITY_ENABLED] = enabled }
 
-    /** Lo observa el manager (singleton, sin composición): encenderlo debe surtir efecto en vivo. */
-    val eqRouteProfilesEnabledFlow: Flow<Boolean> =
-        prefFlow { it[KEY_EQ_ROUTE_PROFILES_ENABLED] ?: false }
+    fun loadClarityEnabled(): Boolean = cache[KEY_CLARITY_ENABLED] ?: DEFAULT_CLARITY_ENABLED
+
+    val clarityEnabledFlow: Flow<Boolean> = prefFlow { it[KEY_CLARITY_ENABLED] ?: DEFAULT_CLARITY_ENABLED }
+
+    fun saveClarityGain(db: Float) = update { it[KEY_CLARITY_GAIN] = db }
+
+    fun loadClarityGain(): Float = cache[KEY_CLARITY_GAIN] ?: Clarity.DEFAULT_GAIN_DB
 
     /**
      * Preferir el ecualizador DEL SISTEMA (MIUI/panel estándar): el botón EQ del NowPlaying
@@ -738,7 +800,7 @@ class MusicPreferences(context: Context) {
      * ecualizar dos veces) — eso lo hace el setter del ViewModel, no esta capa.
      */
     fun saveUseSystemEq(enabled: Boolean) = update { it[KEY_USE_SYSTEM_EQ] = enabled }
-    fun loadUseSystemEq(): Boolean = cache[KEY_USE_SYSTEM_EQ] ?: false
+    fun loadUseSystemEq(): Boolean = cache[KEY_USE_SYSTEM_EQ] ?: DEFAULT_USE_SYSTEM_EQ
 
     /** "No volver a mostrar" del aviso de doble ecualización al encender el EQ propio. */
     fun saveEqConflictWarningSuppressed(suppressed: Boolean) =
@@ -830,7 +892,7 @@ class MusicPreferences(context: Context) {
 
     /** Reactivo: lo cambia LibraryViewModel (Ajustes) y lo observa PlaybackViewModel (botón EQ). */
     val useSystemEqFlow: Flow<Boolean> =
-        prefFlow { it[KEY_USE_SYSTEM_EQ] ?: false }
+        prefFlow { it[KEY_USE_SYSTEM_EQ] ?: DEFAULT_USE_SYSTEM_EQ }
 
     // --- Control de descargas (pausa / stop persistentes) ---
 
@@ -903,6 +965,35 @@ class MusicPreferences(context: Context) {
     val storageLimitBytesFlow: Flow<Long> =
         prefFlow { it[KEY_STORAGE_LIMIT_BYTES] ?: 0L }
 
+    /**
+     * Motivo por el que el ÚLTIMO escaneo se dio por perdido, o `null` si el último terminó bien.
+     *
+     * Se persiste porque quien se rinde es un worker de fondo, minutos después y probablemente con
+     * la app cerrada: el estado en memoria de `SyncManager` se habría ido con el proceso y la
+     * biblioteca aparecería desactualizada sin decir por qué. Es el equivalente, a nivel de
+     * proceso, de lo que `songs.lastDownloadError` guarda por canción.
+     *
+     * Lo limpia el primer escaneo que vuelva a terminar bien.
+     */
+    fun saveLastSyncFailure(reason: String?) = update {
+        if (reason == null) it.remove(KEY_LAST_SYNC_FAILURE) else it[KEY_LAST_SYNC_FAILURE] = reason
+    }
+    fun loadLastSyncFailure(): String? = cache[KEY_LAST_SYNC_FAILURE]
+    val lastSyncFailureFlow: Flow<String?> = prefFlow { it[KEY_LAST_SYNC_FAILURE] }
+
+    /**
+     * Throughput MEDIDO por conexión contra OneDrive (MB/s), del que sale el número de descargas en
+     * paralelo. `0` = nunca se ha podido medir, y entonces manda la estimación de fábrica.
+     *
+     * Se persiste porque cada corrida aporta UNA muestra y el dato tiene que sobrevivir al proceso:
+     * un sync es lo bastante raro como para que aprender de cero cada vez no sirva de nada. Es del
+     * dispositivo y de la cuenta, no del catálogo, así que no se toca al borrar la biblioteca.
+     */
+    fun saveOneDriveThroughputMBps(value: Float) =
+        update { it[KEY_ONEDRIVE_THROUGHPUT_MBPS] = value.coerceAtLeast(0f) }
+    fun loadOneDriveThroughputMBps(): Float =
+        cache[KEY_ONEDRIVE_THROUGHPUT_MBPS] ?: DEFAULT_ONEDRIVE_THROUGHPUT_MBPS
+
     // --- Now Playing ---
 
     fun saveNowPlayingSolidBackground(enabled: Boolean) = update {
@@ -933,6 +1024,26 @@ class MusicPreferences(context: Context) {
     /** Reactivo por el mismo motivo que [nowPlayingSolidBackgroundFlow] (Ajustes ↔ NowPlaying). */
     val nowPlayingWavyProgressFlow: Flow<Boolean> =
         prefFlow { it[KEY_NOW_PLAYING_WAVY] ?: false }
+
+    /**
+     * GROSOR de la barra de progreso del NowPlaying, en dp. Vale para los DOS modos (píldora plana
+     * y onda): la UI deriva de él el trazo, la amplitud, el indicador y el alto del palo, de modo
+     * que el ajuste es un solo número. 0 (o cualquier valor fuera de rango) = el default, que lo
+     * acota la propia UI.
+     *
+     * Se guarda en dp y no como factor de escala porque es lo que el ajuste enseña y lo que hay
+     * que poder volver a leer para saber qué está dibujado.
+     */
+    fun saveNowPlayingProgressThickness(dp: Int) = update {
+        it[KEY_NOW_PLAYING_PROGRESS_THICKNESS] = dp
+    }
+
+    fun loadNowPlayingProgressThickness(): Int =
+        cache[KEY_NOW_PLAYING_PROGRESS_THICKNESS] ?: DEFAULT_PROGRESS_THICKNESS_DP
+
+    /** Reactivo por el mismo motivo que [nowPlayingWavyProgressFlow] (Ajustes ↔ NowPlaying). */
+    val nowPlayingProgressThicknessFlow: Flow<Int> =
+        prefFlow { it[KEY_NOW_PLAYING_PROGRESS_THICKNESS] ?: DEFAULT_PROGRESS_THICKNESS_DP }
 
     /**
      * Forma del MiniPlayer: `true` = rectángulo redondeado, `false` = píldora (el diseño actual y
@@ -1038,6 +1149,27 @@ class MusicPreferences(context: Context) {
         prefFlow { it[KEY_THEME_PALETTE_STYLE] ?: DEFAULT_PALETTE_STYLE }
 
     companion object {
+        // ==================== DEFAULTS ====================
+        //
+        // Toda preferencia que se lee por DOS caminos —`loadX()` síncrono y `xFlow` reactivo—
+        // tiene aquí su valor por defecto, UNA vez. No es ceremonia: los dos caminos existen
+        // por diseño (uno para arrancar un ViewModel, otro para reaccionar), y mientras el
+        // default estuvo escrito literalmente en cada uno, cambiarlo obligaba a acordarse de
+        // los dos. Nada avisaba si se olvidaba: el valor efectivo pasaba a depender de cuál de
+        // los dos caminos leyera primero, que es una divergencia silenciosa entre "lo que la
+        // pantalla muestra al abrirse" y "lo que muestra al cambiar". Es la misma clase de
+        // fallo que ya obligó a unificar caché y disco como fuente de verdad, un nivel más
+        // abajo. Las preferencias cuyo valor sale de un parseo compartido
+        // (`readLocalFolderUris`, `readLyricsSaveMode`, `parseEqProfiles`…) ya no lo necesitan:
+        // ahí el default vive dentro de esa función, que también es un solo sitio.
+        private const val DEFAULT_EQ_ENABLED = false
+        private const val DEFAULT_EQ_LIMITER_ENABLED = false
+        /** Ver el KDoc de `loadEqLimiterThresholdAuto`: automático porque no exige entender nada. */
+        private const val DEFAULT_EQ_LIMITER_THRESHOLD_AUTO = true
+        private const val DEFAULT_CLARITY_ENABLED = false
+        private const val DEFAULT_USE_SYSTEM_EQ = false
+        private const val DEFAULT_SCAN_WHOLE_DEVICE = false
+
         private const val DATASTORE_NAME = "music_player_prefs"
         private const val KEY_SORT_ORDER = "sort_order"
         private val KEY_ARTIST_SORT = stringPreferencesKey("artist_sort_order")
@@ -1049,6 +1181,7 @@ class MusicPreferences(context: Context) {
 
         // DataStore keys tipadas
         private val KEY_KEEP_SCREEN_ON = booleanPreferencesKey("keep_screen_on")
+        private val KEY_COVER_FILE_COUNT = intPreferencesKey("cover_file_count")
 
         private val KEY_REPLAYGAIN_MODE = stringPreferencesKey("replaygain_mode")
         private val KEY_REPLAYGAIN_PREAMP = floatPreferencesKey("replaygain_preamp")
@@ -1068,10 +1201,10 @@ class MusicPreferences(context: Context) {
         private val KEY_EQ_HIDDEN_PRESETS = stringSetPreferencesKey("eq_hidden_presets")
         private val KEY_EQ_ROUTE_PROFILES = stringPreferencesKey("eq_route_profiles")
         private val KEY_EQ_LAST_ROUTE = stringPreferencesKey("eq_last_route")
-        private val KEY_EQ_ROUTE_PROFILES_ENABLED =
-            booleanPreferencesKey("eq_route_profiles_enabled")
         private val KEY_EQ_CONFLICT_WARNING_SUPPRESSED = booleanPreferencesKey("eq_conflict_warning_suppressed")
         private val KEY_USE_SYSTEM_EQ = booleanPreferencesKey("use_system_eq")
+        private val KEY_CLARITY_ENABLED = booleanPreferencesKey("clarity_enabled")
+        private val KEY_CLARITY_GAIN = floatPreferencesKey("clarity_gain")
         private val KEY_ARTIST_PHOTOS_METERED = booleanPreferencesKey("artist_photos_metered")
         private val KEY_ARTIST_PHOTOS_BANNER = booleanPreferencesKey("artist_photos_banner_enabled")
         private val KEY_ARTIST_PHOTO_DETAIL_METERED = booleanPreferencesKey("artist_photo_detail_metered")
@@ -1093,6 +1226,15 @@ class MusicPreferences(context: Context) {
          */
         private const val INITIAL_READ_ATTEMPTS = 3
         private val KEY_NOW_PLAYING_WAVY = booleanPreferencesKey("now_playing_wavy_progress")
+        private val KEY_NOW_PLAYING_PROGRESS_THICKNESS =
+            intPreferencesKey("now_playing_progress_thickness_dp")
+
+        /**
+         * Grosor por defecto de la barra de progreso, en dp. Duplica a propósito el valor de
+         * `ComponentConfig.ProgressTrackHeight`: la capa de datos no depende de la de UI, y este
+         * módulo no puede importar un token de Compose. Si uno cambia, cambian los dos.
+         */
+        const val DEFAULT_PROGRESS_THICKNESS_DP = 12
         private val KEY_MINI_PLAYER_ROUNDED_RECT = booleanPreferencesKey("mini_player_rounded_rect")
         private val KEY_PLAYER_GESTURES = booleanPreferencesKey("player_gestures")
 
@@ -1102,6 +1244,11 @@ class MusicPreferences(context: Context) {
         private val KEY_STOP_BANNER_DISMISSED = booleanPreferencesKey("download_stop_banner_dismissed")
         private val KEY_DOWNLOAD_BANNER_MUTED = booleanPreferencesKey("download_banner_muted")
         private val KEY_STORAGE_LIMIT_BYTES = longPreferencesKey("download_storage_limit_bytes")
+        private val KEY_ONEDRIVE_THROUGHPUT_MBPS = floatPreferencesKey("onedrive_throughput_mbps")
+        private val KEY_LAST_SYNC_FAILURE = stringPreferencesKey("last_sync_failure")
+
+        /** Sin medición todavía; `SyncManager` cae a su estimación de fábrica. */
+        private const val DEFAULT_ONEDRIVE_THROUGHPUT_MBPS = 0f
         private val KEY_TRACK_INFO_BACKFILLED = booleanPreferencesKey("track_info_backfilled")
 
         private val KEY_LAST_QUEUE = stringPreferencesKey("last_queue_ids")

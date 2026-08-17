@@ -61,6 +61,10 @@ class MusicPlaybackService : MediaSessionService() {
     @Inject
     lateinit var eqProfileManager: com.qhana.siku.player.audio.EqProfileManager
 
+    /** Realce de agudos. Vive dentro de [equalizerProcessor], pero su estado se rehidrata aparte. */
+    @Inject
+    lateinit var clarity: com.qhana.siku.player.audio.clarity.Clarity
+
     /** Scope del watchdog de offload; se cancela en onDestroy. */
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
@@ -70,10 +74,49 @@ class MusicPlaybackService : MediaSessionService() {
     /** Ya se hizo el fallback en esta sesión: no repetirlo ni re-preparar en bucle. */
     @Volatile private var offloadDisabled = false
 
+    /**
+     * ¿El último build del sink dejó al processor TRANSFORMANDO el audio (float, sin offload)?
+     * Es el estado REAL de la pipeline; [reevaluateAudioPipeline] lo compara con lo que pide
+     * [EqualizerAudioProcessor.shouldProcess] para reconstruir solo cuando de verdad cambia.
+     */
+    private var processorRunning = false
+
     private var offloadWatchdogJob: Job? = null
 
     companion object {
         const val ACTION_SHOW_NOW_PLAYING = "com.qhana.siku.SHOW_NOW_PLAYING"
+
+        /**
+         * Ventana de búfer de ExoPlayer, en ms. Van nombrados en vez de escritos en la llamada
+         * detrás de un comentario-etiqueta: ese comentario no lo comprueba el compilador, y son
+         * cuatro `Int` seguidos, así que reordenarlos no fallaría en compilación y cambiaría el
+         * comportamiento del reproductor en silencio.
+         *
+         * **Los cuatro se desvían del default de Media3**, y conviene tener las dos parejas
+         * separadas porque responden a preguntas distintas:
+         *
+         * - **Cuánto se acumula** (`min`/`max`, defaults 50 s / 50 s): aquí 120 s / 180 s, o sea
+         *   entre dos y tres veces más. El motivo es la RADIO, no la fluidez — cada relleno la sube
+         *   a su estado de alto consumo y la deja ahí con una cola de 10-20 s, así que con 50 s
+         *   prácticamente nunca llegaba a bajar. Tres minutos convierten el goteo continuo en
+         *   ráfagas espaciadas. Barato en memoria porque es audio (~3 MB); lo que cuesta es
+         *   descargar de más si el usuario salta de canción.
+         *
+         * - **Cuánto hay que tener para empezar a sonar** (`forPlayback` 500 ms contra 1000 de
+         *   default, `afterRebuffer` 2500 contra 2000). Es latencia percibida, y la asimetría tiene
+         *   sentido leída junta: al dar al play se arriesga —la mitad del default, para que suene
+         *   cuanto antes— y tras un corte se acumula MÁS que el default, porque un corte ya es la
+         *   prueba de que la red no da y volver enseguida solo encadenaría otro.
+         *
+         * **Ojo con el arranque de 500 ms si algún día aparecen cortes al empezar una canción por
+         * streaming**: no está medido ni tiene autoridad detrás, y medio segundo de audio es poco
+         * margen con un FLAC de tasa alta (los de varios cientos de MB) sobre una conexión que dé
+         * menos de lo previsto. Es el primer valor a mirar en ese caso, no la ventana de arriba.
+         */
+        private const val BUFFER_MIN_MS = 120_000
+        private const val BUFFER_MAX_MS = 180_000
+        private const val BUFFER_FOR_PLAYBACK_MS = 500
+        private const val BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 2_500
         const val CMD_GET_SESSION_ID = "GET_AUDIO_SESSION_ID"
         const val KEY_SESSION_ID = "AUDIO_SESSION_ID"
 
@@ -172,6 +215,9 @@ class MusicPlaybackService : MediaSessionService() {
             offloadWatchdogJob?.cancel()
             offloadWatchdogJob = null
             evaluateOffloadWatchdog()
+            // El origen puede cambiar dentro de la MISMA cola (una pista descargada seguida de una
+            // que aún se transmite), así que el wake mode se re-evalúa por item y no una vez.
+            player?.let { applyWakeMode(it) }
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -249,12 +295,32 @@ class MusicPlaybackService : MediaSessionService() {
      * [applyOffloadPreference] al player, y por eso vive en un solo sitio: si el watchdog y la
      * preferencia pudieran discrepar, el watchdog vigilaría un modo que no está activo.
      */
-    private fun isOffloadRequested(): Boolean = !offloadDisabled && !equalizerProcessor.isEnabled()
+    private fun isOffloadRequested(): Boolean = !offloadDisabled && !equalizerProcessor.shouldProcess()
 
     /** `file://` o `content://` = los bytes están en el dispositivo: no existe buffering de red. */
     private fun isCurrentItemLocal(player: ExoPlayer): Boolean {
         val scheme = player.currentMediaItem?.localConfiguration?.uri?.scheme ?: return false
         return scheme == "file" || scheme == "content"
+    }
+
+    /**
+     * Wake mode SEGÚN EL ORIGEN de lo que suena, re-evaluado en cada cambio de pista.
+     *
+     * Con streaming y la pantalla apagada, entre dos rellenos del búfer pasan decenas de segundos
+     * en los que nada mantiene despierto ni el CPU ni el WiFi: el sistema puede dormir la radio y
+     * el siguiente relleno llega tarde, con el resultado de un corte de audio a mitad de canción.
+     * `WAKE_MODE_NETWORK` es exactamente la red de seguridad para eso (un wakelock parcial más un
+     * WifiLock, ambos sostenidos por ExoPlayer SOLO mientras reproduce).
+     *
+     * Con un archivo del dispositivo se pide `WAKE_MODE_NONE` a propósito, y no por ahorrar un
+     * poco: ahí no hay red que mantener viva y el AudioTrack ya impide que el sistema se duerma
+     * mientras hay audio saliendo. Dejar el modo de red puesto para todo sería pagar un WifiLock
+     * permanente por una reproducción que no toca la red.
+     */
+    private fun applyWakeMode(player: ExoPlayer) {
+        player.setWakeMode(
+            if (isCurrentItemLocal(player)) C.WAKE_MODE_NONE else C.WAKE_MODE_NETWORK
+        )
     }
 
     /**
@@ -301,8 +367,10 @@ class MusicPlaybackService : MediaSessionService() {
 
     /**
      * Aplica el modo de offload que corresponde al estado actual: DESACTIVADO si el DSP está
-     * marcado como roto ([offloadDisabled]) o si el EQ está activo (los processors se saltan
-     * en offload); ACTIVADO en cualquier otro caso.
+     * marcado como roto ([offloadDisabled]) o si el processor debe transformar el audio
+     * ([EqualizerAudioProcessor.shouldProcess] — los processors se saltan en offload); ACTIVADO en
+     * cualquier otro caso, incluido el EQ encendido pero con curva plana y la hoja cerrada, que es
+     * transparente y no necesita quitarle el offload al DSP.
      */
     private fun applyOffloadPreference(player: ExoPlayer) {
         val disable = !isOffloadRequested()
@@ -319,19 +387,32 @@ class MusicPlaybackService : MediaSessionService() {
     }
 
     /**
-     * Toggle del ecualizador en caliente. isActive del processor solo se consulta al
-     * (re)configurar el sink, así que hay que rehacer la pipeline: stop() no borra la cola
-     * y se retoma en la misma posición (tirón de <1s, solo al alternar el EQ).
+     * Reconstruye la pipeline del sink SOLO si cambió el que el processor deba TRANSFORMAR el audio
+     * o quedarse transparente y cederle el offload al DSP (ver [EqualizerAudioProcessor.shouldProcess]).
+     * `isActive` del processor solo se consulta al (re)configurar el sink, así que un cambio de esa
+     * condición no llega a la pipeline por sí solo — de ahí que lo dispare todo lo que puede moverla:
+     *  - el toggle del EQ (colector de [MusicPreferences.eqEnabledFlow]);
+     *  - abrir/cerrar la hoja del EQ ([EqualizerAudioProcessor.onProcessingConditionChanged]), que
+     *    es lo que hace que subir un slider desde plano suene en vivo;
+     *  - un cambio de perfil por ruta de salida ([EqProfileManager.applied]) — que además coincide
+     *    con la reconexión física del dispositivo, así que el reajuste pasa desapercibido.
+     *
+     * **La condición gobierna TODO el DSP propio, no solo las bandas**: el limitador y Clarity viven
+     * dentro del mismo processor y se van con él. `stop()` no borra la cola: se re-prepara y se
+     * retoma en la misma posición (tirón de <1s). El guard contra [processorRunning] evita
+     * reconstruir en cada frame de arrastre de un slider — con la hoja abierta la condición ya es
+     * `true` y no vuelve a cambiar hasta cerrarla— y también el rebuild espurio del primer emit de
+     * cada colector al suscribirse.
      */
-    private fun applyEqEnabled(enabled: Boolean) {
-        if (equalizerProcessor.isEnabled() == enabled) return
-        appLogger.log("SERVICE", "Ecualizador ${if (enabled) "ACTIVADO" else "DESACTIVADO"}: reconstruyendo pipeline de audio")
-        // El flag se aplica ANTES de mirar el player: es el estado del processor y debe seguir a
-        // la preferencia siempre. Si se salía por `player == null` sin tocarlo, el
-        // distinctUntilChanged del colector ya no volvería a emitir ese valor y el processor se
-        // quedaba desincronizado hasta el siguiente toggle.
-        equalizerProcessor.setEnabled(enabled)
-        // Sin player no hay pipeline que rehacer: la armará `onCreate` con el flag ya puesto.
+    private fun reevaluateAudioPipeline() {
+        val desired = equalizerProcessor.shouldProcess()
+        if (desired == processorRunning) return
+        processorRunning = desired
+        appLogger.log(
+            "SERVICE",
+            "Pipeline de audio: EQ ${if (desired) "PROCESANDO (float, sin offload)" else "TRANSPARENTE (offload disponible)"} — reconstruyendo"
+        )
+        // Sin player no hay pipeline que rehacer: la armará `onCreate` con la condición ya puesta.
         val p = player ?: return
         applyOffloadPreference(p)
 
@@ -394,6 +475,14 @@ class MusicPlaybackService : MediaSessionService() {
             )
         )
 
+        // Clarity: singleton de proceso, y este es el sitio donde su estado se rehidrata
+        // desde disco. NO necesita colector propio (a diferencia del toggle del EQ) porque
+        // no cambia si el processor entra en la cadena: vive dentro y solo suena con el
+        // ecualizador encendido.
+        clarity.setEnabled(musicPreferences.loadClarityEnabled())
+        clarity.setGainDb(musicPreferences.loadClarityGain())
+
+
         // setExtensionRendererMode se quitó: no hay renderers de extensión empaquetados,
         // así que no tenía efecto. setEnableDecoderFallback sí importa (cae a otro decoder
         // si el preferido falla al inicializar).
@@ -417,13 +506,27 @@ class MusicPlaybackService : MediaSessionService() {
         }
             .setEnableDecoderFallback(true)
 
+        // Búfer LARGO a propósito, y el motivo es la RADIO, no la fluidez. Cada relleno la sube a
+        // su estado de alto consumo y la deja ahí con una cola de 10-20 s; con los 50 s que había
+        // antes se rellenaba tan seguido que prácticamente nunca llegaba a bajar. Estirarlo a tres
+        // minutos convierte un goteo continuo en ráfagas espaciadas, que es el patrón que Android
+        // recomienda para gastar menos: se descarga lo mismo, pero la radio duerme entre medias.
+        //
+        // Barato en memoria porque es audio: 3 min de FLAC son ~3 MB (un vídeo a la misma duración
+        // serían cientos). El coste real de subirlo es descargar de más cuando el usuario salta de
+        // canción antes de terminarla — aceptable, y menor que el de una radio siempre encendida.
+        //
+        // Los dos últimos valores (arranque y re-arranque tras un corte) NO se tocan: son la
+        // latencia que el usuario percibe al dar al play, y no tienen nada que ver con lo anterior.
         val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                30_000,
-                50_000,
-                500,
-                2_500
+                BUFFER_MIN_MS,
+                BUFFER_MAX_MS,
+                BUFFER_FOR_PLAYBACK_MS,
+                BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS
             )
+            // Manda el TIEMPO, no los bytes: sin esto, el techo de tamaño por defecto recortaría
+            // la ventana justo en los FLAC, que son el formato de la biblioteca.
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
@@ -437,33 +540,58 @@ class MusicPlaybackService : MediaSessionService() {
         player = playerBuilder.build()
         player?.addListener(playerListener)
         player?.addAudioOffloadListener(offloadListener)
+        // Valor de arranque; a partir de aquí lo mantiene `onMediaItemTransition`. Sin cola aún,
+        // `isCurrentItemLocal` responde false y se queda en el modo conservador (el de red).
+        player?.let { applyWakeMode(it) }
 
         // Offload: el DSP decodifica y la CPU duerme (ahorro de batería real con la pantalla
         // apagada). Se intenta SIEMPRE, salvo: (a) dispositivos donde el watchdog ya comprobó
         // que el DSP lo implementa mal y se cuelga (veredicto persistido), o (b) mientras el
-        // ECUALIZADOR está activo — en offload el audio comprimido va directo al DSP y toda
-        // la cadena de AudioProcessors (el EQ incluido) se salta: sonaría sin ecualizar.
+        // processor TRANSFORMA el audio ([EqualizerAudioProcessor.shouldProcess]) — en offload el
+        // audio comprimido va directo al DSP y toda la cadena de AudioProcessors (el EQ incluido) se
+        // salta: sonaría sin ecualizar. Encendido pero con curva plana y la hoja cerrada NO cuenta:
+        // ahí el processor es transparente y no hay razón para renunciar al offload (ese es el
+        // ahorro que este cálculo recupera).
         val offloadBroken = musicPreferences.loadOffloadBroken()
         offloadDisabled = offloadBroken
         applyOffloadPreference(player!!)
+        // El estado REAL con el que queda el sink recién construido. A partir de aquí lo mantiene
+        // [reevaluateAudioPipeline]; sembrarlo aquí es lo que evita el rebuild espurio del primer
+        // emit de cada colector.
+        processorRunning = equalizerProcessor.shouldProcess()
+        // Abrir/cerrar la hoja del EQ mueve [EqualizerAudioProcessor.shouldProcess] sin pasar por
+        // ningún colector: el processor avisa por aquí. Se reprograma al hilo del servicio antes de
+        // tocar el player (el aviso llega en el hilo del colector del medidor).
+        equalizerProcessor.onProcessingConditionChanged = {
+            serviceScope.launch { reevaluateAudioPipeline() }
+        }
 
         appLogger.log(
             "SERVICE",
             when {
                 offloadBroken -> "ExoPlayer creado con audio offload DESACTIVADO (DSP marcado como roto en este dispositivo)"
-                equalizerProcessor.isEnabled() -> "ExoPlayer creado con audio offload cedido al ECUALIZADOR (pipeline float)"
+                processorRunning -> "ExoPlayer creado con audio offload cedido al ECUALIZADOR (pipeline float)"
                 else -> "ExoPlayer creado con audio offload ACTIVO (ahorro de batería; watchdog vigilando)"
             }
         )
 
-        // Toggle del EQ en caliente (desde la hoja del NowPlaying): reconstruir la pipeline
-        // del sink conservando posición — mismo patrón probado que el fallback del offload.
-        // dataStore emite el valor actual al suscribirse; el distinctUntilChanged + comparación
-        // con el estado real del processor evita un rebuild espurio al arrancar.
+        // Toggle del EQ en caliente (desde la hoja del NowPlaying): sigue la preferencia y reevalúa
+        // la pipeline. dataStore emite el valor actual al suscribirse; el guard de
+        // [reevaluateAudioPipeline] contra [processorRunning] absorbe ese primer emit sin rebuild.
         serviceScope.launch {
             musicPreferences.eqEnabledFlow
                 .distinctUntilChanged()
-                .collect { enabled -> applyEqEnabled(enabled) }
+                .collect { enabled ->
+                    equalizerProcessor.setEnabled(enabled)
+                    reevaluateAudioPipeline()
+                }
+        }
+
+        // Cambio de perfil por ruta de salida: [EqProfileManager] reescribe la curva al conectar un
+        // dispositivo (sin tocar el toggle), y eso puede cruzar el umbral transparente↔activo. Se
+        // reevalúa aquí; el reajuste, si toca, coincide con la reconexión física y no se nota.
+        serviceScope.launch {
+            eqProfileManager.applied.collect { reevaluateAudioPipeline() }
         }
 
         // Perfiles del EQ por ruta de salida. Se engancha AQUÍ y no en el Application: la ruta solo
@@ -472,6 +600,10 @@ class MusicPlaybackService : MediaSessionService() {
         // processor porque el manager puede aplicar un perfil en el acto (si arrancamos con una
         // ruta distinta a la de la última sesión) y ese valor debe ser el último en escribirse.
         eqProfileManager.start()
+        // Si `start()` acaba de aplicar el perfil de otra ruta, su emisión de `applied` pudo caer
+        // antes de que el colector de arriba se suscribiera (SharedFlow sin replay). Se reevalúa una
+        // vez a mano para que la pipeline arranque coherente con la curva ya aplicada; idempotente.
+        reevaluateAudioPipeline()
 
         val intent = Intent(this, MainActivity::class.java).apply {
             action = ACTION_SHOW_NOW_PLAYING
@@ -526,6 +658,9 @@ class MusicPlaybackService : MediaSessionService() {
 
         offloadWatchdogJob?.cancel()
         eqProfileManager.stop()
+        // El processor es singleton de proceso y sobrevive al servicio: hay que soltar el callback
+        // o quedaría apuntando a un serviceScope ya cancelado.
+        equalizerProcessor.onProcessingConditionChanged = null
         serviceScope.cancel()
         try { this.player?.removeAudioOffloadListener(offloadListener) } catch (_: Exception) {}
 

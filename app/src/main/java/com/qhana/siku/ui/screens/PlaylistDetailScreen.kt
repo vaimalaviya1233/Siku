@@ -33,15 +33,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
 import com.qhana.siku.R
-import com.qhana.siku.data.model.PlaybackState
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.ui.components.AdaptiveCollage
 import com.qhana.siku.ui.components.ComponentConfig
 import com.qhana.siku.ui.components.DetailPlayButtons
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.SongItem
+import com.qhana.siku.ui.components.SongRowContainer
+import com.qhana.siku.ui.components.SongQueueOverflowButton
 import com.qhana.siku.ui.components.TonalChip
+import com.qhana.siku.ui.components.rememberActiveRowContentColor
 import com.qhana.siku.ui.components.rememberListItemShape
+import com.qhana.siku.ui.components.songRowBackground
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
 
@@ -60,12 +63,14 @@ fun PlaylistDetailScreen(
     playlistName: String,
     songs: List<Song>,
     currentSong: Song?,
-    playbackState: PlaybackState,
     isFavoritesList: Boolean = false,
     onBackClick: () -> Unit,
     onPlayAll: (List<Song>, Int) -> Unit,
     onShufflePlay: (List<Song>) -> Unit,
     onToggleFavorite: (String) -> Unit,
+    onAddToQueue: (Song) -> Unit,
+    /** Encolar TODAS las canciones de la lista, desde la botonera de la cabecera. */
+    onAddAllToQueue: (List<Song>) -> Unit,
     onReorderSongs: ((List<String>) -> Unit)? = null,
     onRemoveSong: ((String) -> Unit)? = null,
     onAddSongs: (() -> Unit)? = null,
@@ -89,7 +94,7 @@ fun PlaylistDetailScreen(
 
     // Título viajero: interpola posición y escala entre el nombre del header y el hueco de la
     // topbar según el scroll (mismo mecanismo que AlbumDetailScreen).
-    val titleFadePx = with(LocalDensity.current) { 300.dp.toPx() }
+    val titleFadePx = with(LocalDensity.current) { ComponentConfig.DetailTitleFadeRange.toPx() }
     val rawTitleFraction by remember {
         derivedStateOf {
             if (listState.firstVisibleItemIndex > 0) 1f
@@ -159,6 +164,7 @@ fun PlaylistDetailScreen(
                         DetailPlayButtons(
                             onPlayAll = { onPlayAll(localSongs, 0) },
                             onShuffle = { onShufflePlay(localSongs) },
+                            onAddToQueue = { onAddAllToQueue(localSongs) },
                             onAddSongs = onAddSongs,
                             modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp)
                         )
@@ -168,84 +174,128 @@ fun PlaylistDetailScreen(
                         items = localSongs,
                         key = { _, song -> song.id }
                     ) { index, song ->
-                        val isPlaying = currentSong?.id == song.id && playbackState == PlaybackState.PLAYING
-                        val shape = rememberListItemShape(index, localSongs.size)
+                        // La canción actual, esté sonando o en PAUSA: mismo criterio que la cola y
+                        // la lista de canciones (el resaltado marca "cargada", no "sonando ahora").
+                        val isPlaying = currentSong?.id == song.id
+                        // isActive: el ítem en reproducción usa la forma redondeada (16 dp), igual
+                        // que en la cola y la lista de canciones, en vez de la esquina agrupada.
+                        val shape = rememberListItemShape(index, localSongs.size, isActive = isPlaying)
                         val canReorder = onReorderSongs != null && !isFavoritesList
 
                         if (canReorder) {
                             ReorderableItem(reorderState, key = song.id) { isDragging ->
                                 val elevation = if (isDragging) 8.dp else 0.dp
-                                Surface(
-                                    color = colorScheme.surfaceContainer,
-                                    shape = shape,
-                                    tonalElevation = elevation,
-                                    shadowElevation = elevation,
+                                // El resaltado del ítem en reproducción lo pinta la Surface de TODA
+                                // la fila —igual que en la cola, que tiene este mismo layout— y no
+                                // el `ListItem` de SongItem: aquí SongItem es un `weight(1f)` entre
+                                // el grip y los botones, así que su tinte cubría solo el trozo
+                                // central, con esquinas rectas, y la fila activa se leía distinta
+                                // que en el resto de listas de la app.
+                                val rowBackground = songRowBackground(colorScheme.surfaceContainer, isPlaying)
+                                val activeContent = rememberActiveRowContentColor(rowBackground, isPlaying)
+                                val rowVariantColor =
+                                    if (isPlaying) activeContent else colorScheme.onSurfaceVariant
+                                // Punta ORIGEN del container transform hacia el reproductor (ver
+                                // [SongRowContainer]). Va DENTRO del `ReorderableItem`: lo que se
+                                // arrastra es la fila, y lo que morfa es esa misma superficie.
+                                SongRowContainer(
+                                    songId = song.id,
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .padding(horizontal = 16.dp, vertical = 1.dp)
                                 ) {
-                                    // Mismo layout que la cola: grip de reordenado LEADING (Box
-                                    // de 32dp con draggableHandle) + SongItem + quitar TRAILING.
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
+                                    Surface(
+                                        color = rowBackground,
+                                        contentColor = if (isPlaying) activeContent else colorScheme.onSurface,
+                                        shape = shape,
+                                        tonalElevation = elevation,
+                                        shadowElevation = elevation,
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .draggableHandle(
-                                                    onDragStopped = {
-                                                        onReorderSongs?.invoke(localSongs.map { it.id })
-                                                    }
-                                                )
-                                                .width(32.dp)
-                                                .fillMaxHeight(),
-                                            contentAlignment = Alignment.Center
+                                        // Mismo layout que la cola: grip de reordenado LEADING (Box
+                                        // de 32dp con draggableHandle) + SongItem + quitar TRAILING.
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.fillMaxWidth()
                                         ) {
-                                            MaterialSymbol("drag_indicator", color = colorScheme.onSurfaceVariant, size = 20.sp)
-                                        }
-                                        SongItem(
-                                            song = song,
-                                            isPlaying = isPlaying,
-                                            showStatusIcon = false,
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .clickable { onPlayAll(localSongs, index) }
-                                        )
-                                        onRemoveSong?.let { remove ->
-                                            val removeDesc = stringResource(R.string.playlist_remove_song)
-                                            IconButton(
-                                                onClick = { remove(song.id) },
+                                            Box(
                                                 modifier = Modifier
-                                                    .padding(end = 4.dp)
-                                                    .semantics { contentDescription = removeDesc }
+                                                    .draggableHandle(
+                                                        onDragStopped = {
+                                                            onReorderSongs?.invoke(localSongs.map { it.id })
+                                                        }
+                                                    )
+                                                    .width(32.dp)
+                                                    .fillMaxHeight(),
+                                                contentAlignment = Alignment.Center
                                             ) {
-                                                MaterialSymbol("close", color = colorScheme.onSurfaceVariant, size = 20.sp)
+                                                MaterialSymbol("drag_indicator", color = rowVariantColor, size = 20.sp)
+                                            }
+                                            SongItem(
+                                                song = song,
+                                                isPlaying = isPlaying,
+                                                showStatusIcon = false,
+                                                // La Surface de arriba ya rellena la fila entera: aquí
+                                                // solo se tiñe el texto con el `on-` de ese relleno.
+                                                showActiveBackground = false,
+                                                activeContentColor = activeContent,
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .clickable { onPlayAll(localSongs, index) }
+                                            )
+                                            SongQueueOverflowButton(
+                                                onAddToQueue = { onAddToQueue(song) },
+                                                rowBackground = rowBackground
+                                            )
+                                            onRemoveSong?.let { remove ->
+                                                val removeDesc = stringResource(R.string.playlist_remove_song)
+                                                IconButton(
+                                                    onClick = { remove(song.id) },
+                                                    modifier = Modifier
+                                                        .padding(end = 4.dp)
+                                                        .semantics { contentDescription = removeDesc }
+                                                ) {
+                                                    MaterialSymbol("close", color = rowVariantColor, size = 20.sp)
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
                         } else {
-                            Surface(
-                                color = colorScheme.surfaceContainer,
-                                shape = shape,
+                            // Punta ORIGEN del container transform hacia el reproductor; ver
+                            // [SongRowContainer].
+                            SongRowContainer(
+                                songId = song.id,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 16.dp, vertical = 1.dp)
                             ) {
-                                SongItem(
-                                    song = song,
-                                    isPlaying = isPlaying,
-                                    showStatusIcon = false,
-                                    modifier = Modifier.clickable { onPlayAll(localSongs, index) },
-                                    trailingContent = {
-                                        if (isFavoritesList) {
-                                            IconButton(onClick = { onToggleFavorite(song.id) }) {
-                                                MaterialSymbol("favorite", fill = true, color = colorScheme.primary)
+                                Surface(
+                                    color = colorScheme.surfaceContainer,
+                                    shape = shape,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    SongItem(
+                                        song = song,
+                                        isPlaying = isPlaying,
+                                        showStatusIcon = false,
+                                        modifier = Modifier.clickable { onPlayAll(localSongs, index) },
+                                        trailingContent = {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                SongQueueOverflowButton(
+                                                    onAddToQueue = { onAddToQueue(song) },
+                                                    rowBackground = songRowBackground(colorScheme.surfaceContainer, isPlaying)
+                                                )
+                                                if (isFavoritesList) {
+                                                    IconButton(onClick = { onToggleFavorite(song.id) }) {
+                                                        MaterialSymbol("favorite", fill = true, color = colorScheme.primary)
+                                                    }
+                                                }
                                             }
                                         }
-                                    }
-                                )
+                                    )
+                                }
                             }
                         }
                     }
@@ -343,7 +393,7 @@ private fun EmptyPlaylistState(
             MaterialSymbol(
                 if (isFavoritesList) "favorite" else "queue_music",
                 fill = true,
-                color = colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                color = colorScheme.outline,
                 size = 64.sp
             )
             Spacer(modifier = Modifier.height(16.dp))
@@ -395,7 +445,7 @@ private fun PlaylistImmersiveHeader(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(380.dp)
+            .height(ComponentConfig.DetailHeaderHeight)
     ) {
         when (arts.size) {
             0 -> Box(

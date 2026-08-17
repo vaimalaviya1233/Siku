@@ -44,7 +44,7 @@ import com.qhana.siku.data.repository.LyricsCandidate
 import com.qhana.siku.ui.components.ConnectedChoiceGroup
 import com.qhana.siku.ui.components.LyricsSearchSheet
 import com.qhana.siku.ui.components.MaterialSymbol
-import com.qhana.siku.ui.components.onContainerColor
+import com.qhana.siku.ui.components.maxContrastOn
 import com.qhana.siku.ui.state.LyricsFailure
 import com.qhana.siku.ui.viewmodel.LyricLine
 import kotlinx.coroutines.flow.StateFlow
@@ -209,7 +209,10 @@ fun LyricsScreen(
                 // dos veces. Su hueco lo ocupa guardar. `onFetchLyrics` sigue vivo para el estado
                 // vacío, donde sí significa algo distinto: "busca, que aquí no hay nada".
                 if (!showEmptyState) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         ExpressiveActionIcon(
                             onClick = onSearchManually,
                             icon = "manage_search",
@@ -390,7 +393,7 @@ fun LyricsScreen(
                     ),
                     modifier = Modifier.width(sideWidth).height(sideHeight)
                 ) {
-                    MaterialSymbol("skip_previous", size = 26.sp, color = sideContent)
+                    MaterialSymbol("skip_previous", size = 26.sp, color = sideContent, fill = true)
                 }
 
                 Surface(
@@ -452,7 +455,7 @@ fun LyricsScreen(
                     ),
                     modifier = Modifier.width(sideWidth).height(sideHeight)
                 ) {
-                    MaterialSymbol("skip_next", size = 26.sp, color = sideContent)
+                    MaterialSymbol("skip_next", size = 26.sp, color = sideContent, fill = true)
                 }
             }
         }
@@ -498,16 +501,20 @@ private fun LyricsModeToggle(
     contentColor: Color,
     onModeChange: (LyricsViewMode) -> Unit
 ) {
-    // Contenido del segmento activo: negro o blanco según luminancia del acento.
-    val activeContentColor = remember(pillColor) {
-        if (androidx.core.graphics.ColorUtils.calculateLuminance(pillColor.toArgb()) > 0.5) Color.Black else Color.White
-    }
-    // Connected button group (el segmentado dejó de recomendarse en M3 Expressive) con colores
-    // PROPIOS: esta pantalla se pinta sobre el color del álbum, no sobre el scheme, y el contenido
-    // activo se decide por luminancia unas líneas más arriba.
+    // Contenido del segmento activo: blanco/negro por CONTRASTE real (`maxContrastOn`), NO por el
+    // umbral de luminancia 0.5. Sobre un acento medio (0.18 < L < 0.5) aquel umbral elegía blanco
+    // cuando el negro contrasta el doble, así que "Karaoke" salía claro sobre la píldora clara del
+    // acento mientras el play, del mismo color, iba con glifo oscuro — la inconsistencia reportada.
+    val activeContentColor = remember(pillColor) { maxContrastOn(pillColor) }
+    // Connected button group (el segmentado dejó de recomendarse en M3 Expressive). El fondo de
+    // esta pantalla es `surfaceContainer` (rol del scheme), así que el segmento INACTIVO usa roles
+    // del scheme y NO un alpha sobre el contenido: contenedor tenue `surfaceContainerHighest` (un
+    // escalón por encima del fondo, para leerse como botón sin competir con la píldora activa) y
+    // contenido `onSurfaceVariant`. La píldora ACTIVA sí es el acento dinámico del álbum (`pillColor`),
+    // con su contenido decidido por contraste unas líneas más arriba.
     val colors = ToggleButtonDefaults.toggleButtonColors(
-        containerColor = Color.Transparent,
-        contentColor = contentColor.copy(alpha = 0.7f),
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
         checkedContainerColor = pillColor,
         checkedContentColor = activeContentColor
     )
@@ -713,7 +720,9 @@ private fun InstrumentalView(contentColor: Color) {
     ) {
         // El glifo escala con el parámetro `size` (fontSize), NO con Modifier.size —
         // ese solo agrandaba la caja dejando el icono en 24sp (default).
-        MaterialSymbol("music_note", size = 120.sp, color = contentColor.copy(alpha = 0.5f))
+        // Icono decorativo de estado vacío → rol `outline`, NO un alpha sobre `onSurface`
+        // (jerarquía por rol, no por opacidad).
+        MaterialSymbol("music_note", size = 120.sp, color = MaterialTheme.colorScheme.outline)
         Spacer(modifier = Modifier.height(24.dp))
         Text(
             text = stringResource(R.string.lyrics_badge_instrumental),
@@ -766,12 +775,14 @@ private fun EmptyStateView(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        MaterialSymbol(icon, size = 120.sp, color = contentColor.copy(alpha = 0.3f))
+        // Jerarquía por ROL, no por alpha: icono decorativo → `outline`; título (mensaje
+        // principal) → `contentColor` pleno; subtítulo → `onSurfaceVariant`.
+        MaterialSymbol(icon, size = 120.sp, color = MaterialTheme.colorScheme.outline)
         Spacer(modifier = Modifier.height(32.dp))
         Text(
             text = title,
             style = MaterialTheme.typography.titleLarge,
-            color = contentColor.copy(alpha = 0.7f),
+            color = contentColor,
             textAlign = TextAlign.Center
         )
         if (subtitle != null) {
@@ -779,7 +790,7 @@ private fun EmptyStateView(
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.bodyMedium,
-                color = contentColor.copy(alpha = 0.5f),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )
         }
@@ -829,7 +840,9 @@ private fun LyricsActionButton(
     // del acento del álbum en vez de Surface artesanal.
     val contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp)
     if (primary) {
-        val content = onContainerColor(accentColor)
+        // Contenido sobre el acento: `maxContrastOn` (contraste WCAG real), no el umbral de
+        // luminancia 0.5, por el mismo motivo que el toggle Karaoke y el icono del chip.
+        val content = maxContrastOn(accentColor)
         Button(
             onClick = onClick,
             modifier = modifier,

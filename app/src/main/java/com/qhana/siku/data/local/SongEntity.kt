@@ -68,6 +68,22 @@ data class SongEntity(
      * permite que la reparación sea una regla permanente del sistema en vez de un backfill.
      */
     val artworkAttemptedAt: Long? = null,
+    /**
+     * Cuándo la METADATA LIGERA leyó la cabecera entera y no encontró tags de texto (null = nunca se
+     * pudo constatar). Es el sello de esa fase, y el hermano exacto de [artworkAttemptedAt]: uno
+     * cierra la carátula, éste los tags.
+     *
+     * Existe porque el otro sello de los tags —`needsMetadata = 0`— solo llega con el análisis del
+     * archivo COMPLETO, o sea DESPUÉS de descargarlo. Mientras una canción siga en la nube, un
+     * archivo sin tags (un MP3 con ID3v1 vacío, un WAV sin chunk) volvía a la lista de pendientes en
+     * CADA sync: banner "Leyendo datos 1 de 4" y una petición HTTP de cabecera tirada en cada
+     * arranque en frío, para siempre, sobre algo que ya se sabe que no tiene nada que leer.
+     *
+     * Solo lo sella una lectura CONCLUYENTE (la fuente contestó y la cabecera no traía texto), nunca
+     * un fallo de red: ese caso debe reintentarse, y es la misma distinción de tres estados que
+     * gobierna [artworkAttemptedAt].
+     */
+    val lightTagsAttemptedAt: Long? = null,
     val needsMetadata: Boolean = false,
     val remoteId: String? = null,
     val isCorrupted: Boolean = false, // Nuevo campo para persistir fallos de reproducción

@@ -232,6 +232,38 @@ class PlaylistManager @Inject constructor() {
         }
     }
 
+    /**
+     * Anexa [songs] al FINAL de la cola (y del orden original), SALTANDO las que ya están por id
+     * —y los duplicados dentro del propio lote—. El id es la clave única de la cola (key de la
+     * `LazyColumn` de la cola y `mediaId` de ExoPlayer), así que un duplicado rompería la lista
+     * visible. No cambia el índice actual: se anexa detrás de todo, así que las posiciones previas
+     * (incluida la que suena) no se mueven.
+     *
+     * Devuelve las canciones REALMENTE añadidas (tras el filtro), para que el llamador replique
+     * EXACTAMENTE esos items en la cola de ExoPlayer. El orden original crece también (si no, apagar
+     * el aleatorio dejaría fuera lo encolado); su posición ahí es el final, arbitraria bajo shuffle
+     * —el mismo criterio que [removeAt], que quita por id sin mirar la posición barajada—.
+     */
+    fun addToQueue(songs: List<Song>): List<Song> {
+        synchronized(lock) {
+            val seen = playlistIds.toHashSet()
+            val toAdd = ArrayList<Song>(songs.size)
+            for (song in songs) {
+                if (seen.add(song.id)) toAdd.add(song)
+            }
+            if (toAdd.isEmpty()) return emptyList()
+
+            internalPlaylist = internalPlaylist + toAdd
+            _playlist.value = internalPlaylist
+            playlistIds = internalPlaylist.map { it.id }
+
+            originalPlaylist = originalPlaylist + toAdd
+            originalPlaylistIds = originalPlaylist.map { it.id }
+
+            return toAdd
+        }
+    }
+
     fun setRepeatMode(mode: RepeatMode) {
         _repeatMode.value = mode
     }

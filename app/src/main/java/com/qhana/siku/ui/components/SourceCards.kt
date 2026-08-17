@@ -697,7 +697,7 @@ fun StorageLimitCard(
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold,
                 color = if (enabled) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.primary.copy(alpha = 0.38f)
+                else MaterialTheme.colorScheme.primary.copy(alpha = DISABLED_CONTENT_ALPHA)
             )
             // Slider Expressive (thumb de barra fina). El track ondulado NO existe en el Slider
             // de esta versión de material3 (solo en WavyProgressIndicator).

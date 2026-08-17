@@ -4,6 +4,10 @@ import android.content.Context
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.glance.appwidget.GlanceAppWidgetManager
 import androidx.glance.appwidget.state.updateAppWidgetState
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -127,20 +131,73 @@ object WidgetUpdater {
     val KEY_SNAPSHOT = stringPreferencesKey("snapshot_json")
 
     suspend fun push(context: Context, snapshot: WidgetSnapshot) {
+        // El archivo se escribe SIEMPRE, haya widgets o no: es el respaldo que rehidrata el
+        // primer render de un widget recién añadido (y tras la muerte del proceso), así que
+        // saltárselo cuando la pantalla de inicio está vacía dejaría rancio justo ese caso.
         WidgetSnapshotStore.write(context, snapshot)
-        val json = WidgetSnapshotStore.toJson(snapshot)
+
         val manager = GlanceAppWidgetManager(context)
+        val playerIds = runCatching { manager.getGlanceIds(PlayerWidget::class.java) }
+            .getOrDefault(emptyList())
+        val queueIds = runCatching { manager.getGlanceIds(QueueWidget::class.java) }
+            .getOrDefault(emptyList())
+        // Sin ningún widget colocado no hay a quién avisar: ni serializar ni renderizar.
+        if (playerIds.isEmpty() && queueIds.isEmpty()) return
+
+        val json = WidgetSnapshotStore.toJson(snapshot)
         runCatching {
-            manager.getGlanceIds(PlayerWidget::class.java).forEach { id ->
+            playerIds.forEach { id ->
                 updateAppWidgetState(context, id) { prefs -> prefs[KEY_SNAPSHOT] = json }
                 PlayerWidget().update(context, id)
             }
         }
         runCatching {
-            manager.getGlanceIds(QueueWidget::class.java).forEach { id ->
+            queueIds.forEach { id ->
                 updateAppWidgetState(context, id) { prefs -> prefs[KEY_SNAPSHOT] = json }
                 QueueWidget().update(context, id)
             }
         }
+    }
+}
+
+/**
+ * ¿Hay algún widget de la app colocado en la pantalla de inicio, y cuándo cambia eso?
+ *
+ * Existe para que [WidgetBridge] no observe el estado del reproductor —que incluye
+ * `getFavoritesIds`, una consulta suscrita a la tabla `songs` que un sync masivo re-ejecuta decenas
+ * de veces por segundo— cuando no hay ni un widget que actualizar. Sin esto, un proceso levantado
+ * por un worker (sin UI, sin widgets) sostenía esa suscripción durante todo el escaneo, para nadie.
+ *
+ * [changes] es la SEÑAL de que la presencia PUDO cambiar (no el valor): los receivers la emiten en
+ * `onEnabled`/`onDisabled`, y quien la observa vuelve a preguntar por [hasAnyWidget]. Lleva `replay`
+ * 1 con una semilla en el `init`, así que un colector nuevo evalúa el estado actual de inmediato sin
+ * esperar a un cambio. Es un `object` de proceso: los receivers de widget corren en el mismo proceso
+ * que la app, así que comparten esta instancia.
+ */
+object WidgetPresence {
+    private val _changes = MutableSharedFlow<Unit>(
+        replay = 1,
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    val changes: SharedFlow<Unit> = _changes.asSharedFlow()
+
+    init {
+        // Semilla: el primer colector evalúa la presencia actual sin esperar a un alta/baja.
+        _changes.tryEmit(Unit)
+    }
+
+    /** Lo llaman los receivers de widget al añadirse el primero o quitarse el último de su tipo. */
+    fun notifyChanged() {
+        _changes.tryEmit(Unit)
+    }
+
+    suspend fun hasAnyWidget(context: Context): Boolean {
+        val manager = GlanceAppWidgetManager(context)
+        val hasPlayer = runCatching { manager.getGlanceIds(PlayerWidget::class.java) }
+            .getOrDefault(emptyList()).isNotEmpty()
+        if (hasPlayer) return true
+        return runCatching { manager.getGlanceIds(QueueWidget::class.java) }
+            .getOrDefault(emptyList()).isNotEmpty()
     }
 }

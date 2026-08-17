@@ -12,7 +12,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
@@ -108,17 +107,14 @@ class AuthManager @Inject constructor(
     companion object {
         private const val TAG = "AuthManager"
 
-        // Techo para la inicialización de MSAL (lee su config y credenciales de disco). Si se
-        // agota se asume "sin sesión": es preferible mandar al onboarding que dejar el arranque
-        // colgado esperando a una librería que quedó en mal estado.
-        private const val MSAL_INIT_TIMEOUT_MS = 10_000L
+
     }
 
     fun signIn(activity: android.app.Activity): Flow<AuthResult> = callbackFlow {
         val app = publicClientApplication
         if (app == null) {
             Log.w(TAG, "MSAL no inicializado al intentar login")
-            trySend(AuthResult.Error("MSAL not initialized"))
+            trySend(AuthResult.Error(AuthErrorReason.SERVICE_UNAVAILABLE))
             close()
             return@callbackFlow
         }
@@ -139,7 +135,7 @@ class AuthManager @Inject constructor(
 
                 override fun onError(exception: MsalException) {
                     Log.e(TAG, "Error en login", exception)
-                    trySend(AuthResult.Error(exception.message ?: "Login failed"))
+                    trySend(AuthResult.Error(AuthErrorReason.SIGN_IN_FAILED))
                     close()
                 }
 
@@ -181,7 +177,7 @@ class AuthManager @Inject constructor(
     fun requestWriteConsent(activity: android.app.Activity): Flow<AuthResult> = callbackFlow {
         val app = publicClientApplication
         if (app == null) {
-            trySend(AuthResult.Error("MSAL not initialized"))
+            trySend(AuthResult.Error(AuthErrorReason.SERVICE_UNAVAILABLE))
             close()
             return@callbackFlow
         }
@@ -198,7 +194,7 @@ class AuthManager @Inject constructor(
 
                 override fun onError(exception: MsalException) {
                     Log.e(TAG, "Consentimiento de escritura rechazado o fallido", exception)
-                    trySend(AuthResult.Error(exception.message ?: "Consent failed"))
+                    trySend(AuthResult.Error(AuthErrorReason.CONSENT_FAILED))
                     close()
                 }
 
@@ -216,7 +212,7 @@ class AuthManager @Inject constructor(
     private fun acquireTokenSilent(requestedScopes: List<String>): Flow<AuthResult> = callbackFlow {
         val app = publicClientApplication
         if (app == null) {
-            trySend(AuthResult.Error("MSAL not initialized"))
+            trySend(AuthResult.Error(AuthErrorReason.SERVICE_UNAVAILABLE))
             close()
             return@callbackFlow
         }
@@ -226,7 +222,7 @@ class AuthManager @Inject constructor(
         }
         
         if (account == null) {
-            trySend(AuthResult.Error("No account signed in"))
+            trySend(AuthResult.Error(AuthErrorReason.NO_ACCOUNT))
             close()
             return@callbackFlow
         }
@@ -242,7 +238,7 @@ class AuthManager @Inject constructor(
                 }
 
                 override fun onError(exception: MsalException) {
-                    trySend(AuthResult.Error(exception.message ?: "Token refresh failed"))
+                    trySend(AuthResult.Error(AuthErrorReason.TOKEN_REFRESH_FAILED))
                     close()
                 }
             })
@@ -279,15 +275,23 @@ class AuthManager @Inject constructor(
         awaitClose()
     }
 
+    /**
+     * Resuelve si hay una cuenta conectada, esperando a que MSAL termine de inicializarse.
+     *
+     * **No lleva timeout, y es deliberado.** Lo llevó (10 s) y el problema no era el valor sino lo
+     * que hacía al agotarse: devolvía `false`, o sea que un plazo de espera acababa DICTANDO un
+     * hecho. Con la sesión perfectamente válida en disco, un arranque lento —almacenamiento al
+     * límite, el sistema ocupado tras un reinicio— mandaba al usuario al onboarding y ahí se
+     * quedaba: nadie volvía a preguntar en toda la ejecución, porque este método solo se llama una
+     * vez.
+     *
+     * Ahora la espera la acota quien MUESTRA algo (`AuthViewModel` avisa de que está tardando y la
+     * UI lo dice), que es donde esa decisión pertenece: cuánto se espera es una cuestión de
+     * interfaz, mientras que "¿hay sesión?" es un hecho que MSAL acaba respondiendo igual. La
+     * respuesta llega cuando llega y siempre es la de verdad.
+     */
     suspend fun tryRestoreSession(): Boolean {
-        // MSAL puede tardar en init (I/O a disco). Damos un máximo para no colgar
-        // indefinidamente si la inicialización falla silenciosa (p.ej. tras crash).
-        val initialized = withTimeoutOrNull(MSAL_INIT_TIMEOUT_MS) { msalInitialized.await() }
-
-        if (initialized == null) {
-            Log.w(TAG, "MSAL no inicializó en ${MSAL_INIT_TIMEOUT_MS}ms (timeout). Asumiendo sin sesión.")
-            return false
-        }
+        val initialized = msalInitialized.await()
         if (!initialized) {
             Log.w(TAG, "MSAL falló al inicializarse")
             return false
@@ -337,10 +341,48 @@ class AuthManager @Inject constructor(
         if (present != null) _hasSession.value = present
         return present == true
     }
+
+    /**
+     * Nombre a mostrar de la cuenta conectada (para el avatar del header: su inicial, y como
+     * fallback si Graph no devuelve foto). Prefiere el claim `name` (nombre completo) y cae al
+     * `username` (normalmente el email). `null` si no hay cuenta o MSAL aún no está listo.
+     */
+    suspend fun getAccountName(): String? {
+        val app = publicClientApplication ?: return null
+        return withContext(Dispatchers.IO) {
+            try {
+                val account = app.currentAccount?.currentAccount ?: return@withContext null
+                (account.claims?.get("name") as? String)?.takeIf { it.isNotBlank() }
+                    ?: account.username?.takeIf { it.isNotBlank() }
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+}
+
+/**
+ * Motivo TIPADO de un fallo de autenticación. La capa de datos no fabrica texto de UI: los mensajes
+ * literales de MSAL (`exception.message`) y los literales sueltos que había aquí ("Login failed",
+ * "MSAL not initialized"…) llegaban a la pantalla de onboarding SIN traducir, iguales en los dos
+ * idiomas. La UI lo mapea a un string localizado (`AuthViewModel.authErrorMessage`); el detalle
+ * técnico de MSAL sigue yendo al `Log`.
+ */
+enum class AuthErrorReason {
+    /** MSAL aún no está inicializado (o falló al inicializarse). */
+    SERVICE_UNAVAILABLE,
+    /** El login interactivo falló. */
+    SIGN_IN_FAILED,
+    /** El consentimiento incremental (permiso de escritura) falló. */
+    CONSENT_FAILED,
+    /** No hay ninguna cuenta conectada para un refresco silencioso. */
+    NO_ACCOUNT,
+    /** El refresco silencioso del token falló (sesión expirada / revocada). */
+    TOKEN_REFRESH_FAILED
 }
 
 sealed class AuthResult {
     data class Success(val token: String) : AuthResult()
-    data class Error(val message: String) : AuthResult()
+    data class Error(val reason: AuthErrorReason) : AuthResult()
     object Cancelled : AuthResult()
 }

@@ -14,11 +14,21 @@ import com.qhana.siku.player.MusicController
 import kotlinx.coroutines.delay
 
 /**
- * Hoja del temporizador de apagado: presets de duración + opción de terminar la canción en
- * curso antes de pausar. Con un temporizador activo muestra la cuenta regresiva (tick de 1s
- * solo mientras la hoja está abierta) y el botón de cancelar; elegir otro preset lo re-arma.
+ * Cadencia con la que se repinta la cuenta regresiva. Un segundo porque es la resolución de lo que
+ * se lee (`mm:ss`): más rápido no cambiaría ningún dígito y más lento dejaría el número parado a la
+ * vista. No sale de la constante del reloj de reproducción aunque coincida el valor — aquello mide
+ * el avance de la canción y esto una cuenta atrás; que los dos quieran segundos es una coincidencia,
+ * no un acoplamiento, y atarlos haría que tocar uno moviera el otro sin motivo.
  */
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+private const val COUNTDOWN_TICK_MS = 1_000L
+
+/**
+ * Hoja del temporizador de apagado: presets de duración + opción de terminar la canción en
+ * curso antes de pausar. Con un temporizador activo muestra la cuenta regresiva (tick de
+ * [COUNTDOWN_TICK_MS] solo mientras la hoja está abierta) y el botón de cancelar; elegir otro
+ * preset lo re-arma.
+ */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun SleepTimerSheet(
     state: MusicController.SleepTimerState?,
@@ -49,7 +59,7 @@ fun SleepTimerSheet(
                 LaunchedEffect(state.endAtMs) {
                     while (true) {
                         now = System.currentTimeMillis()
-                        delay(1_000)
+                        delay(COUNTDOWN_TICK_MS)
                     }
                 }
                 val remainingMs = (state.endAtMs - now).coerceAtLeast(0L)
@@ -84,7 +94,7 @@ fun SleepTimerSheet(
                                 Text(
                                     text = stringResource(R.string.sleep_timer_then_finish_song),
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = ACCENT_SECONDARY_ALPHA)
                                 )
                             }
                         }
@@ -109,7 +119,9 @@ fun SleepTimerSheet(
                     FilledTonalButton(
                         onClick = {
                             close { onStart(minutes, finishSong); onDismiss() }
-                        }
+                        },
+                        // Shape-morph Expressive al presionar, como el resto de botones prominentes.
+                        shapes = ButtonDefaults.shapes()
                     ) {
                         Text(stringResource(R.string.sleep_timer_minutes, minutes))
                     }

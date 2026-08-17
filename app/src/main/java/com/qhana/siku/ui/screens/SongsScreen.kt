@@ -16,7 +16,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -36,6 +35,7 @@ import com.qhana.siku.data.model.SongFilter
 import com.qhana.siku.data.model.SongSourceFilter
 import com.qhana.siku.data.model.SortOrder
 import com.qhana.siku.data.model.SourceType
+import com.qhana.siku.data.util.JankProbe
 import com.qhana.siku.ui.components.*
 import com.qhana.siku.ui.viewmodel.LibraryViewModel
 import com.qhana.siku.ui.viewmodel.PlaybackViewModel
@@ -51,7 +51,6 @@ fun SongsScreen(
     onAddToPlaylistRequest: (String) -> Unit,
     viewModel: LibraryViewModel,
     playbackViewModel: PlaybackViewModel,
-    playingAccent: Color? = null,
     // Chip "N canciones" + chip de orden + chips de origen (solo pestaña Todas, fuera de la búsqueda).
     songCount: Int = 0,
     sortOrder: SortOrder = SortOrder.TITLE_ASC,
@@ -67,7 +66,6 @@ fun SongsScreen(
     onSearchAlbumClick: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
-    val isDarkTheme = androidx.compose.foundation.isSystemInDarkTheme()
 
     // Data Sources
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -85,19 +83,18 @@ fun SongsScreen(
 
     // State
     val currentSong by playbackViewModel.currentSong.collectAsStateWithLifecycle()
-    val playbackState by playbackViewModel.playbackState.collectAsStateWithLifecycle()
 
     // Derived State (optimized to prevent unnecessary recompositions)
     val currentSongId by remember { derivedStateOf { currentSong?.id } }
     val primaryColor = MaterialTheme.colorScheme.primary
-    val neutralColor = if (isDarkTheme) Color(0xFF4A4A4A) else MaterialTheme.colorScheme.surfaceDim
 
     // Scrollbar Configuration
     val listState = rememberLazyListState()
-    
-    // Optimización: Recrear settings solo cuando cambia el tema (Oscuro/Claro)
-    // Evita recomposiciones por cambios menores en colores dinámicos si no cambia el modo
-    val scrollbarThumbColor = if (isDarkTheme) Color(0xFF4A4A4A) else MaterialTheme.colorScheme.surfaceDim
+
+    // `outlineVariant` (el rol de los elementos decorativos/limítrofes) en los DOS modos. Antes
+    // era `#4A4A4A` en oscuro y `surfaceDim` en claro: además de un gris fijo sin tinte, eran dos
+    // roles distintos según el modo, así que el thumb no tenía un peso comparable en cada tema.
+    val scrollbarThumbColor = MaterialTheme.colorScheme.outlineVariant
     val scrollbarActiveColor = MaterialTheme.colorScheme.primary
     val scrollbarSettings = remember(scrollbarThumbColor, scrollbarActiveColor) {
         ScrollbarSettings(
@@ -132,6 +129,16 @@ fun SongsScreen(
     // secciones de artistas/álbumes (que van al principio) quedan fuera de pantalla.
     LaunchedEffect(searchQuery, isSearchActive) {
         if (isSearchActive) listState.scrollToItem(0)
+    }
+
+    // Sonda de frames largos (solo debug): se arma al empezar cada scroll de esta lista, para ver
+    // qué se compone/recompone antes de cada frame largo. Ver JankProbe.
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { if (it) JankProbe.arm { "scroll Todas" } }
+    }
+    // Room invalidó el PagingSource (refresh en vuelo): las filas se recomponen con instancias nuevas.
+    LaunchedEffect(pagedSongs) {
+        snapshotFlow { pagedSongs.loadState.refresh }.collect { JankProbe.mark { "paging refresh=$it" } }
     }
 
     // Vacío CONFIRMADO por Paging, no "0 ítems en este frame". `itemCount` arranca en 0 al montar
@@ -281,7 +288,6 @@ fun SongsScreen(
                             modifier = Modifier.animateItem(),
                             song = song,
                             isPlaying = isPlaying,
-                            playingAccent = playingAccent,
                             isFavorite = songId in favorites,
                             isRedownloading = songId in redownloadingIds,
                             downloadProgress = downloadProgressById[songId],
@@ -305,6 +311,7 @@ fun SongsScreen(
                             onToggleFavorite = { viewModel.toggleFavorite(it) },
                             songId = songId,
                             onAddToPlaylistRequest = onAddToPlaylistRequest,
+                            onAddToQueue = { playbackViewModel.addToQueue(song) },
                             onStatusClick = {
                                 viewModel.showMessage(
                                     if (song.isLocalAudio) context.getString(R.string.status_ready_offline)
@@ -325,7 +332,6 @@ fun SongsScreen(
 private fun SongItemOptimized(
     song: Song,
     isPlaying: Boolean,
-    playingAccent: Color?,
     isFavorite: Boolean,
     isRedownloading: Boolean,
     downloadProgress: Float?,
@@ -335,22 +341,25 @@ private fun SongItemOptimized(
     onToggleFavorite: (String) -> Unit,
     songId: String,
     onAddToPlaylistRequest: (String) -> Unit,
+    onAddToQueue: () -> Unit,
     onStatusClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val surfaceHigh = MaterialTheme.colorScheme.surfaceContainerHigh
-    val primaryContainer = MaterialTheme.colorScheme.primaryContainer
-    val backgroundColor = when {
-        // Sonando: resaltado teñido con el acento del álbum.
-        isPlaying && playingAccent != null ->
-            Color(androidx.core.graphics.ColorUtils.blendARGB(surfaceHigh.toArgb(), playingAccent.toArgb(), 0.30f))
-        isPlaying -> primaryContainer
-        else -> surfaceHigh
-    }
+    // Resaltado del ítem en reproducción: `primaryContainer` (contenedor de acento sólido, sin
+    // opacidad), el MISMO tratamiento que la cola. Sustituye al blend del acento del álbum al 30%
+    // sobre `surfaceContainerHigh`, que en un álbum monocromo quedaba casi idéntico al resto de
+    // filas (ese acento venía ya proyectado a un tono cercano a la superficie).
+    val backgroundColor = if (isPlaying) MaterialTheme.colorScheme.primaryContainer else surfaceHigh
 
-    // Fondo bajo el contenido de la fila: el del grupo, con el tinte del ítem activo compuesto (el
-    // mismo que pinta `SongItem`). Es contra esto que se mide la píldora de acciones.
-    val rowBackground = songRowBackground(backgroundColor, isPlaying)
+    // Fondo REAL bajo el contenido de la fila, contra el que se mide la píldora de acciones: es
+    // `backgroundColor` a secas porque el resaltado del ítem activo lo pinta el `Row` de abajo, no
+    // `SongItem` (ver `showActiveBackground = false`). En los detalles —contenedor `surfaceContainer`
+    // plano— sigue siendo `songRowBackground`, porque allí el tinte del `ListItem` es el único.
+    val rowBackground = backgroundColor
+    // Contenido de la fila activa: el `on-` del relleno con contraste garantizado (misma definición
+    // que la cola y los detalles); en las demás filas, los roles por defecto de SongItem.
+    val activeContentColor = rememberActiveRowContentColor(backgroundColor, isPlaying)
 
     val trailingContent: @Composable (() -> Unit)? = remember(isFavorite, songId, isRedownloading, rowBackground, song.isLocalAudio) {
         {
@@ -366,32 +375,51 @@ private fun SongItemOptimized(
                 isDownloaded = song.isLocalAudio,
                 onRedownload = { onRedownload(song) },
                 onToggleFavorite = onToggleFavorite,
-                onAddToPlaylistRequest = onAddToPlaylistRequest
+                onAddToPlaylistRequest = onAddToPlaylistRequest,
+                onAddToQueue = onAddToQueue
             )
         }
     }
 
-    Row(
+    // La fila es la punta ORIGEN del container transform hacia el reproductor: al tocarla, ESTA
+    // superficie crece hasta ser el player (ver [SongRowContainer]). Lo que va en el envoltorio es lo
+    // que la coloca en la lista (ancho y gap); lo que morfa es la superficie de dentro, con su forma
+    // y su relleno — el hueco entre filas no forma parte de la tarjeta.
+    SongRowContainer(
+        songId = songId,
         modifier = modifier
             .fillMaxWidth()
             // 1dp por fila = 2dp de gap entre tarjetas, como en los detalles de
             // artista/álbum y el patrón agrupado Expressive de referencia.
             .padding(horizontal = 16.dp, vertical = 1.dp)
-            .clip(shape)
-            .background(backgroundColor)
-            .clickable { onSongClick(song) },
-        verticalAlignment = Alignment.CenterVertically
     ) {
-        SongItem(
-            song = song,
-            isPlaying = isPlaying,
-            modifier = Modifier.weight(1f),
-            // Progreso real de la descarga en vuelo: anillo sobre la carátula + "Descargando N%".
-            isDownloading = downloadProgress != null,
-            downloadProgress = downloadProgress,
-            onStatusClick = onStatusClick,
-            trailingContent = trailingContent
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(shape)
+                .background(backgroundColor)
+                .clickable { onSongClick(song) },
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            SongItem(
+                song = song,
+                isPlaying = isPlaying,
+                // El `Row` de arriba ya tiñe TODA la fila con el acento del álbum; con el default en
+                // true, `SongItem` sumaba encima su `secondary` al 12 % y el resaltado se pintaba dos
+                // veces (el mismo motivo por el que la cola lo apaga). El propio parámetro lo dice:
+                // se pone en false cuando un contenedor externo pinta el resaltado de la fila entera.
+                showActiveBackground = false,
+                // Texto e icono de estado en `onPrimaryContainer` cuando la fila suena (el `Row` de
+                // arriba la rellena con `primaryContainer`), igual que la cola.
+                activeContentColor = activeContentColor,
+                modifier = Modifier.weight(1f),
+                // Progreso real de la descarga en vuelo: anillo sobre la carátula + "Descargando N%".
+                isDownloading = downloadProgress != null,
+                downloadProgress = downloadProgress,
+                onStatusClick = onStatusClick,
+                trailingContent = trailingContent
+            )
+        }
     }
 }
 
@@ -408,7 +436,8 @@ private fun SongItemMenu(
     rowBackground: Color,
     onRedownload: () -> Unit,
     onToggleFavorite: (String) -> Unit,
-    onAddToPlaylistRequest: (String) -> Unit
+    onAddToPlaylistRequest: (String) -> Unit,
+    onAddToQueue: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
     // Píldora vertical, MISMO componente y mismos colores que el overflow de las pantallas de
@@ -438,6 +467,12 @@ private fun SongItemMenu(
                     text = { Text(stringResource(R.string.menu_add_to_playlist)) },
                     shape = MenuDefaults.leadingItemShape,
                     leadingIcon = { MenuItemIcon("playlist_add") }
+                )
+                DropdownMenuItem(
+                    onClick = { onAddToQueue(); showMenu = false },
+                    text = { Text(stringResource(R.string.common_add_to_queue)) },
+                    shape = MenuDefaults.middleItemShape,
+                    leadingIcon = { MenuItemIcon("low_priority") }
                 )
                 // Sin sentido para música LOCAL (no hay copia en la nube que volver a bajar).
                 if (showRedownload) {
@@ -603,8 +638,7 @@ private fun SearchAlbumCard(
         AlbumArt(
             albumArtUri = album.albumArtUri,
             size = 72.dp,
-            cornerRadius = 16.dp,
-            cacheKey = "search_album_${album.name}"
+            cornerRadius = 16.dp
         )
         Spacer(modifier = Modifier.height(6.dp))
         Text(
@@ -627,7 +661,7 @@ private fun SearchNoResults() {
                     MaterialSymbol(
                         "search_off",
                         size = 64.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                        color = MaterialTheme.colorScheme.outline
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
@@ -666,7 +700,7 @@ private fun LazyItemScope.FilteredEmptyBody() {
             MaterialSymbol(
                 "filter_alt_off",
                 size = 64.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                color = MaterialTheme.colorScheme.outline
             )
             Spacer(modifier = Modifier.height(16.dp))
             Text(
@@ -678,7 +712,7 @@ private fun LazyItemScope.FilteredEmptyBody() {
             Text(
                 text = stringResource(R.string.filter_empty_subtitle),
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
             )
         }
@@ -716,7 +750,7 @@ private fun LazyItemScope.EmptyContentBody(currentFilter: SongFilter) {
             MaterialSymbol(
                 icon,
                 size = 64.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                color = MaterialTheme.colorScheme.outline
             )
             Spacer(modifier = Modifier.height(16.dp))
             Text(
@@ -729,7 +763,7 @@ private fun LazyItemScope.EmptyContentBody(currentFilter: SongFilter) {
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center
                 )
             }

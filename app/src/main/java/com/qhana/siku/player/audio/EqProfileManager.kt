@@ -2,14 +2,13 @@ package com.qhana.siku.player.audio
 
 import com.qhana.siku.data.model.EqSettings
 import com.qhana.siku.data.preferences.MusicPreferences
+import com.qhana.siku.player.audio.clarity.Clarity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -42,7 +41,8 @@ import javax.inject.Singleton
 class EqProfileManager @Inject constructor(
     private val preferences: MusicPreferences,
     private val routeMonitor: AudioRouteMonitor,
-    private val processor: EqualizerAudioProcessor
+    private val processor: EqualizerAudioProcessor,
+    private val clarity: Clarity
 ) {
     private val scope = CoroutineScope(SupervisorJob() + kotlinx.coroutines.Dispatchers.Main.immediate)
     private var job: Job? = null
@@ -73,24 +73,19 @@ class EqProfileManager @Inject constructor(
     }
 
     private suspend fun observe() {
-        preferences.eqRouteProfilesEnabledFlow.distinctUntilChanged().collectLatest { enabled ->
-            if (!enabled) {
-                // Olvidar la ruta sellada es lo que evita una sorpresa al REACTIVAR la función:
-                // con la marca puesta, volver a encenderla meses después se leería como un cambio
-                // de ruta y aplicaría un perfil viejo de golpe. Sin ella, la primera ruta que se
-                // vea adopta la configuración que el usuario tenga en ese momento.
-                preferences.clearLastEqRoute()
-                return@collectLatest
-            }
-            routeMonitor.route.collect { onRoute(it.name) }
-        }
+        // SIEMPRE activo. La memoria por ruta de salida dejó de ser un ajuste opcional (era un
+        // toggle en Ajustes, default OFF): el usuario espera que el sonido vuelva solo al reconectar
+        // cada dispositivo, sin activar nada. Se mantiene el criterio de "adoptar la primera vez"
+        // ([onRoute], rama null), que es lo que hace que empezar a usarlo no cambie el sonido de golpe.
+        routeMonitor.route.collect { onRoute(it.name) }
     }
 
     private fun onRoute(routeKey: String) {
         val last = preferences.loadLastEqRoute()
         when (last) {
-            // Nunca se usó la función (o se acaba de activar): la ruta actual ADOPTA lo que hay
-            // puesto. No se aplica nada, así que activar el ajuste nunca cambia el sonido.
+            // Nunca se selló una ruta (primer arranque tras actualizar, o biblioteca nueva): la
+            // ruta actual ADOPTA lo que hay puesto. No se aplica nada, así que estrenar la memoria
+            // por ruta nunca cambia el sonido de golpe.
             null -> {
                 preferences.saveEqRouteProfile(routeKey, currentSettings())
                 preferences.saveLastEqRoute(routeKey)
@@ -99,12 +94,25 @@ class EqProfileManager @Inject constructor(
             // snapshot para que sobreviva a la muerte del proceso con los cambios de esta sesión.
             routeKey -> preferences.saveEqRouteProfile(routeKey, currentSettings())
             // Cambio de ruta de verdad: sella la que dejamos y restaura la que llega.
+            //
+            // **Y si la que llega no tiene perfil, se queda PLANA** ([EqSettings.neutral]). Esta
+            // rama antes copiaba el estado actual como perfil del dispositivo nuevo, y eso hacía
+            // dos cosas mal a la vez: al desconectar los cascos seguía sonando su curva por el
+            // altavoz, y además esa curva quedaba SELLADA como si fuera la del altavoz, así que la
+            // adopción se propagaba a cada dispositivo la primera vez que se usaba. La adopción es
+            // correcta UNA vez —la rama `null`, para estrenar la función sin cambiar el sonido de
+            // golpe— y solo esa vez; a partir de ahí, "no tengo perfil" significa neutro, no
+            // "heredo el del anterior".
             else -> {
                 preferences.saveEqRouteProfile(last, currentSettings())
-                val target = preferences.loadEqRouteProfile(routeKey)
-                if (target != null) apply(target) else {
-                    preferences.saveEqRouteProfile(routeKey, currentSettings())
-                }
+                apply(
+                    preferences.loadEqRouteProfile(routeKey)
+                        ?: EqSettings.neutral(preferences.loadEqBandCount())
+                )
+                // Se sella lo que quedó puesto (leído de preferencias, que `apply` ya normalizó),
+                // de modo que el estado de esta ruta sea explícito y no dependa de que más tarde
+                // pase por aquí otra vez.
+                preferences.saveEqRouteProfile(routeKey, currentSettings())
                 preferences.saveLastEqRoute(routeKey)
             }
         }
@@ -123,7 +131,9 @@ class EqProfileManager @Inject constructor(
             preampDb = preferences.loadEqPreamp(),
             limiterEnabled = preferences.loadEqLimiterEnabled(),
             limiterThresholdDb = preferences.loadEqLimiterThreshold(),
-            limiterThresholdAuto = preferences.loadEqLimiterThresholdAuto()
+            limiterThresholdAuto = preferences.loadEqLimiterThresholdAuto(),
+            clarityEnabled = preferences.loadClarityEnabled(),
+            clarityGainDb = preferences.loadClarityGain()
         )
     }
 
@@ -141,16 +151,15 @@ class EqProfileManager @Inject constructor(
         val threshold = settings.limiterThresholdDb
             ?: EqualizerAudioProcessor.LIMITER_THRESHOLD_MAX_DB
 
-        preferences.saveEqBandCount(settings.bandCount)
-        preferences.saveEqBandGains(settings.bandCount, settings.gains)
-        preferences.saveEqBassBoost(settings.bassBoostDb)
-        preferences.saveEqTrebleBoost(settings.trebleBoostDb)
-        preferences.saveEqBassFreq(bassFreq)
-        preferences.saveEqTrebleFreq(trebleFreq)
-        preferences.saveEqPreamp(settings.preampDb)
-        preferences.saveEqLimiterEnabled(settings.limiterEnabled)
-        preferences.saveEqLimiterThreshold(threshold)
-        preferences.saveEqLimiterThresholdAuto(settings.limiterThresholdAuto)
+        // Preferencias primero, en UN solo volcado atómico (ver [MusicPreferences.saveEqSettings]):
+        // los nullables van resueltos para que el default quede escrito de forma determinista.
+        preferences.saveEqSettings(
+            settings.copy(
+                bassFreqHz = bassFreq,
+                trebleFreqHz = trebleFreq,
+                limiterThresholdDb = threshold
+            )
+        )
 
         processor.setBands(
             EqualizerAudioProcessor.bandsFor(settings.bandCount),
@@ -172,6 +181,10 @@ class EqProfileManager @Inject constructor(
                 manualDb = threshold
             )
         )
+        // Clarity vive dentro del processor y se aplica en vivo (no reconstruye la pipeline como el
+        // toggle on/off del EQ), así que es seguro moverlo al conectar el dispositivo.
+        clarity.setEnabled(settings.clarityEnabled)
+        clarity.setGainDb(settings.clarityGainDb)
 
         _applied.tryEmit(settings)
     }

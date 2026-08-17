@@ -2,6 +2,7 @@ package com.qhana.siku.data.coordinator
 
 import android.content.Context
 import com.qhana.siku.data.auth.AuthManager
+import com.qhana.siku.data.auth.AuthErrorReason
 import com.qhana.siku.data.auth.AuthResult
 import com.qhana.siku.data.manager.MusicDownloader
 import com.qhana.siku.data.model.AppResult
@@ -51,7 +52,9 @@ class SyncManagerTest {
     @RelaxedMockK lateinit var lightMetadataFetcher: LightMetadataFetcher
     @RelaxedMockK lateinit var trackInfoBackfiller: TrackInfoBackfiller
     @RelaxedMockK lateinit var artworkHealingManager: ArtworkHealingManager
+    @RelaxedMockK lateinit var localLibraryChangeMonitor: LocalLibraryChangeMonitor
     @RelaxedMockK lateinit var snackbarManager: com.qhana.siku.data.util.SnackbarManager
+    @RelaxedMockK lateinit var downloadScheduler: com.qhana.siku.worker.DownloadScheduler
 
     private lateinit var syncManager: SyncManager
 
@@ -74,8 +77,11 @@ class SyncManagerTest {
             context, musicRepository, musicPreferences, networkManager,
             musicDownloader, requestCoordinator, authManager, sourceRegistry,
             artistImageRepository, lightMetadataFetcher, trackInfoBackfiller,
-            artworkHealingManager, snackbarManager
+            artworkHealingManager, localLibraryChangeMonitor, snackbarManager,
+            downloadScheduler
         )
+        // El refresco local pregunta antes de listar; en los tests siempre hay que listar.
+        every { localLibraryChangeMonitor.shouldRefresh() } returns true
 
         // Defaults seguros: sin trabajo pendiente, sin pausas, red y WiFi disponibles
         // Descargas ACTIVAS y sin tope de almacenamiento (comportamiento previo a la feature).
@@ -245,7 +251,7 @@ class SyncManagerTest {
     fun `downloadSong con error de auth no toca la red`() = runTest {
         // La canción existe en BD (lectura local, sin red); el token es lo que falla.
         coEvery { musicRepository.getSongById("p1") } returns AppResult.Success(song("p1", remoteId = "r1"))
-        every { authManager.getAccessToken() } returns flowOf(AuthResult.Error("sin sesion"))
+        every { authManager.getAccessToken() } returns flowOf(AuthResult.Error(AuthErrorReason.NO_ACCOUNT))
 
         val result = syncManager.downloadSong("p1")
 

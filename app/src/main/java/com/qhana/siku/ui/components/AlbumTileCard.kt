@@ -29,7 +29,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -58,6 +57,8 @@ fun AlbumTileCard(
     onClick: () -> Unit,
     onPlayClick: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Encolar el álbum entero. Null = sin overflow (superficies donde la acción no aplica). */
+    onAddToQueue: (() -> Unit)? = null,
     /** En el detalle de artista sobra: todos los álbumes son de ese mismo artista. */
     showArtist: Boolean = true,
     sharedTransitionScope: SharedTransitionScope? = null,
@@ -118,6 +119,29 @@ fun AlbumTileCard(
                     color = colorScheme.onSecondaryContainer
                 )
             }
+            // Overflow (encolar el álbum) SOBRE la carátula, no en la fila de abajo: en una
+            // cuadrícula de dos columnas esa fila ya reparte su ancho entre el título y el play, y
+            // meter una píldora más dejaba el nombre del álbum en ~70 dp, o sea elipsado casi
+            // siempre. Aquí no le quita ancho a nada.
+            //
+            // Con el par `secondaryContainer` SÓLIDO, igual que el badge de conteo que ya vive en
+            // esta misma imagen: sobre una carátula no hay fondo del que derivar un tono (el color
+            // de debajo cambia con cada píxel), así que la única separación garantizada es poner
+            // una superficie propia — que es lo que M3 hace con un par contenedor/contenido.
+            if (onAddToQueue != null) {
+                QueueOverflowButton(
+                    onAddToQueue = onAddToQueue,
+                    colors = TonalLayerColors(
+                        container = colorScheme.secondaryContainer,
+                        content = colorScheme.onSecondaryContainer
+                    ),
+                    contentDescription = stringResource(R.string.common_album_options),
+                    menuLabel = stringResource(R.string.detail_add_all_to_queue),
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp)
+                )
+            }
         }
 
         // Contenido: nombre + artista (izquierda) y botón de play (derecha).
@@ -130,7 +154,17 @@ fun AlbumTileCard(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = album.name.ifBlank { stringResource(R.string.common_unknown_album) },
-                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                    // `titleSmallEmphasized` en vez de `titleSmall + SemiBold`: el rol del scale
+                    // tiene las MISMAS métricas (14sp, alto 20, tracking 0.1) y solo sube el peso,
+                    // así que es exactamente lo que la copia a mano quería decir.
+                    //
+                    // El color se queda en `onSurface` A PROPÓSITO, no por omisión: el acento
+                    // marca lo accionable, y esta tarjeta ya gasta `primary` en el botón de play.
+                    // Un título en `primary` competiría con él y el play dejaría de leerse como
+                    // EL control de la tarjeta. Además `onSurface` no es "sin color" — en M3 los
+                    // neutros llevan croma del seed, así que el título ya está teñido por la
+                    // carátula, al nivel que el spec reserva para texto.
+                    style = MaterialTheme.typography.titleSmallEmphasized,
                     color = colorScheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis

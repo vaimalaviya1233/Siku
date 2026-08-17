@@ -193,7 +193,7 @@ private fun SaveOptionRow(
 @Composable
 private fun titleColorFor(enabled: Boolean) =
     if (enabled) MaterialTheme.colorScheme.onSurface
-    else MaterialTheme.colorScheme.onSurface.copy(alpha = DISABLED_ALPHA)
+    else MaterialTheme.colorScheme.onSurface.copy(alpha = DISABLED_CONTENT_ALPHA)
 
 /**
  * El peso solo se nombra cuando se sube el AUDIO: para el `.lrc` decir "se subirán 3 KB" es ruido,
@@ -231,4 +231,3 @@ private fun blockerText(reason: SaveBlocker): String = stringResource(
     }
 )
 
-private const val DISABLED_ALPHA = 0.38f

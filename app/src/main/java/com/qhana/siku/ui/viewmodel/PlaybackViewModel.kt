@@ -17,7 +17,7 @@ import com.qhana.siku.data.coordinator.RequestCoordinator
 import com.qhana.siku.data.coordinator.WorkerStatus
 import com.qhana.siku.data.lyrics.FailureReason
 import com.qhana.siku.data.lyrics.LyricsSaveResult
-import com.qhana.siku.data.model.EqCustomPreset
+import com.qhana.siku.data.model.EqProfile
 import com.qhana.siku.data.model.EqSettings
 import com.qhana.siku.data.model.LyricsSaveMode
 import com.qhana.siku.data.model.PlaybackContext
@@ -44,6 +44,8 @@ import com.qhana.siku.player.MusicController
 import com.qhana.siku.player.PlaybackCoordinator
 import com.qhana.siku.player.audio.EqCurve
 import com.qhana.siku.player.audio.EqualizerAudioProcessor
+import java.util.concurrent.TimeUnit
+import com.qhana.siku.ui.components.ComponentConfig
 import com.qhana.siku.ui.components.EqPresets
 import com.qhana.siku.ui.state.LyricsFailure
 import com.qhana.siku.ui.state.LyricsSaveUiState
@@ -89,6 +91,7 @@ class PlaybackViewModel @Inject constructor(
     private val equalizerProcessor: com.qhana.siku.player.audio.EqualizerAudioProcessor,
     private val audioRouteMonitor: com.qhana.siku.player.audio.AudioRouteMonitor,
     private val eqProfileManager: com.qhana.siku.player.audio.EqProfileManager,
+    private val clarity: com.qhana.siku.player.audio.clarity.Clarity,
     @ApplicationContext private val context: Context,
     private val workManager: WorkManager
 ) : ViewModel() {
@@ -118,11 +121,12 @@ class PlaybackViewModel @Inject constructor(
         private const val DOWNLOAD_STATUS_SAMPLE_MS = 200L
 
         /**
-         * Lado en px con el que se precarga la carátula del tema en curso. Es el tamaño con el
-         * que la pinta el NowPlaying a pantalla completa: pedir menos obliga a Coil a recargarla
-         * al abrir el reproductor, que es justo lo que este precargado quiere evitar.
+         * Lado en px con el que se precarga la carátula del tema en curso: EL MISMO con el que la
+         * pinta el NowPlaying, leído de la misma constante ([ComponentConfig.NowPlayingArtDecodePx]).
+         * Antes esto valía 900 con un KDoc que decía "es el tamaño del NowPlaying" —que pedía 800—,
+         * así que la precarga y el player decodificaban el mismo JPEG dos veces en paralelo.
          */
-        private const val VISUAL_ART_PRELOAD_PX = 900
+        private val VISUAL_ART_PRELOAD_PX: Int get() = ComponentConfig.NowPlayingArtDecodePx
 
         /**
          * Margen que se le da a un reintento para EMPEZAR a sonar ([monitorPlaybackRecovery]).
@@ -173,6 +177,11 @@ class PlaybackViewModel @Inject constructor(
         musicPreferences.nowPlayingWavyProgressFlow
             .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadNowPlayingWavyProgress())
 
+    /** Grosor de la barra de progreso, en dp (mismo motivo de observación que el fondo). */
+    val nowPlayingProgressThickness: StateFlow<Int> =
+        musicPreferences.nowPlayingProgressThicknessFlow
+            .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadNowPlayingProgressThickness())
+
     /** Forma del MiniPlayer: rectángulo redondeado vs píldora (mismo motivo de observación). */
     val miniPlayerRoundedRect: StateFlow<Boolean> =
         musicPreferences.miniPlayerRoundedRectFlow
@@ -205,7 +214,37 @@ class PlaybackViewModel @Inject constructor(
             .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadThemePaletteStyle())
 
     val currentSong: StateFlow<Song?> = musicController.currentSong
-    val playbackState: StateFlow<PlaybackState> = musicController.playbackState
+
+    /**
+     * Estado de reproducción PARA LA UI: como el del controller, salvo que **BUFFERING solo se
+     * enseña cuando el audio viene por STREAMING**; con el archivo en el dispositivo (descargado o
+     * de la fuente local) se muestra como PLAYING.
+     *
+     * Es el MISMO criterio que ya aplica la barra de progreso al nivel de búfer (`showBuffer` en
+     * NowPlayingProgress: solo con `PlaybackOrigin.STREAMING`, "con un archivo en disco no informa de
+     * nada"), llevado al glifo de carga: ese indicador existe por la red. Un FLAC local que ExoPlayer
+     * tarda en abrir no está "cargando" en el sentido que el spinner comunica — **medido con la sonda
+     * (16 ago), 170-240 ms de BUFFERING**, y en ese lapso —justo dentro del container transform de
+     * apertura— la UI componía DOS `LoadingIndicator` (píldora y botón de play; cada uno construye
+     * siete `Morph` entre MaterialShapes en su primera composición), arrancaba sus dos
+     * `AnimatedContent` y recomponía el NowPlaying entero dos veces (BUFFERING y luego PLAYING). Todo
+     * para un spinner que parpadeaba ~100 ms sin decir nada.
+     *
+     * Mostrar PLAYING en ese lapso es FIEL: `MusicController.updatePlaybackState` solo reporta
+     * BUFFERING con `playWhenReady`, o sea que la intención es reproducir; y la UI ya trataba
+     * BUFFERING como "sonando" en todo lo que no es el glifo (`isPlayingOrBuffering`). No hay umbral
+     * de tiempo: el criterio es el ORIGEN, no la duración, así que con streaming el spinner aparece
+     * exactamente como antes.
+     *
+     * `isLocalAudio` de la canción anunciada, y no `PlaybackOrigin`, porque lo que decide si hay red
+     * de por medio es dónde está el archivo, no de qué fuente vino (una de OneDrive ya descargada
+     * suena desde disco igual que una local).
+     */
+    val playbackState: StateFlow<PlaybackState> =
+        combine(musicController.playbackState, musicController.currentSong) { state, song ->
+            if (state == PlaybackState.BUFFERING && song?.isLocalAudio == true) PlaybackState.PLAYING
+            else state
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, musicController.playbackState.value)
     val isShuffleEnabled: StateFlow<Boolean> = musicController.isShuffleEnabled
     val repeatMode: StateFlow<RepeatMode> = musicController.repeatMode
     val currentPosition: StateFlow<Long> = musicController.currentPosition
@@ -216,7 +255,7 @@ class PlaybackViewModel @Inject constructor(
     val sleepTimer: StateFlow<MusicController.SleepTimerState?> = musicController.sleepTimer
 
     fun startSleepTimer(minutes: Int, finishSong: Boolean) =
-        musicController.startSleepTimer(minutes * 60_000L, finishSong)
+        musicController.startSleepTimer(TimeUnit.MINUTES.toMillis(minutes.toLong()), finishSong)
 
     fun cancelSleepTimer() = musicController.cancelSleepTimer()
 
@@ -297,6 +336,12 @@ class PlaybackViewModel @Inject constructor(
      * que no gasta nada durante la reproducción normal. Es la excepción legítima a "esperar por
      * señal, no por intervalo": el hilo de audio escribe un `@Volatile` miles de veces por segundo
      * y no hay ninguna señal que esperar — un medidor es por definición un muestreo.
+     *
+     * Ese mismo hecho —saber cuándo hay alguien mirando— es lo que se le comunica al processor con
+     * `addMeterObserver`/`removeMeterObserver`: con el limitador apagado, el detector true-peak que
+     * alimenta este número no tiene otro cliente, y en el hilo de audio cuesta del orden de la
+     * cascada de biquads entera. El `onCompletion` cubre también la cancelación (cerrar la hoja
+     * cancela el colector, no lo completa), que es como termina este flow siempre.
      */
     val eqGainReductionDb: Flow<Float> = flow {
         while (true) {
@@ -304,6 +349,8 @@ class PlaybackViewModel @Inject constructor(
             kotlinx.coroutines.delay(GAIN_REDUCTION_POLL_MS)
         }
     }
+        .onStart { equalizerProcessor.addMeterObserver() }
+        .onCompletion { equalizerProcessor.removeMeterObserver() }
 
     /**
      * Los dos centros en un solo flow. Existe por una restricción del lenguaje, no de diseño:
@@ -329,20 +376,6 @@ class PlaybackViewModel @Inject constructor(
             treble,
             freqs.first,
             freqs.second
-        )
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, 0f)
-
-    /**
-     * Preamp que dejaría la curva justo en 0 dB de ganancia: el negativo del pico. Es la convención
-     * de los perfiles de AutoEQ, que encabezan cada archivo con su `Preamp: -X.X dB`.
-     *
-     * Se SUGIERE, no se aplica: esa es toda la diferencia con el auto-preamp que se rechazó dos
-     * veces. El usuario ve el número, entiende de dónde sale y decide si paga ese volumen.
-     */
-    val eqSuggestedPreampDb: StateFlow<Float> = eqCurvePeakDb.map { peak ->
-        (-peak).coerceIn(
-            EqualizerAudioProcessor.PREAMP_MIN_DB,
-            EqualizerAudioProcessor.PREAMP_MAX_DB
         )
     }.stateIn(viewModelScope, SharingStarted.Eagerly, 0f)
 
@@ -390,6 +423,35 @@ class PlaybackViewModel @Inject constructor(
      */
     val audioRoute: StateFlow<com.qhana.siku.player.audio.AudioRoute> = audioRouteMonitor.route
 
+    // --- Clarity (exciter armonico) ---
+
+    val clarityEnabled: StateFlow<Boolean> = musicPreferences.clarityEnabledFlow
+        .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadClarityEnabled())
+
+    /**
+     * La cantidad es el unico que lleva copia local: es un slider y se escribe en cada frame de
+     * arrastre, asi que persistir por frame seria absurdo. Se confirma al soltar.
+     */
+    private val _clarityGain = MutableStateFlow(musicPreferences.loadClarityGain())
+    val clarityGain: StateFlow<Float> = _clarityGain.asStateFlow()
+
+    /**
+     * Enciende o apaga el exciter: se aplica y se persiste de una, igual que el limitador. No pasa
+     * por el servicio (al reves que `setEqEnabled`) porque no cambia si la pipeline esta activa —
+     * Clarity vive DENTRO del processor y solo suena con el ecualizador encendido.
+     */
+    fun setClarityEnabled(enabled: Boolean) {
+        clarity.setEnabled(enabled)
+        musicPreferences.saveClarityEnabled(enabled)
+    }
+
+    fun setClarityGain(db: Float) {
+        clarity.setGainDb(db)
+        _clarityGain.value = clarity.getGainDb()
+    }
+
+    fun commitClarityGain() = musicPreferences.saveClarityGain(_clarityGain.value)
+
     /** Preferencia de Ajustes: el botón EQ del NowPlaying abre el panel del sistema. */
     val useSystemEq: StateFlow<Boolean> = musicPreferences.useSystemEqFlow
         .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadUseSystemEq())
@@ -432,19 +494,23 @@ class PlaybackViewModel @Inject constructor(
     }
 
     /**
-     * Si la curva actual coincide con algún preset, devuelve ese preset re-interpolado a
-     * [targetCount]; si no, null (curva manual). Cubre presets de fábrica y personalizados.
+     * Si la curva actual coincide con alguna guardada, la devuelve re-interpolada a [targetCount];
+     * si no, null (curva manual). Cubre los presets de fábrica y los perfiles propios — y aquí SÍ vale
+     * mirar solo la curva de un perfil, porque lo único que se está resolviendo es cómo llevar la
+     * forma al otro modo de bandas: el resto de sus parámetros no dependen del número de bandas.
      */
     private fun followPresetGains(targetCount: Int): FloatArray? {
         val current = _eqGains.value
         val oldCount = _eqBandCount.value
         fun matches(g: FloatArray) = current.size == g.size &&
-            current.indices.all { kotlin.math.abs(current[it] - g[it]) < 0.1f }
+            current.indices.all {
+                kotlin.math.abs(current[it] - g[it]) < EqualizerAudioProcessor.GAIN_MATCH_EPSILON_DB
+            }
 
         EqPresets.ALL.forEach { p ->
             if (matches(EqPresets.gainsFor(p, oldCount))) return EqPresets.gainsFor(p, targetCount)
         }
-        customEqPresets.value.forEach { p ->
+        eqPresets.profiles.value.forEach { p ->
             val freqs = EqualizerAudioProcessor.bandsFor(p.bandCount)
             if (matches(EqPresets.resample(p.gains, freqs, oldCount)))
                 return EqPresets.resample(p.gains, freqs, targetCount)
@@ -537,63 +603,86 @@ class PlaybackViewModel @Inject constructor(
     }
 
     fun resetEq() {
-        val flat = FloatArray(_eqBandCount.value)
-        equalizerProcessor.setBandGains(flat)
-        _eqGains.value = flat.toList()
-        // "Restablecer" = EQ neutro de verdad, refuerzos incluidos: dejarlos puestos con la curva
-        // plana daría un "restablecido" que sigue coloreando el sonido.
-        equalizerProcessor.setBassBoost(0f)
-        equalizerProcessor.setTrebleBoost(0f)
-        _eqBassBoost.value = 0f
-        _eqTrebleBoost.value = 0f
-        musicPreferences.saveEqBassBoost(0f)
-        musicPreferences.saveEqTrebleBoost(0f)
-        // El preamp vuelve a 0 porque forma parte de la CURVA y "restablecer" debe dejar el EQ en
-        // identidad. El limitador NO se toca a propósito: no es parte del sonido que se
-        // restablece, es una red de seguridad, y apagarla desde un botón de reset sería lo
-        // contrario de lo que espera quien lo pulsa.
-        equalizerProcessor.setPreamp(0f)
-        _eqPreamp.value = 0f
-        musicPreferences.saveEqPreamp(0f)
-        // Los CENTROS vuelven al default, no a cero: con la ganancia en 0 el filtro ni se calcula,
-        // así que el centro no afecta al sonido, pero es lo que va a ver el usuario en los sliders
-        // la próxima vez que suba el refuerzo. Un 0 Hz ahí no significaría nada.
+        val count = _eqBandCount.value
+        val flat = FloatArray(count)
         val bassFreq = EqualizerAudioProcessor.BASS_BOOST_FREQ_DEFAULT_HZ
         val trebleFreq = EqualizerAudioProcessor.TREBLE_BOOST_FREQ_DEFAULT_HZ
+
+        // Efecto EN VIVO. "Restablecer" = EQ neutro de verdad: curva plana, refuerzos a 0, preamp a
+        // 0 y Clarity apagado (todo eso es TIMBRE y colorea el sonido). El limitador NO se toca a
+        // propósito: no es parte del sonido, es una red de seguridad, y apagarlo desde un botón de
+        // reset sería lo contrario de lo que espera quien lo pulsa.
+        equalizerProcessor.setBandGains(flat)
+        equalizerProcessor.setBassBoost(0f)
+        equalizerProcessor.setTrebleBoost(0f)
+        equalizerProcessor.setPreamp(0f)
+        // Los CENTROS vuelven al default, no a cero: con la ganancia en 0 el filtro ni se calcula,
+        // pero es lo que verá el usuario en los sliders la próxima vez que suba el refuerzo.
         equalizerProcessor.setBassBoostFreq(bassFreq)
         equalizerProcessor.setTrebleBoostFreq(trebleFreq)
+        clarity.setEnabled(false)
+        clarity.setGainDb(0f)
+
+        // Estado local de la hoja.
+        _eqGains.value = flat.toList()
+        _eqBassBoost.value = 0f
+        _eqTrebleBoost.value = 0f
+        _eqPreamp.value = 0f
         _eqBassFreq.value = bassFreq
         _eqTrebleFreq.value = trebleFreq
-        musicPreferences.saveEqBassFreq(bassFreq)
-        musicPreferences.saveEqTrebleFreq(trebleFreq)
-        // Aplana AMBOS modos, no solo el visible: "Restablecer" = EQ neutro; que el otro
-        // modo conserve una curva escondida sorprendería al alternar 5↔10 después.
-        musicPreferences.saveEqBandGains(5, FloatArray(5))
-        musicPreferences.saveEqBandGains(10, FloatArray(10))
+        _clarityGain.value = 0f
+
+        // Persistencia: el modo visible en UN volcado atómico (conserva el limitador tal como está).
+        musicPreferences.saveEqSettings(
+            EqSettings(
+                bandCount = count,
+                gains = flat,
+                bassBoostDb = 0f,
+                trebleBoostDb = 0f,
+                bassFreqHz = bassFreq,
+                trebleFreqHz = trebleFreq,
+                preampDb = 0f,
+                limiterEnabled = eqLimiterEnabled.value,
+                limiterThresholdDb = _eqLimiterThreshold.value,
+                limiterThresholdAuto = eqLimiterThresholdAuto.value,
+                clarityEnabled = false,
+                clarityGainDb = 0f
+            )
+        )
+        // Aplana también el OTRO modo (una escritura más): que conserve una curva escondida
+        // sorprendería al alternar 5↔10 después. saveEqSettings ya cubrió el modo visible.
+        val otherCount = EqualizerAudioProcessor.otherBandCount(count)
+        musicPreferences.saveEqBandGains(otherCount, FloatArray(otherCount))
     }
 
-    // --- Presets personalizados ---
-    // Observado del flow (la hoja del EQ puede vivir en otra instancia del ViewModel).
-    val customEqPresets: StateFlow<List<EqCustomPreset>> =
-        musicPreferences.customEqPresetsFlow
-            .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadCustomEqPresets())
+    // --- Perfiles y presets del EQ ---
+    // Fachada compartida con LibraryViewModel (perfiles, ocultos, perfiles por ruta): un solo sitio
+    // con la lógica, cada ViewModel la instancia con su scope. `Eagerly` porque la hoja del EQ del
+    // reproductor debe tener el dato listo sin esperar a un colector.
+    val eqPresets = EqPresetLibrary(musicPreferences, viewModelScope, SharingStarted.Eagerly)
 
     /**
-     * Captura la configuración COMPLETA actual como preset con [name]: curva, refuerzos, preamp y
-     * limitador. Guardar solo las bandas dejaba fuera media pantalla de controles — quien ajusta un
-     * preamp para que su curva no recorte espera que eso forme parte del sonido que guarda.
+     * Guarda el estado actual del EQ como perfil con [name]: la configuración COMPLETA (curva,
+     * refuerzos, preamp y limitador).
+     *
+     * Lo que se guarda es SIEMPRE un perfil. Guardar solo las bandas dejaría fuera media pantalla
+     * de controles —quien ajusta un preamp para que su curva no recorte espera que eso forme parte
+     * del sonido que guarda— y ofrecer las dos cosas obligaría a decidir el alcance cada vez. Los
+     * *presets* (curva sola) son los de fábrica: se eligen, no se crean.
      */
-    fun saveCurrentAsEqPreset(name: String) {
+    fun saveCurrentAsEqProfile(name: String) {
         val trimmed = name.trim().ifBlank { return }
-        val preset = EqCustomPreset(
+        val profile = EqProfile(
             id = java.util.UUID.randomUUID().toString(),
             name = trimmed,
             settings = currentEqSettings()
         )
-        musicPreferences.saveCustomEqPresets(customEqPresets.value + preset)
+        // upsert (no add): guardar con un nombre ya usado SOBRESCRIBE ese perfil en vez de duplicarlo.
+        // La confirmación de sobrescritura la hace el diálogo antes de llegar aquí (SaveProfileDialog).
+        eqPresets.upsertProfile(profile)
     }
 
-    /** Estado en vivo del EQ como [EqSettings] (lo que se captura en un preset). */
+    /** Estado en vivo del EQ como [EqSettings] (lo que se captura en un perfil). */
     private fun currentEqSettings() = EqSettings(
         bandCount = _eqBandCount.value,
         gains = _eqGains.value.toFloatArray(),
@@ -604,72 +693,77 @@ class PlaybackViewModel @Inject constructor(
         preampDb = _eqPreamp.value,
         limiterEnabled = eqLimiterEnabled.value,
         limiterThresholdDb = _eqLimiterThreshold.value,
-        limiterThresholdAuto = eqLimiterThresholdAuto.value
+        limiterThresholdAuto = eqLimiterThresholdAuto.value,
+        clarityEnabled = clarityEnabled.value,
+        clarityGainDb = _clarityGain.value
     )
 
-    fun deleteEqPreset(id: String) {
-        musicPreferences.saveCustomEqPresets(customEqPresets.value.filterNot { it.id == id })
-        // Un preset borrado no puede quedar "oculto": si el usuario crea otro, el id es un UUID
-        // nuevo, así que la entrada vieja solo sería basura acumulándose en disco.
-        val hidden = musicPreferences.loadHiddenEqPresets()
-        if (id in hidden) musicPreferences.saveHiddenEqPresets(hidden - id)
-    }
-
     /**
-     * Aplica un preset propio: la curva se remuestrea al modo de bandas ACTUAL (no se cambia el
-     * modo — el preset es una curva, no un estado de pantalla) y el resto de parámetros van tal
-     * cual se guardaron.
+     * Aplica un perfil ENTERO: curva, refuerzos, preamp y limitador. Ahí está la diferencia con un
+     * preset de fábrica, que solo toca las ganancias y deja la protección de nivel como estuviera —
+     * y por eso el selector los pinta en grupos rotulados, para que se sepa antes de tocarlos.
+     *
+     * La curva se remuestrea al modo de bandas ACTUAL y el modo NO se cambia: es una propiedad de
+     * la pantalla, no del sonido guardado.
      */
-    fun applyCustomEqPreset(preset: EqCustomPreset) {
-        val s = preset.settings
+    fun applyEqProfile(profile: EqProfile) {
+        val s = profile.settings
         val gains = EqPresets.resample(
             s.gains,
             EqualizerAudioProcessor.bandsFor(s.bandCount),
             _eqBandCount.value
         )
-        setEqGains(gains)
-        setEqBassBoost(s.bassBoostDb)
-        setEqTrebleBoost(s.trebleBoostDb)
-        setEqBassFreq(s.bassFreqHz ?: EqualizerAudioProcessor.BASS_BOOST_FREQ_DEFAULT_HZ)
-        setEqTrebleFreq(s.trebleFreqHz ?: EqualizerAudioProcessor.TREBLE_BOOST_FREQ_DEFAULT_HZ)
-        commitEqBoosts()
-        setEqPreamp(s.preampDb)
-        commitEqPreamp()
-        setEqLimiterEnabled(s.limiterEnabled)
-        setEqLimiterThreshold(
-            s.limiterThresholdDb ?: EqualizerAudioProcessor.LIMITER_THRESHOLD_MAX_DB
+        val bassFreq = s.bassFreqHz ?: EqualizerAudioProcessor.BASS_BOOST_FREQ_DEFAULT_HZ
+        val trebleFreq = s.trebleFreqHz ?: EqualizerAudioProcessor.TREBLE_BOOST_FREQ_DEFAULT_HZ
+        val threshold = s.limiterThresholdDb ?: EqualizerAudioProcessor.LIMITER_THRESHOLD_MAX_DB
+
+        // Efecto EN VIVO (processor + Clarity). El umbral efectivo del limitador NO se escribe aquí:
+        // lo pone el colector de [eqLimiterThresholdDb] cuando cambian _eqLimiterThreshold y el flow
+        // de "auto" (ver el init) — su único escritor, para que no se pisen (convención 14).
+        equalizerProcessor.setBandGains(gains)
+        equalizerProcessor.setBassBoost(s.bassBoostDb)
+        equalizerProcessor.setTrebleBoost(s.trebleBoostDb)
+        equalizerProcessor.setBassBoostFreq(bassFreq)
+        equalizerProcessor.setTrebleBoostFreq(trebleFreq)
+        equalizerProcessor.setPreamp(s.preampDb)
+        equalizerProcessor.setLimiterEnabled(s.limiterEnabled)
+        clarity.setEnabled(s.clarityEnabled)
+        clarity.setGainDb(s.clarityGainDb)
+
+        // Estado local de la hoja (los sliders leen de aquí; freqs/gain saneados por el processor).
+        _eqGains.value = gains.toList()
+        _eqBassBoost.value = s.bassBoostDb
+        _eqTrebleBoost.value = s.trebleBoostDb
+        _eqBassFreq.value = equalizerProcessor.getBassBoostFreq()
+        _eqTrebleFreq.value = equalizerProcessor.getTrebleBoostFreq()
+        _eqPreamp.value = s.preampDb
+        _eqLimiterThreshold.value = threshold
+        _clarityGain.value = clarity.getGainDb()
+
+        // Persistencia ATÓMICA: un solo volcado en vez de ~9. eqLimiterEnabled/…Auto/clarityEnabled
+        // se observan de sus flows, que esta misma escritura actualiza. El modo de bandas NO se
+        // cambia: es propiedad de la pantalla, no del sonido guardado.
+        musicPreferences.saveEqSettings(
+            EqSettings(
+                bandCount = _eqBandCount.value,
+                gains = gains,
+                bassBoostDb = s.bassBoostDb,
+                trebleBoostDb = s.trebleBoostDb,
+                bassFreqHz = bassFreq,
+                trebleFreqHz = trebleFreq,
+                preampDb = s.preampDb,
+                limiterEnabled = s.limiterEnabled,
+                limiterThresholdDb = threshold,
+                limiterThresholdAuto = s.limiterThresholdAuto,
+                clarityEnabled = s.clarityEnabled,
+                clarityGainDb = clarity.getGainDb()
+            )
         )
-        commitEqLimiterThreshold()
-        setEqLimiterThresholdAuto(s.limiterThresholdAuto)
     }
 
-    // --- Presets ocultos ---
-    // Ocultar NO es borrar: el preset sigue existiendo y se restaura desde Ajustes. Con 20 perfiles
-    // guardados, un selector que los lista todos deja de ser usable, y borrar los de fábrica que no
-    // usás no era una opción — no se pueden recrear.
-
-    val hiddenEqPresets: StateFlow<Set<String>> = musicPreferences.hiddenEqPresetsFlow
-        .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadHiddenEqPresets())
-
-    fun setEqPresetHidden(id: String, hidden: Boolean) {
-        val current = musicPreferences.loadHiddenEqPresets()
-        musicPreferences.saveHiddenEqPresets(if (hidden) current + id else current - id)
-    }
-
-    fun restoreAllEqPresets() = musicPreferences.saveHiddenEqPresets(emptySet())
-
-    // --- Perfiles por ruta de salida ---
-
-    /** Ver [com.qhana.siku.player.audio.EqProfileManager]. */
-    val eqRouteProfilesEnabled: StateFlow<Boolean> = musicPreferences.eqRouteProfilesEnabledFlow
-        .stateIn(
-            viewModelScope,
-            SharingStarted.Eagerly,
-            musicPreferences.loadEqRouteProfilesEnabled()
-        )
-
-    fun setEqRouteProfilesEnabled(enabled: Boolean) =
-        musicPreferences.saveEqRouteProfilesEnabled(enabled)
+    // Los perfiles guardados y los presets ocultos viven en [eqPresets] (compartido con
+    // LibraryViewModel). La hoja del EQ los lee como `eqPresets.profiles` / `eqPresets.hidden`. La
+    // memoria por ruta de salida ya no es un ajuste: el [EqProfileManager] la aplica siempre.
 
     init {
         // ÚNICO escritor del umbral del processor, venga del slider o del automático (0 dBFS
@@ -698,6 +792,9 @@ class PlaybackViewModel @Inject constructor(
                 _eqPreamp.value = s.preampDb
                 _eqLimiterThreshold.value = s.limiterThresholdDb
                     ?: EqualizerAudioProcessor.LIMITER_THRESHOLD_MAX_DB
+                // clarityEnabled se observa del flow (lo escribe el manager en preferencias); el gain
+                // es local por el mismo motivo que los sliders y necesita resync explícito.
+                _clarityGain.value = s.clarityGainDb
             }
         }
         musicController.initialize()
@@ -1068,6 +1165,10 @@ class PlaybackViewModel @Inject constructor(
         )
     }
 
+    /** Sobrecarga para los `PlayResult.Error`, que ya traen el texto como `@StringRes`. */
+    private fun showPlaybackError(@androidx.annotation.StringRes messageRes: Int) =
+        showPlaybackError(context.getString(messageRes))
+
     private fun monitorPlaybackRecovery(songId: String) {
         viewModelScope.launch {
             // Espera acotada a que el retry arranque (ver [RECOVERY_START_TIMEOUT_MS]). La
@@ -1085,11 +1186,18 @@ class PlaybackViewModel @Inject constructor(
     fun playSongs(songs: List<Song>, index: Int) {
         if (songs.isEmpty()) return
         resetRetryBudget()
-        
+        // ANTES de lanzar la corrutina, no dentro: el caller expande el reproductor en este mismo
+        // handler y `MusicAppState.openPlayer` anota de qué fila nace leyendo la canción anunciada.
+        // Dentro del `launch`, el anuncio queda detrás de `oldJob?.cancelAndJoin()`, que SUSPENDE si
+        // el tema anterior todavía se está preparando (dos toques seguidos) — y entonces el player
+        // se abría con la canción anterior y el morph salía de la fila equivocada. El use case lo
+        // repite (mismo valor): es idempotente y sigue cubriendo a sus otros llamadores.
+        musicController.announceSelection(songs[index.coerceIn(0, songs.lastIndex)])
+
         val oldJob = playJob
         playJob = viewModelScope.launch {
             oldJob?.cancelAndJoin()
-            
+
             val errorMsg = playbackUseCase.playSongs(songs, index)
             if (errorMsg != null) {
                 showPlaybackError(errorMsg)
@@ -1110,6 +1218,8 @@ class PlaybackViewModel @Inject constructor(
         sourceFilters: Set<SongSourceFilter> = emptySet()
     ) {
         resetRetryBudget()
+        // Síncrono y antes del `launch`, por el mismo motivo que en [playSongs].
+        musicController.announceSelection(clickedSong)
 
         val oldJob = playJob
         playJob = viewModelScope.launch {
@@ -1121,7 +1231,7 @@ class PlaybackViewModel @Inject constructor(
                         startAutoDownload(result.song, forcePriority = result.willStream)
                     }
                 }
-                is MusicPlaybackUseCase.PlayResult.Error -> showPlaybackError(result.message)
+                is MusicPlaybackUseCase.PlayResult.Error -> showPlaybackError(result.messageRes)
                 is MusicPlaybackUseCase.PlayResult.RetryWithSingle -> {
                     // playSongs reemplaza este job a propósito: se aborta el intento de
                     // reproducir la biblioteca y se reproduce solo este tema.
@@ -1144,7 +1254,13 @@ class PlaybackViewModel @Inject constructor(
         // Unique name por canción (downloadTag/repairTag por defecto). El viejo nombre global
         // compartido con KEEP hacía que, mientras se auto-descargaba la canción A, el auto-
         // download de la canción B se ignorara silenciosamente.
-        downloadScheduler.scheduleDownload(song.id, forceRedownload = forceRedownload)
+        //
+        // isUserInitiated=false: es un prefetch de FONDO, no una descarga pedida. Marca la work con
+        // AUTO_DOWNLOAD_TAG para que su fallo NO dispare el snackbar "Fallo al descargar" —la canción
+        // suena por streaming pase lo que pase con la descarga (era el bug reportado)—.
+        downloadScheduler.scheduleDownload(
+            song.id, forceRedownload = forceRedownload, isUserInitiated = false
+        )
     }
 
     fun shufflePlay(songs: List<Song>) {
@@ -1159,7 +1275,7 @@ class PlaybackViewModel @Inject constructor(
                         startAutoDownload(result.song, forcePriority = result.willStream)
                     }
                 }
-                is MusicPlaybackUseCase.PlayResult.Error -> showPlaybackError(result.message)
+                is MusicPlaybackUseCase.PlayResult.Error -> showPlaybackError(result.messageRes)
                 else -> {}
             }
         }
@@ -1194,7 +1310,7 @@ class PlaybackViewModel @Inject constructor(
                         startAutoDownload(result.song, forcePriority = result.willStream)
                     }
                 }
-                is MusicPlaybackUseCase.PlayResult.Error -> showPlaybackError(result.message)
+                is MusicPlaybackUseCase.PlayResult.Error -> showPlaybackError(result.messageRes)
                 else -> {}
             }
         }
@@ -1256,7 +1372,7 @@ class PlaybackViewModel @Inject constructor(
                 // basura y además sella el NotFound por 14 días (ver [hasRealMetadata]).
                 if (!hasRealMetadata(song)) return@launch
                 if (!isNetworkAvailable()) return@launch
-                val result = lyricsRepository.getLyricsWithResult(song.title, song.artist, song.album, song.duration / 1000.0)
+                val result = lyricsRepository.getLyricsWithResult(song.title, song.artist, song.album, song.duration.toDouble() / TimeUnit.SECONDS.toMillis(1))
                 if (currentSong.value?.id != song.id) return@launch
                 when (result) {
                     is LyricsResult.Found -> {
@@ -1324,7 +1440,7 @@ class PlaybackViewModel @Inject constructor(
                     if (force) snackbarManager.show(context.getString(R.string.common_error_format, offlineMsg))
                     return@launch
                 }
-                when (val result = lyricsRepository.getLyricsWithResult(song.title, song.artist, song.album, song.duration / 1000.0)) {
+                when (val result = lyricsRepository.getLyricsWithResult(song.title, song.artist, song.album, song.duration.toDouble() / TimeUnit.SECONDS.toMillis(1))) {
                     is LyricsResult.Found -> {
                         if (currentSong.value?.id != song.id) return@launch
                         _nowPlayingUiState.update { it.copy(lyrics = result.lyrics, lyricLines = parseLyricsUseCase(result.lyrics)) }
@@ -1354,24 +1470,45 @@ class PlaybackViewModel @Inject constructor(
                             }
                             if (force) snackbarManager.show(offlineMsg)
                         } else {
-                            _nowPlayingUiState.update { it.copy(lyricsFailure = LyricsFailure.PROVIDER_ERROR, lyricsError = result.message) }
-                            if (force) snackbarManager.show(context.getString(R.string.common_error_format, result.message))
+                            val msg = lyricsErrorMessage(result.reason)
+                            _nowPlayingUiState.update { it.copy(lyricsFailure = LyricsFailure.PROVIDER_ERROR, lyricsError = msg) }
+                            if (force) snackbarManager.show(msg)
                         }
                     }
                 }
             } catch (e: Exception) {
+                // Fallo inesperado (los del proveedor ya vienen tipados arriba): detalle al Log,
+                // al usuario un mensaje localizado genérico en vez del `e.message` crudo en inglés.
+                Log.w(TAG, "Fallo inesperado al refrescar letras de ${song.title}", e)
+                val msg = context.getString(R.string.lyrics_error_unknown)
                 if (currentSong.value?.id == song.id) {
                     _nowPlayingUiState.update {
-                        it.copy(lyricsFailure = LyricsFailure.PROVIDER_ERROR, lyricsError = e.message ?: context.getString(R.string.common_error))
+                        it.copy(lyricsFailure = LyricsFailure.PROVIDER_ERROR, lyricsError = msg)
                     }
                 }
-                if (force) snackbarManager.show(context.getString(R.string.common_error_format, e.message ?: context.getString(R.string.common_error)))
+                if (force) snackbarManager.show(msg)
             } finally {
                 if (currentSong.value?.id == song.id) {
                     _nowPlayingUiState.update { it.copy(isLyricsLoading = false) }
                 }
             }
         }
+    }
+
+    /**
+     * Traduce el motivo tipado de un fallo del proveedor de letras a un texto localizado. La capa
+     * de datos ya no fabrica mensajes (antes llegaban a la pantalla literales en inglés como
+     * "Timeout" o "Network error", iguales en los dos idiomas); aquí, con el `Context`, se resuelven
+     * los strings. El caso "sin conexión" (`isOffline`) se resuelve aparte, con su propio estado.
+     */
+    private fun lyricsErrorMessage(reason: com.qhana.siku.data.repository.LyricsErrorReason): String {
+        val res = when (reason) {
+            com.qhana.siku.data.repository.LyricsErrorReason.TIMEOUT -> R.string.lyrics_error_timeout
+            com.qhana.siku.data.repository.LyricsErrorReason.NETWORK -> R.string.lyrics_error_network
+            com.qhana.siku.data.repository.LyricsErrorReason.SERVER -> R.string.lyrics_error_server
+            com.qhana.siku.data.repository.LyricsErrorReason.UNKNOWN -> R.string.lyrics_error_unknown
+        }
+        return context.getString(res)
     }
 
     /**
@@ -1407,7 +1544,7 @@ class PlaybackViewModel @Inject constructor(
                         lyricsSearchError = if (result.isOffline) {
                             context.getString(R.string.common_no_offline_connection)
                         } else {
-                            result.message
+                            lyricsErrorMessage(result.reason)
                         }
                     )
                 }
@@ -1587,6 +1724,70 @@ class PlaybackViewModel @Inject constructor(
     fun skipToIndex(index: Int) = musicController.playAt(index)
     fun reorderQueue(from: Int, to: Int) = musicController.reorderQueue(from, to)
     fun removeFromQueue(index: Int) = musicController.removeFromQueue(index)
+
+    /**
+     * Encola [song] al final de la cola (o arranca la reproducción si no hay cola). El feedback va
+     * por snackbar: la acción es invisible sin ella (la cola no está en pantalla al pulsar desde una
+     * lista), y "ya está en la cola" evita el silencio de un duplicado descartado.
+     */
+    fun addToQueue(song: Song) {
+        val added = musicController.addToQueue(listOf(song))
+        snackbarManager.show(
+            if (added > 0) context.getString(R.string.queue_added)
+            else context.getString(R.string.queue_already_in)
+        )
+    }
+
+    /**
+     * Encola un detalle ENTERO (artista, álbum, género, lista). Mismo mecanismo que [addToQueue],
+     * pero el snackbar dice **cuántas entraron de verdad** y no cuántas se pidieron: el controller
+     * descarta por id las que ya estaban, así que encolar un álbum del que ya tenías tres pistas
+     * añade menos de las que ves en pantalla. Anunciar el total sería mentir sobre lo que pasó, y
+     * es justo el caso en el que el usuario va a mirar la cola a comprobarlo.
+     */
+    fun addToQueue(songs: List<Song>) {
+        if (songs.isEmpty()) return
+        val added = musicController.addToQueue(songs)
+        snackbarManager.show(
+            if (added > 0) context.resources.getQuantityString(R.plurals.queue_added_count, added, added)
+            else context.getString(R.string.queue_all_already_in)
+        )
+    }
+
+    /**
+     * Vacía la cola entera. **Detiene la reproducción**, porque en esta app una cola vacía es no
+     * tener nada que sonar: `MusicController.stop()` limpia los items de ExoPlayer, el
+     * `PlaylistManager` y la sesión persistida de una vez.
+     *
+     * Va con DESHACER en vez de un diálogo de confirmación. El diálogo cobraría un paso extra
+     * siempre —a esta acción se llega a propósito, desde la propia hoja de la cola— para cubrir un
+     * error que es raro; el deshacer solo aparece cuando ya pasó. Y restaurar sale prácticamente
+     * gratis: los tres datos que hacen falta (la lista, en qué tema iba y por dónde) están en
+     * memoria justo antes de parar, así que la cola vuelve al segundo exacto y respetando si
+     * estaba sonando o en pausa.
+     */
+    fun clearQueue() {
+        val songs = musicController.playlist.value
+        if (songs.isEmpty()) return
+        val index = musicController.currentIndex.value
+        val position = musicController.currentPosition.value
+        val wasPlaying = musicController.playbackState.value == PlaybackState.PLAYING
+
+        musicController.stop()
+
+        snackbarManager.show(
+            message = context.getString(R.string.queue_cleared),
+            actionLabel = context.getString(R.string.common_undo),
+            onAction = {
+                musicController.setPlaylistAndPlay(
+                    songs = songs,
+                    startIndex = index,
+                    startPosition = position,
+                    autoPlay = wasPlaying
+                )
+            }
+        )
+    }
 
     /** Guarda la cola actual como una lista nueva (crea + agrega todas las canciones). */
     fun saveQueueAsPlaylist(name: String) {

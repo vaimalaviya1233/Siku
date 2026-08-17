@@ -55,7 +55,16 @@ class OneDriveResolvingDataSourceFactory @Inject constructor(
                 // reconexión, y sin caché cada uno pegaba un getItem a Graph. El TTL corto del
                 // urlCache mantiene frescura sin repetir round-trips dentro de la misma sesión.
                 val resolved = try {
-                    runBlocking { urlCache.getOrFetch(remoteId) { oneDriveRepository.getDownloadUrl(remoteId) } }
+                    runBlocking {
+                        urlCache.getOrFetch(remoteId) {
+                            // forPlayback: esto es la canción que el usuario está esperando oír, así
+                            // que se salta la cola del rate limiter (donde puede haber decenas de
+                            // resoluciones del sync masivo por delante) y va con presupuesto acotado
+                            // en vez de esperar a que se agoten los reintentos. Sin esta bandera, la
+                            // reproducción competía en igualdad con el escaneo de fondo.
+                            oneDriveRepository.getDownloadUrl(remoteId, forPlayback = true)
+                        }
+                    }
                 } catch (e: Exception) {
                     throw IOException("Error resolviendo URL OneDrive: ${e.message}", e)
                 } ?: throw IOException("OneDrive devolvió URL nula para $remoteId")

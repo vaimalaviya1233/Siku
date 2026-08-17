@@ -1,27 +1,31 @@
 package com.qhana.siku.ui.screens
 
 import androidx.compose.animation.*
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.res.stringResource
 import com.qhana.siku.R
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.ColorUtils
+import android.content.res.Configuration
 import android.media.MediaMetadataRetriever
 import android.os.Build
-import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeSource
 import com.qhana.siku.data.model.PlaybackOrigin
 import com.qhana.siku.data.model.PlaybackState
 import com.qhana.siku.data.model.PlayerToolbarConfig
@@ -33,8 +37,14 @@ import com.qhana.siku.ui.components.*
 import com.qhana.siku.ui.model.toUiModel
 import com.qhana.siku.ui.util.shareSong
 import com.qhana.siku.ui.state.NowPlayingUiState
+import com.qhana.siku.ui.theme.AppContainerBoundsTransform
+import com.qhana.siku.ui.theme.EXPRESSIVE_DEFAULT_EFFECTS_MS
+import com.qhana.siku.ui.theme.ExpressiveDefaultEffectsEasing
+import com.qhana.siku.ui.theme.appContainerContentEnter
+import com.qhana.siku.ui.theme.appContainerContentExit
 import com.qhana.siku.ui.theme.appSheetEnter
 import com.qhana.siku.ui.theme.appSheetExit
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
@@ -68,6 +78,7 @@ data class PlayerActions(
     val onReorder: (Int, Int) -> Unit,
     val onRemoveFromQueue: (Int) -> Unit,
     val onSaveQueueAsPlaylist: (String) -> Unit,
+    val onClearQueue: () -> Unit,
     val onToggleFavorite: () -> Unit,
     val onToggleDownload: () -> Unit,
     val onToggleKeepScreenOn: () -> Unit,
@@ -108,13 +119,23 @@ fun NowPlayingScreen(
     bufferedPositionFlow: StateFlow<Long>,
     isShuffleEnabled: Boolean,
     repeatMode: RepeatMode,
-    playlist: List<Song>,
-    currentIndex: Int,
+    /**
+     * Cola e índice actual como FLOWS, no como valores: los consume SOLO la hoja de la cola, que los
+     * colecta dentro de su propia rama. Como valores, cada cambio de canción (índice nuevo, y la
+     * lista entera si cualquier fila cambió) recomponía este composable completo —medido con la
+     * sonda (16 ago): eran 1-2 de las 3-4 recomposiciones del NowPlaying en los 30 ms siguientes al
+     * `playAt`, en plena ventana del container transform— para una hoja que casi nunca está abierta.
+     * Mismo patrón que `currentPositionFlow`.
+     */
+    playlistFlow: StateFlow<List<Song>>,
+    currentIndexFlow: StateFlow<Int>,
     isFavorite: Boolean,
     keepScreenOn: Boolean,
     solidBackground: Boolean,
     /** Ajustes → Reproducción: barra de progreso ondulada (Expressive) en vez de la píldora. */
     wavyProgress: Boolean,
+    /** Ajustes -> Apariencia: grosor de la barra de progreso (vale para los dos modos). */
+    progressThickness: Dp,
     /** Chip de formato con ficha técnica; se conmuta desde Ajustes O tocando el propio chip. */
     detailedFormat: Boolean,
     onToggleDetailedFormat: () -> Unit,
@@ -133,9 +154,20 @@ fun NowPlayingScreen(
     sharedTransitionScope: SharedTransitionScope? = null,
     /** Key del shared element de la carátula; null = sin morph (ver PlayerArtOrigin). */
     artSharedKey: Any? = null,
+    /**
+     * Key del *container transform* de la superficie de la que CRECE esta pantalla; null = entra por
+     * su cuenta (fundido) en vez de crecer de ningún sitio.
+     *
+     * La superficie de origen la elige quien abre el player (ver `PlayerArtOrigin`): la píldora
+     * ([PLAYER_CONTAINER_SHARED_KEY]) o la fila tocada
+     * ([com.qhana.siku.ui.components.rowContainerSharedKey]). Aquí da igual cuál sea — la coreografía
+     * es la misma y esta pantalla solo necesita saber a qué key engancharse.
+     */
+    containerSharedKey: Any? = null,
     animatedVisibilityScope: AnimatedVisibilityScope? = null
 ) {
-    val isDarkTheme = isSystemInDarkTheme()
+    // Sonda (solo debug): cada recomposición del scope de esta pantalla (es la función grande).
+    SideEffect { com.qhana.siku.data.util.JankProbe.mark { "NowPlayingScreen recompuesta" } }
     var showQueueSheet by remember { mutableStateOf(false) }
     var showLyrics by remember { mutableStateOf(false) }
     var showAmbientModeDialog by remember { mutableStateOf(false) }
@@ -177,16 +209,13 @@ fun NowPlayingScreen(
         onDispose { view.keepScreenOn = keepScreenOn }
     }
 
-    // Transformar playlist a modelos UI estables (ASYNC para evitar ANR en listas grandes)
-    val uiPlaylist by produceState(initialValue = emptyList<com.qhana.siku.ui.model.SongUiModel>(), key1 = playlist) {
-        value = withContext(Dispatchers.Default) {
-            playlist.map { it.toUiModel(isActive = false) }
-        }
-    }
-
     val song = uiState.song
     if (song == null) {
-        NowPlayingSkeleton(modifier = modifier, isDarkTheme = isDarkTheme)
+        // Sin canción no hay nada que mostrar. La capa del player (NowPlayingLayer) ya detecta este
+        // estado y COLAPSA el player, así que en la práctica no se llega aquí; es solo red de seguridad. Una
+        // superficie lisa, NUNCA el layout viejo del reproductor (el antiguo NowPlayingSkeleton, ya
+        // eliminado, era la PRIMERA versión de esta pantalla y no reflejaba el diseño actual).
+        Box(modifier = modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface))
         return
     }
 
@@ -198,11 +227,14 @@ fun NowPlayingScreen(
     // Play button + TODOS los acentos que derivan de esto = rol PRIMARY del esquema. El color
     // elegido/extraído es SOLO el SEED (el tema está seedeado de él vía MusicPlayerTheme), NO se usa
     // 1:1 — eso causaba las inconsistencias/parches (ensureContrast, onAccentContentColor y el viejo
-    // `albumAccent`, ya eliminados).
-    // `onPrimary` da el contraste del icono por diseño M3. El tema anima primary al cambiar de canción
-    // (animatedScheme), así que no hace falta el animateColorAsState local.
+    // `albumAccent`, ya eliminados). El tema anima primary al cambiar de canción (animatedScheme),
+    // así que no hace falta el animateColorAsState local.
     val playButtonColor = MaterialTheme.colorScheme.primary
-    val playButtonContentColor = MaterialTheme.colorScheme.onPrimary
+    // Glifo del play por CONTRASTE real (`maxContrastOn`), NO `onPrimary`: en la mayoría de temas
+    // coinciden, pero en Fidelity `onPrimary` puede ser un par de bajo contraste (gris azulado sobre
+    // un primary casi negro) y el triángulo salía apagado. Mismo criterio que el play del MiniPlayer,
+    // el chip de origen y el toggle de letras: contenido sobre un acento = maxContrastOn.
+    val playButtonContentColor = maxContrastOn(playButtonColor)
 
     val surfaceColor = MaterialTheme.colorScheme.surface
     val solidBackgroundColor = MaterialTheme.colorScheme.surfaceContainer
@@ -222,6 +254,12 @@ fun NowPlayingScreen(
             )
         }
     }
+
+    // Color que hay REALMENTE bajo la barra superior, sea cual sea el modo de fondo: en degradado es
+    // su primera parada (arriba es justo donde vive la barra). Lo consume el chip de origen, que
+    // deriva de él su relleno. Se calcula AQUÍ, pegado al brush, porque son la misma decisión: si
+    // algún día el degradado arranca en otro color, el chip lo sigue solo.
+    val topBackgroundColor = if (solidBackground) solidBackgroundColor else albumPrimary
 
     val contentColor = MaterialTheme.colorScheme.onSurface
     val variantColor = MaterialTheme.colorScheme.onSurfaceVariant
@@ -254,40 +292,111 @@ fun NowPlayingScreen(
     val onAddToPlaylistClick = { showAddToPlaylist = true }
     val onSleepTimerClick = { showSleepTimerSheet = true }
 
-    // Estado de Haze: la capa de fondo (gradiente) es el `hazeSource`; el chip y la barra de
-    // acciones lo desenfocan con `hazeEffect` (ver GlassSurface). El velo lleva algo del color
-    // del álbum: base del tema (negro/blanco) TEÑIDA con el acento, semitransparente — así el
-    // vidrio toma el matiz de la carátula sin perder legibilidad del texto (onSurface).
-    val hazeState = remember { HazeState() }
-    val glassTint = run {
-        val base = if (isDarkTheme) {
-            // Un velo de base negra desaparece sobre surface (casi negro, es lo que hay detrás
-            // de la barra) cuando el acento del álbum es apagado. Se LEVANTA la base hacia
-            // blanco de forma adaptativa: cuanto más oscuro el surface del tema, más lift,
-            // garantizando que el vidrio siempre quede un paso más claro que el fondo.
-            val surfaceLum = ColorUtils.calculateLuminance(surfaceColor.toArgb()).toFloat()
-            val lift = (0.22f - surfaceLum * 0.6f).coerceIn(0.08f, 0.22f)
-            Color(ColorUtils.blendARGB(Color.Black.toArgb(), Color.White.toArgb(), lift))
-        } else Color.White
-        val tinted = Color(ColorUtils.blendARGB(base.toArgb(), playButtonColor.toArgb(), 0.40f))
-        tinted.copy(alpha = if (isDarkTheme) 0.38f else 0.42f)
-    }
-
-    // Blur de vidrio: DESACTIVADO mientras la transición de apertura (slide del AnimatedContent)
-    // no se ha asentado — el RenderEffect por-frame es el causante del bajón de frames al abrir.
-    // Se reactiva al terminar la animación (currentState == targetState).
-    val glassBlurEnabled = animatedVisibilityScope?.transition?.let { it.currentState == it.targetState } ?: true
-
     // Arrastre hacia abajo para cerrar. El estado se crea SIEMPRE (crearlo dentro de un `if`
     // ataría su `remember` a la rama y perdería el arrastre en curso si el ajuste cambiara a
     // mitad del gesto); lo que se apaga con el ajuste es quién lo alimenta.
     val dismissState = rememberPlayerDismissState { navigationActions.onBackClick() }
     val activeDismiss = dismissState.takeIf { gesturesEnabled }
 
-    CompositionLocalProvider(LocalGlassBlurEnabled provides glassBlurEnabled) {
-    BoxWithConstraints(
+    // CONTAINER TRANSFORM: la superficie de origen y esta pantalla son LA MISMA cambiando de tamaño
+    // (ver [PLAYER_CONTAINER_SHARED_KEY]). Envuelve la pantalla ENTERA —fondo y contenido—, porque en
+    // este patrón lo que se ve encoger y crecer es el contenedor CON lo que lleva dentro.
+    //
+    // El origen es la PÍLDORA o la FILA tocada según cómo se abriera el player, y esa diferencia no
+    // llega hasta aquí: las dos puntas se configuran igual (misma `key` por parámetro, mismo resize,
+    // mismo bounds spec) porque son la misma coreografía. (La sombra de la píldora no participa: se
+    // dibuja en su sitio bajo el overlay y solo se funde — ver `pillShadow` en MiniPlayer.kt.)
+    //
+    // **`ContentScale.Fit` es la pieza que costó tres intentos encontrar, y el culpable de los tres
+    // fallos anteriores fue siempre el CONTENT SCALE, no el `resizeMode`:**
+    //
+    //  - `Crop` (v1) → un factor de escala de **1**, porque `Crop` toma el MAYOR de los dos ratios y
+    //    las dos superficies comparten ancho (ratio 1) mientras el de alto es ~0.03. O sea el player
+    //    se dibujaba a tamaño real trasladándose una pantalla entera: el "slide up". Y al cerrar se
+    //    quedaba a tamaño COMPLETO desvaneciéndose sobre el home, que es lo que se veía como restos.
+    //    (El comentario que justificaba `Crop` razonaba sobre la punta de la PÍLDORA, donde sí cambia
+    //    algo, y trasladaba la conclusión a ésta, donde `Crop` y `FillWidth` dan exactamente lo mismo.)
+    //  - `RemeasureToBounds` (v2) → re-medir el layout cada frame, y como la carátula es el único
+    //    `weight(1f)` de la columna absorbía TODA la holgura: cero durante los primeros dos tercios del
+    //    recorrido y luego disparada. La "doble animación" del 16 ago.
+    //  - `Fit` toma el MENOR de los ratios (~0.03), así que el contenido **se achica hasta la nada**
+    //    con la superficie al cerrar y crece desde ella al abrir. Sin re-medir nada: la carátula
+    //    conserva su tamaño de layout y solo se escala, que es lo que evita el fallo de la v2.
+    //
+    // `Alignment.Center` y no `TopCenter`: el contenido escalado se ancla al centro del rect, o sea
+    // crece desde el centro de la píldora en vez de colgar de su borde superior.
+    //
+    // La PORTADA es la excepción y no viaja escalada con esto: tiene su propio shared element
+    // ([PLAYER_ART_SHARED_KEY]) y se eleva al overlay, así que se dibuja UNA sola vez, en sus propios
+    // bounds interpolados. Es lo que la deja hacer un viaje limpio de la píldora al centro.
+    //
+    // Va ANTES del `graphicsLayer` del gesto de cierre —o sea, más afuera—: el morph mide la pantalla
+    // en su sitio, no arrastrada por el dedo.
+    val containerSharedModifier =
+        if (sharedTransitionScope != null && animatedVisibilityScope != null && containerSharedKey != null) {
+            with(sharedTransitionScope) {
+                // El que SALE se dibuja ENCIMA y se disuelve sobre el que ENTRA, sólido debajo (ver el
+                // mismo patrón en MiniPlayer): así abrir y cerrar se ven IGUAL. Al cerrar, el player es
+                // el saliente → va encima y se ve disolverse; al abrir es el entrante → sólido debajo.
+                val exiting = animatedVisibilityScope.transition.targetState != EnterExitState.Visible
+                Modifier.sharedBounds(
+                    sharedContentState = rememberSharedContentState(key = containerSharedKey),
+                    animatedVisibilityScope = animatedVisibilityScope,
+                    boundsTransform = AppContainerBoundsTransform,
+                    enter = appContainerContentEnter(),
+                    exit = appContainerContentExit(),
+                    resizeMode = SharedTransitionScope.ResizeMode.scaleToBounds(
+                        ContentScale.Fit,
+                        Alignment.Center
+                    ),
+                    zIndexInOverlay =
+                        if (exiting) CONTAINER_SURFACE_OVERLAY_Z_EXITING
+                        else CONTAINER_SURFACE_OVERLAY_Z_ENTERING,
+                    // A pantalla completa la forma de la píldora sería un óvalo, así que se recorta con
+                    // la esquina `extraLarge`; al encoger converge con la barra. Es el TOKEN del tema y
+                    // no su valor (28dp escrito a mano): la otra forma del MiniPlayer sale de ese mismo
+                    // token, así que copiar el número dejaba las dos puntas del morph libres de divergir.
+                    clipInOverlayDuringTransition = OverlayClip(MaterialTheme.shapes.extraLarge)
+                )
+            }
+        } else Modifier
+
+    // Fade-in del CONTENIDO al ABRIR, gobernado por el PROGRESO del morph (mismo patrón que
+    // `shadowFactor` en MiniPlayer): la superficie entra SÓLIDA (`enter = None`, o crecería
+    // translúcida) y el contenido aparece encima mientras ella crece — el *"content is swapped"* del
+    // spec. Existe con cualquier origen que tenga superficie (píldora o fila); sin origen el contenido
+    // va opaco desde el primer frame.
+    //
+    // **Dura el token *default* de effects (200 ms), NO el del morph (500)**: es un fundido de contenido
+    // —el spec lo hace en el primer tramo del container transform— y además tiene un coste que no se ve:
+    // un alpha < 1 sobre el Scaffold a pantalla completa obliga a HWUI a un `saveLayer` offscreen de la
+    // pantalla ENTERA en cada frame ("alpha caused saveLayer 1080x2400", medido con atrace el 17 ago),
+    // así que estiraba el RenderThread durante 500 ms cuando el bounds ya había asentado a ~350. Con
+    // 200 el contenido está opaco antes de que la superficie termine de crecer, y la capa cara dura
+    // menos de la mitad del morph.
+    //
+    // **Solo la ENTRADA**: `PostExit` vale 1, no 0. Al cerrar, el contenido va DENTRO del
+    // `sharedBounds` y ya se apaga con su `exit` ([appContainerContentExit], 300 ms) a la vez que
+    // ENCOGE con la superficie; sumarle acá un segundo fade multiplicaría los dos alphas y lo apagaría
+    // antes que a su propia superficie. Cuando el contenido estuvo FUERA del contenedor sí hubo que
+    // bajarlo a mano, igualando la duración para no dejar restos del player sobre la píldora ya puesta
+    // — ese apaño se fue con el contenido de vuelta adentro.
+    //
+    // Es un `State` y NO un valor con `by` A PROPÓSITO: se lee DIFERIDO dentro del `graphicsLayer` del
+    // Scaffold — cambia en cada frame del morph y leerlo en composición recompondría la pantalla entera
+    // por frame (el mismo criterio que las lecturas diferidas del progreso de reproducción).
+    val contentFactor: State<Float>? =
+        if (containerSharedKey != null && sharedTransitionScope != null && animatedVisibilityScope != null) {
+            animatedVisibilityScope.transition.animateFloat(
+                transitionSpec = { tween(EXPRESSIVE_DEFAULT_EFFECTS_MS, easing = ExpressiveDefaultEffectsEasing) },
+                label = "playerContentFactor"
+            ) { if (it == EnterExitState.PreEnter) 0f else 1f }
+        } else null
+
+    Box(
         modifier = modifier
             .fillMaxSize()
+            .then(containerSharedModifier)
             // Se traslada y atenúa TODO el reproductor —fondo incluido— con el dedo. Mover solo
             // el contenido dejaría el degradado quieto detrás y se vería el hueco por abajo.
             .graphicsLayer {
@@ -295,23 +404,30 @@ fun NowPlayingScreen(
                 alpha = 1f - (1f - PlayerGestureConfig.DismissMinAlpha) * dismissState.progress
             }
     ) {
-        val isLandscape = maxWidth > maxHeight
+        // Por la CONFIGURACIÓN de la ventana y no por los constraints medidos: `BoxWithConstraints`
+        // subcompone, y decidir la maquetación por aspect ratio es lo que metería el layout landscape
+        // en pleno vuelo si el contenedor volviera a re-medirse. La orientación de la ventana es
+        // estable durante el morph; el tamaño no tiene por qué serlo.
+        val isLandscape =
+            LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
 
-        // Capa 1 (FONDO = hazeSource): el fondo gradiente en una capa DEDICADA detrás de todo.
-        // Los contenedores de vidrio (chip, barra de acciones) viven en la capa de contenido de
-        // ENCIMA (hermana de ésta) y la difuminan con hazeEffect. Haze sólo exige que el effect
-        // se dibuje SOBRE el source, no que sea hermano en un Scaffold — por eso el layout
-        // interno (Portrait/Landscape) no necesita reestructurarse.
+        // Capa 1 (FONDO): el gradiente en una capa DEDICADA detrás de todo, hermana del contenido.
+        // Sigue separada del Scaffold —y no como su `containerColor`— porque el gesto de cierre
+        // traslada y atenúa el reproductor ENTERO desde el `graphicsLayer` de arriba, fondo
+        // incluido: pintarlo dentro del Scaffold lo dejaría quieto y se vería el hueco al arrastrar.
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(backgroundBrush)
-                .hazeSource(state = hazeState)
         )
 
-        // Capa 2 (CONTENIDO): layout normal, encima del fondo y transparente.
+        // Capa 2 (CONTENIDO): layout normal, encima del fondo y transparente. El alpha del morph va
+        // AQUÍ —topBar incluida— y NO en la Capa 1: esa es la superficie del contenedor y tiene que
+        // crecer SÓLIDA, no aparecer translúcida.
         Scaffold(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .then(contentFactor?.let { f -> Modifier.graphicsLayer { alpha = f.value } } ?: Modifier),
             containerColor = Color.Transparent,
             topBar = {
                 if (!isLandscape) {
@@ -319,10 +435,8 @@ fun NowPlayingScreen(
                         onBackClick = navigationActions.onBackClick,
                         contentColor = contentColor,
                         accentColor = playButtonColor,
-                        hazeState = hazeState,
-                        glassTint = glassTint,
                         origin = origin,
-                        solidBackground = solidBackground,
+                        backgroundColor = topBackgroundColor,
                         onAmbientMode = onAmbientMode
                     )
                 }
@@ -357,13 +471,14 @@ fun NowPlayingScreen(
                         bufferedPositionFlow = bufferedPositionFlow,
                         showBuffer = isStreaming,
                         origin = origin,
-                        solidBackground = solidBackground,
+                        backgroundColor = topBackgroundColor,
                         gesturesEnabled = gesturesEnabled,
                         dismiss = activeDismiss,
                         format = formatInfo,
                         detailedFormat = detailedFormat,
                         onToggleDetailedFormat = onToggleDetailedFormat,
                         wavyProgress = wavyProgress,
+                        progressThickness = progressThickness,
                         playerActions = playerActions,
                         onBackClick = navigationActions.onBackClick,
                         onArtistClick = navigationActions.onArtistClick,
@@ -377,8 +492,6 @@ fun NowPlayingScreen(
                         onSleepTimerClick = onSleepTimerClick,
                         onShareSong = onShareSong,
                         toolbarConfig = toolbarConfig,
-                        hazeState = hazeState,
-                        glassTint = glassTint,
                         sharedTransitionScope = sharedTransitionScope,
                         artSharedKey = artSharedKey,
                         animatedVisibilityScope = animatedVisibilityScope,
@@ -409,6 +522,7 @@ fun NowPlayingScreen(
                         detailedFormat = detailedFormat,
                         onToggleDetailedFormat = onToggleDetailedFormat,
                         wavyProgress = wavyProgress,
+                        progressThickness = progressThickness,
                         playerActions = playerActions,
                         onArtistClick = navigationActions.onArtistClick,
                         onAlbumClick = navigationActions.onAlbumClick,
@@ -420,8 +534,6 @@ fun NowPlayingScreen(
                         onSleepTimerClick = onSleepTimerClick,
                         onShareSong = onShareSong,
                         toolbarConfig = toolbarConfig,
-                        hazeState = hazeState,
-                        glassTint = glassTint,
                         sharedTransitionScope = sharedTransitionScope,
                         artSharedKey = artSharedKey,
                         animatedVisibilityScope = animatedVisibilityScope,
@@ -431,7 +543,6 @@ fun NowPlayingScreen(
             }
         }
     }
-    } // CompositionLocalProvider(LocalGlassBlurEnabled)
 
     // Polling removed: ProgressSlider observes currentPositionFlow directly.
 
@@ -459,6 +570,21 @@ fun NowPlayingScreen(
         enter = appSheetEnter(),
         exit = appSheetExit()
             ) {
+            // La cola y el índice se colectan AQUÍ, dentro de la hoja: solo esta rama depende de
+            // ellos, así que un cambio de canción no recompone la pantalla entera (ver el KDoc de
+            // `playlistFlow`). Y los 777 modelos se calculan solo mientras la hoja está compuesta —
+            // antes se calculaban al ABRIR el reproductor, en plena ventana del container transform.
+            val playlist by playlistFlow.collectAsStateWithLifecycle()
+            val currentIndex by currentIndexFlow.collectAsStateWithLifecycle()
+            // Transformar playlist a modelos UI estables (ASYNC para evitar ANR en listas grandes).
+            val uiPlaylist by produceState(
+                initialValue = emptyList<com.qhana.siku.ui.model.SongUiModel>(),
+                key1 = playlist
+            ) {
+                value = withContext(Dispatchers.Default) {
+                    playlist.map { it.toUiModel(isActive = false) }
+                }
+            }
             QueueBottomSheet(
                 playlist = uiPlaylist,
                 currentIndex = currentIndex,
@@ -469,6 +595,7 @@ fun NowPlayingScreen(
                 onShuffleToggle = playerActions.onShuffleToggle,
                 onRemoveSong = playerActions.onRemoveFromQueue,
                 onSaveAsPlaylist = playerActions.onSaveQueueAsPlaylist,
+                onClearQueue = playerActions.onClearQueue,
                 accentColor = albumPrimary
             )
         }

@@ -55,18 +55,57 @@ interface ArtistDao {
     /**
      * Artistas de la biblioteca con foto pendiente de resolver: sin fila en `artists`, o sin
      * imageUrl y con el not-found ya expirado. Alimenta el backfill en background; las
-     * selecciones manuales y los not-found dentro del TTL quedan fuera.
+     * selecciones manuales y los not-found dentro de su espera quedan fuera.
+     *
+     * **El filtro de nombre no es cosmético**: `ArtistImageRepository.ensureArtistImage`
+     * descarta el placeholder de "sin tag" y los blancos SIN escribir nada en la tabla, así
+     * que sin excluirlos aquí volverían en cada consulta y "pendiente" nunca sería vacío —
+     * con una sola canción sin tags, el backfill se creía eternamente a medias. El criterio
+     * de esta consulta y el de aquella función tienen que ser el MISMO.
+     *
+     * La espera del not-found se DUPLICA con cada fallo ([ArtistEntity.notFoundAttempts]):
+     * `base · 2^(intentos-1)`, topada en `2^maxBackoffShift`. Va en SQL y no en Kotlin
+     * porque es el propio criterio de "pendiente" — calcularlo fuera obligaría a traerse
+     * toda la tabla para filtrarla en memoria.
      */
     @Query(
         """
         SELECT DISTINCT s.artist FROM songs s
         LEFT JOIN artists a ON a.name = s.artist
-        WHERE a.name IS NULL
-           OR (a.imageUrl IS NULL AND a.manuallySet = 0
-               AND (a.fetchedAt IS NULL OR a.fetchedAt < :expiredBefore))
+        WHERE TRIM(s.artist) != '' AND s.artist != :unknownArtist
+          AND (a.name IS NULL
+               OR (a.imageUrl IS NULL AND a.manuallySet = 0
+                   AND (a.fetchedAt IS NULL
+                        OR a.fetchedAt + :baseTtlMs *
+                           (1 << MIN(MAX(a.notFoundAttempts - 1, 0), :maxBackoffShift)) <= :now)))
         """
     )
-    suspend fun getArtistNamesNeedingImage(expiredBefore: Long): List<String>
+    suspend fun getArtistNamesNeedingImage(
+        now: Long,
+        baseTtlMs: Long,
+        maxBackoffShift: Int,
+        unknownArtist: String
+    ): List<String>
+
+    /**
+     * Artistas a los que **nunca se llegó a preguntar** por su foto (sin fila, o con fila sin
+     * `fetchedAt` porque el intento murió en un fallo de red).
+     *
+     * Es lo único que justifica pedirle datos móviles al usuario: son las fotos que de verdad
+     * se pueden ganar. Un artista que Deezer ya dijo no tener seguirá saliendo en
+     * [getArtistNamesNeedingImage] cuando venza su espera —y está bien, es mantenimiento que
+     * corre solo cuando ya hay WiFi—, pero ofrecer gastar megas por él es prometer fotos que
+     * no van a llegar.
+     */
+    @Query(
+        """
+        SELECT COUNT(DISTINCT s.artist) FROM songs s
+        LEFT JOIN artists a ON a.name = s.artist
+        WHERE TRIM(s.artist) != '' AND s.artist != :unknownArtist
+          AND (a.name IS NULL OR a.fetchedAt IS NULL)
+        """
+    )
+    suspend fun countArtistsNeverAttempted(unknownArtist: String): Int
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertArtist(artist: ArtistEntity)

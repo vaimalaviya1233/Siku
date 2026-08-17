@@ -44,7 +44,7 @@ class MusicPlaybackUseCase @Inject constructor(
                     withContext(Dispatchers.Main) {
                         musicController.setPlaylistAndPlay(songs, safeIndex)
                     }
-                    result.message
+                    context.getString(result.messageRes)
                 }
             }
         }
@@ -74,7 +74,7 @@ class MusicPlaybackUseCase @Inject constructor(
                 else -> repository.getSongsSnapshot(query, sortOrder, sourceFilters)
             }
             if (allSongs.isEmpty()) {
-                return@withPlaybackRequest PlayResult.Error(context.getString(R.string.songs_empty_title))
+                return@withPlaybackRequest PlayResult.Error(R.string.songs_empty_title)
             }
 
             val targetIndex = allSongs.indexOfFirst { it.id == clickedSong.id }
@@ -96,7 +96,7 @@ class MusicPlaybackUseCase @Inject constructor(
                     withContext(Dispatchers.Main) {
                         musicController.setPlaylist(allSongs, targetSong, targetIndex)
                     }
-                    PlayResult.Error(result.message)
+                    PlayResult.Error(result.messageRes)
                 }
             }
         }
@@ -117,7 +117,7 @@ class MusicPlaybackUseCase @Inject constructor(
      * original de la lista.
      */
     suspend fun playShuffled(songs: List<Song>): PlayResult {
-        if (songs.isEmpty()) return PlayResult.Error(context.getString(R.string.songs_empty_title))
+        if (songs.isEmpty()) return PlayResult.Error(R.string.songs_empty_title)
 
         // El primer tema se elige AQUÍ (y no dentro de la petición) para poder anunciarlo en el
         // frame del tap: los chips del inicio y los botones de aleatorio expanden el reproductor
@@ -140,7 +140,7 @@ class MusicPlaybackUseCase @Inject constructor(
                     withContext(Dispatchers.Main) {
                         musicController.setPlaylistAndPlayShuffled(songs, startIndex)
                     }
-                    PlayResult.Error(result.message)
+                    PlayResult.Error(result.messageRes)
                 }
             }
         }
@@ -148,7 +148,8 @@ class MusicPlaybackUseCase @Inject constructor(
 
     sealed class PlayResult {
         data class Success(val song: Song, val willStream: Boolean) : PlayResult()
-        data class Error(val message: String) : PlayResult()
+        /** El texto va como recurso, no como String: se localiza en la UI (showPlaybackError). */
+        data class Error(@androidx.annotation.StringRes val messageRes: Int) : PlayResult()
         data class RetryWithSingle(val song: Song) : PlayResult()
     }
 }

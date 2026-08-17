@@ -333,7 +333,9 @@ fun ActiveDownloadsTab(
                         }
                     } else {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            MaterialSymbol("check_circle", size = 64.sp, color = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                            // Sin atenuar, al revés que los glifos de estado VACÍO (que van en `outline`): este
+                            // anuncia un éxito —"todo al día"— y apagarlo lo dejaba pareciendo deshabilitado.
+                            MaterialSymbol("check_circle", size = 64.sp, color = MaterialTheme.colorScheme.primary)
                             Spacer(modifier = Modifier.height(16.dp))
                             Text(stringResource(R.string.download_up_to_date), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }

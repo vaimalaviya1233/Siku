@@ -2,18 +2,29 @@ package com.qhana.siku.ui
 
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.core.updateTransition
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.LoadingIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -23,6 +34,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -39,6 +53,7 @@ import com.qhana.siku.ui.components.ComponentConfig
 import com.qhana.siku.ui.components.LocalSnackbarHostState
 import com.qhana.siku.ui.navigation.AppNavHost
 import com.qhana.siku.ui.navigation.Screen
+import com.qhana.siku.ui.screens.POSITION_TICK_MS
 import com.qhana.siku.ui.viewmodel.AuthViewModel
 import com.qhana.siku.ui.viewmodel.LibraryViewModel
 import com.qhana.siku.ui.viewmodel.PlaybackViewModel
@@ -53,7 +68,7 @@ import java.util.UUID
 /**
  * Raíz de composición de la app: colecta los ViewModels de la Activity, corre los efectos
  * globales (snackbar bus, toasts de descargas, polling de posición, navegación por sesión)
- * y compone las tres capas — [AppNavHost] (pantallas), [PlayerOverlay] (pill ↔ player + FAB)
+ * y compone las tres capas — [AppNavHost] (pantallas), [PlayerOverlay] (píldora ↔ reproductor)
  * y el host único de snackbars — dentro de un [SharedTransitionLayout] compartido.
  *
  * Los ViewModels se resuelven AQUÍ (scope de la Activity) y bajan por parámetro: dentro de
@@ -76,23 +91,26 @@ fun MusicPlayerScreen(
     // Izado desde MainActivity: el tema (que envuelve a esta pantalla) necesita saber si el
     // reproductor está abierto para congelar la animación del esquema (ver MusicPlayerTheme).
     playerExpandedState: androidx.compose.runtime.MutableState<Boolean> =
-        rememberSaveable { mutableStateOf(false) }
+        rememberSaveable { mutableStateOf(false) },
+    // Izado por el mismo motivo: la fila en PREPARACIÓN (el frame anterior a expandir) también
+    // congela el tema — ver el comentario en MainActivity y `MusicAppState.pendingRowOrigin`.
+    pendingRowOriginState: androidx.compose.runtime.MutableState<String?> =
+        remember { mutableStateOf<String?>(null) }
 ) {
     val context = LocalContext.current
 
     val isLoggedIn by authViewModel.isLoggedIn.collectAsStateWithLifecycle()
     val authLoading by authViewModel.isLoading.collectAsStateWithLifecycle()
     val authError by authViewModel.error.collectAsStateWithLifecycle()
+    // Avatar de cuenta para el header de la biblioteca (foto de perfil + inicial de fallback).
+    val accountPhotoPath by authViewModel.accountPhotoPath.collectAsStateWithLifecycle()
+    val accountInitial by authViewModel.accountInitial.collectAsStateWithLifecycle()
     val currentSong by playbackViewModel.currentSong.collectAsStateWithLifecycle()
-    val playbackState by playbackViewModel.playbackState.collectAsStateWithLifecycle()
     val keepScreenOn by playbackViewModel.keepScreenOn.collectAsStateWithLifecycle()
 
     // --- Efectos globales ---
 
-    // 1. Keep Screen On (la Activity pone/quita el window flag).
-    LaunchedEffect(keepScreenOn) {
-        onKeepScreenOnChanged(keepScreenOn)
-    }
+    // 1. Keep Screen On: el efecto vive más abajo, junto a `playerExpanded` (necesita ese estado).
 
     // 2. Feedback CENTRALIZADO: un único host escucha el bus singleton (SnackbarManager).
     // Cualquier ViewModel emite ahí sin importar su instancia (fix del desfase de instancias).
@@ -127,13 +145,18 @@ fun MusicPlayerScreen(
         }
     }
 
-    // 4. Download Toasts (Worker) — para descargas no-repair (ej. auto-download al reproducir).
-    // Las redescargas (REPAIR_TAG) las gestiona LibraryViewModel.redownloadSong: si las
-    // notificáramos aquí también habría doble toast. Sin pruneWork() (causaba carrera con
-    // redownloadSong al borrar el WorkInfo que estaba esperando) — un Set local evita repetir.
-    // WorkManager persiste los WorkInfo terminados entre procesos, así que la PRIMERA emisión
-    // trae descargas de sesiones anteriores: se siembran en el Set sin notificar (si no, cada
-    // arranque repetiría "Descarga completa" de la última descarga en stream).
+    // 4. Download Toasts (Worker). Reglas por tipo de descarga:
+    //  - REPAIR_TAG (redescargas): NO se tocan aquí, las gestiona LibraryViewModel.redownloadSong
+    //    (si no, doble toast).
+    //  - AUTO_DOWNLOAD_TAG (prefetch de fondo al reproducir por streaming): ÉXITO → "ahora offline";
+    //    FALLO → mensaje SUAVE ("seguirá en streaming"), no el alarmante "Fallo al descargar", porque
+    //    la canción suena igual por streaming. (El falso fallo que se veía —chip "Descargado" +
+    //    snackbar "Fallo"— era otro bug, ya cerrado en MusicDownloader.finalizeDownload.)
+    //  - Iniciadas por el usuario (botón de descargar): ÉXITO y FALLO directo.
+    // Sin pruneWork() (causaba carrera con redownloadSong al borrar el WorkInfo que estaba esperando)
+    // — un Set local evita repetir. WorkManager persiste los WorkInfo terminados entre procesos, así
+    // que la PRIMERA emisión trae descargas de sesiones anteriores: se siembran en el Set sin
+    // notificar (si no, cada arranque repetiría "Descarga completa" de la última descarga en stream).
     val workManager = remember { WorkManager.getInstance(context) }
     LaunchedEffect(Unit) {
         val notified = mutableSetOf<UUID>()
@@ -151,6 +174,8 @@ fun MusicPlayerScreen(
                     return@collect
                 }
                 workInfos
+                    // REPAIR se gestiona en LibraryViewModel (doble toast si no). Las demás pasan
+                    // el filtro y deciden ABAJO si notifican, según sean auto o no.
                     .filter {
                         it.state.isFinished &&
                             it.id !in notified &&
@@ -158,11 +183,20 @@ fun MusicPlayerScreen(
                     }
                     .forEach { workInfo ->
                         notified += workInfo.id
+                        val succeeded = workInfo.state == WorkInfo.State.SUCCEEDED
+                        val isAuto = WorkerTags.AUTO_DOWNLOAD_TAG in workInfo.tags
                         val title = workInfo.outputData.getString("title")
                         if (title != null) {
-                            val msg = if (workInfo.state == WorkInfo.State.SUCCEEDED)
-                                context.getString(R.string.download_msg_complete, title)
-                            else context.getString(R.string.download_msg_failed, title)
+                            val msg = when {
+                                succeeded -> context.getString(R.string.download_msg_complete, title)
+                                // Fallo de una AUTO-descarga (prefetch de fondo): mensaje suave y
+                                // exacto —la canción sigue sonando por streaming— en vez del alarmante
+                                // "Fallo al descargar". Ya no puede ser un FALSO fallo: finalizeDownload
+                                // garantiza que una descarga commiteada devuelve éxito.
+                                isAuto -> context.getString(R.string.download_msg_auto_failed, title)
+                                // Fallo de una descarga PEDIDA por el usuario: mensaje directo.
+                                else -> context.getString(R.string.download_msg_failed, title)
+                            }
                             snackbarManager.show(msg)
                         }
                     }
@@ -170,12 +204,29 @@ fun MusicPlayerScreen(
     }
 
     // --- Navegación ---
-    // isLoggedIn == null: la sesión aún se está resolviendo (MSAL lee la cuenta de
-    // disco tras un cold start). No componemos el NavHost todavía — si lo hiciéramos
-    // con Onboarding como startDestination, al resolverse la sesión navegaríamos a Library
-    // y el usuario vería el Onboarding un instante (flash al reabrir la app).
-    val loggedIn = isLoggedIn ?: return
     val hasLocalSource by sourcesViewModel.hasLocalSource.collectAsStateWithLifecycle()
+
+    // isLoggedIn == null: la sesión aún se está resolviendo (MSAL lee la cuenta de disco tras un
+    // cold start). No componemos el NavHost todavía — si lo hiciéramos con Onboarding como
+    // startDestination, al resolverse la sesión navegaríamos a Library y el usuario vería el
+    // Onboarding un instante (flash al reabrir la app).
+    //
+    // Con una fuente LOCAL configurada no hay nada que esperar: el destino es la biblioteca diga lo
+    // que diga MSAL, así que se sigue con `false` y la sesión se incorpora cuando llegue (el
+    // `LaunchedEffect(loggedIn)` de abajo dispara entonces el sync de la nube, como en un login
+    // normal). Esto es lo que evita que un usuario solo-local mire el splash esperando a una
+    // librería de autenticación que no va a usar; la misma condición gobierna el splash del sistema
+    // en MainActivity, y las dos tienen que decir lo mismo o volvería el flash que se quiso evitar.
+    val loggedIn = isLoggedIn ?: if (hasLocalSource) false else {
+        // Sin fuente local sí hay que esperar: el destino depende de la respuesta. Pasado un rato
+        // (AuthViewModel.sessionRestoreSlow) se deja caer el splash y se dice qué está pasando, en
+        // vez de sostener una pantalla muda que se lee como app colgada. No hay botón de reintentar
+        // porque no hay nada que reintentar: la espera sigue viva por debajo y esto desaparece solo
+        // en cuanto MSAL responda.
+        val restoreSlow by authViewModel.sessionRestoreSlow.collectAsStateWithLifecycle()
+        if (restoreSlow) SessionRestoreSlowScreen()
+        return
+    }
 
     // Una biblioteca necesita al menos una fuente. OneDrive ya NO es obligatorio: un usuario
     // solo-local nunca ve la pantalla de cuenta de Microsoft.
@@ -198,7 +249,96 @@ fun MusicPlayerScreen(
         else Screen.Onboarding.route
     }
 
-    val appState = rememberMusicAppState(playerExpandedState = playerExpandedState)
+    // El estado "player abierto" lo POSEE el booleano izado a MainActivity y lo gobierna
+    // `MusicAppState` — no hay copia ni espejo. El TEMA lo lee por encima del NavHost
+    // (`MusicPlayerTheme(animateColors = ...)`, que congela la animación del esquema con el player
+    // abierto), así que tiene que enterarse EN EL MISMO frame en que la capa se expande: mientras se
+    // sincronizaba con un `LaunchedEffect` llegaba uno tarde, y en ese frame el seed de la canción
+    // nueva ya había cambiado con el fundido del esquema encendido — o sea una recomposición del
+    // árbol ENTERO sin skipping justo cuando arranca el container transform.
+    // Sonda (solo debug): cada recomposición de la raíz de la app.
+    SideEffect { com.qhana.siku.data.util.JankProbe.mark { "MusicPlayerScreen recompuesta" } }
+    val appState = rememberMusicAppState(
+        playerExpandedState = playerExpandedState,
+        pendingRowOriginState = pendingRowOriginState,
+        currentSong = playbackViewModel.currentSong
+    )
+    val playerExpanded = appState.playerExpanded
+
+    // --- La capa del reproductor: su estado, su Transition y el ORIGEN de su morph ---
+    //
+    // Se decide AQUÍ y no dentro de PlayerOverlay porque tiene dos consumidores que no comparten
+    // padre: la capa (que hace el AnimatedContent) y las FILAS de las listas del NavHost (que tienen
+    // que ocultarse cuando son el origen). Ambos leen el mismo valor, en el mismo frame.
+    //
+    // **La ruta se lee UNA vez, INCONDICIONALMENTE, y de esta variable** — nunca `appState.currentRoute`
+    // dentro del `when`. Ese getter es `@Composable` y por dentro es `currentBackStackEntryAsState()`,
+    // o sea un `produceState(initialValue = null)` que vive EN EL SITIO DE LLAMADA: dentro de una rama
+    // del `when` que el `playerExpanded -> Expanded` cortocircuita mientras el reproductor está abierto,
+    // esa llamada sale de la composición al abrir y VUELVE A NACER al cerrar — con su `null` inicial
+    // durante una composición, hasta que el flow del NavController emite en el frame siguiente. Un
+    // frame con ruta `null` = `isPillRoute(null) == false` = la capa pasa por **`Hidden`** entre
+    // `Expanded` y `Collapsed`. Consecuencia (medida con la sonda el 17 ago, y visible en video): el
+    // `AnimatedContent` recibe Expanded→Hidden y al frame siguiente Hidden→Collapsed; en esa segunda
+    // interrupción `Transition.updateTarget` fija `currentState = Hidden`, la rama del reproductor
+    // deja de ser visible para su transición y se DESCOMPONE EN EL ACTO, y la píldora entra con el
+    // spec de Hidden→Collapsed (`appFadeEnter`, un fundido de 500 ms sin morph). Era "el cierre a la
+    // píldora no ocurre": el reproductor desaparecía en un frame y la píldora se fundía sola. El
+    // cierre a una FILA disimulaba lo mismo porque el bounds de la fila corre en SU propia transición
+    // y seguía animando la superficie hacia la fila aunque la pareja hubiera muerto.
+    val currentEntry = appState.currentBackStackEntry
+    val currentRoute = currentEntry?.destination?.route
+    val playerLayer = when {
+        playerExpanded -> PlayerLayerState.Expanded
+        currentSong != null && isPillRoute(currentRoute) -> PlayerLayerState.Collapsed
+        else -> PlayerLayerState.Hidden
+    }
+    val playerLayerTransition = updateTransition(playerLayer, label = "playerLayer")
+    // Sonda: el ESTADO de la capa en cada composición (qué target pide `playerLayer`, dónde está la
+    // Transition). Es lo que hace falta cuando el síntoma es "la animación no ocurre" y no un frame lento.
+    SideEffect {
+        com.qhana.siku.data.util.JankProbe.note {
+            "capa: layer=$playerLayer current=${playerLayerTransition.currentState} " +
+                "target=${playerLayerTransition.targetState} running=${playerLayerTransition.isRunning} " +
+                "expanded=$playerExpanded song=${currentSong?.title?.take(12)} route=$currentRoute"
+        }
+    }
+    // Congelado mientras la transición corre — es la regla que evita filas varadas en el overlay
+    // (ver el KDoc de rememberPlayerMorphOrigin). Va DESPUÉS de updateTransition a propósito: en el
+    // frame que arranca una apertura o un cierre necesita ver ya el targetState nuevo.
+    val morphOrigin = rememberPlayerMorphOrigin(playerLayerTransition, appState, currentSong?.id)
+    // La paleta de lo que queda DEBAJO del reproductor (NavHost y píldora), retenida mientras la capa
+    // transiciona. Ver el KDoc de [rememberUnderlayColorScheme]: es lo que evita que el cambio de seed
+    // de la canción nueva recomponga la biblioteca ENTERA en el mismo frame en que arranca el morph.
+    val underlayScheme = rememberUnderlayColorScheme(
+        layerTransition = playerLayerTransition,
+        globalScheme = MaterialTheme.colorScheme,
+        preparingOrigin = appState.pendingRowOrigin != null
+    )
+
+    // Reabrir el player al VOLVER de un detalle al que se navegó estando el player abierto (ver
+    // `MusicAppState.navigateFromPlayer`). Se evalúa en cada cambio de destino: si la entrada actual
+    // es la que se anotó al salir, el player se expande de nuevo. (`currentEntry` se lee arriba, junto
+    // con la ruta de la capa: una sola suscripción al NavController para los dos.)
+    LaunchedEffect(currentEntry) {
+        appState.reopenPlayerIfReturningFrom(currentEntry)
+    }
+
+    // Keep Screen On, ACOTADO A CUANDO EL PLAYER ESTÁ ABIERTO.
+    //
+    // El flag se ponía desde aquí sin más condición que la preferencia, así que un ajuste que se
+    // ofrece DENTRO del NowPlaying (el sol del toolbar) mantenía la pantalla encendida en la
+    // biblioteca, en Ajustes o en el gestor de descargas — y, como se persiste, también en el
+    // siguiente arranque de la app, sin que nada en pantalla recordara que estaba puesto. La
+    // pantalla es el mayor consumo del teléfono con diferencia (un orden de magnitud sobre
+    // reproducir audio), así que el alcance del flag es una decisión de batería, no de detalle.
+    //
+    // NO se condiciona además a que esté sonando: el caso de uso es mirar el reproductor —la letra,
+    // la carátula— y ahí una pausa no significa que el usuario haya dejado de mirar.
+    val screenOnActive = keepScreenOn && playerExpanded
+    LaunchedEffect(screenOnActive) {
+        onKeepScreenOnChanged(screenOnActive)
+    }
 
     // Sincronización al conectar sesión (primer arranque de la composición o login posterior).
     //
@@ -304,7 +444,8 @@ fun MusicPlayerScreen(
     // usuario se queda donde está — desconectar la nube no lo expulsa de su biblioteca offline.
     LaunchedEffect(hasAnySource) {
         if (!hasAnySource && appState.navController.currentDestination?.route != Screen.Onboarding.route) {
-            appState.collapsePlayer()
+            // `popUpTo(0){inclusive}` limpia TODO el back stack —el player incluido si estaba
+            // abierto— así que no hace falta cerrarlo aparte.
             appState.navController.navigate(Screen.Onboarding.route) { popUpTo(0) { inclusive = true } }
         }
     }
@@ -323,15 +464,25 @@ fun MusicPlayerScreen(
     // BUFFERING cuenta además de PLAYING: es el estado en el que la barra tiene algo que contar
     // (el búfer llenándose) y era justo cuando el bucle estaba parado, así que el indicador se
     // habría quedado congelado exactamente en el caso para el que existe.
-    LaunchedEffect(playbackState, lifecycleOwner) {
-        if (playbackState == PlaybackState.PLAYING || playbackState == PlaybackState.BUFFERING) {
-            lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+    //
+    // El estado se COLECTA dentro del efecto, no se lee en composición: la RAÍZ de la app no tiene
+    // por qué recomponerse entera con cada BUFFERING/READY/PAUSED solo para (re)armar este bucle
+    // — medido con la sonda, eran dos recomposiciones de `MusicPlayerScreen` por apertura, en plena
+    // ventana del morph.
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            playbackViewModel.playbackState.collectLatest { state ->
+                if (state != PlaybackState.PLAYING && state != PlaybackState.BUFFERING) return@collectLatest
                 // Refresh INMEDIATO al (re)entrar en primer plano: sin él, el primer tick
                 // llegaba 1s tarde y el progreso quedaba congelado en el valor
                 // pre-background durante ese segundo.
                 playbackViewModel.updatePosition()
                 while (isActive) {
-                    kotlinx.coroutines.delay(1000L)
+                    // MISMO periodo que la interpolación del track del NowPlaying, y por eso sale
+                    // de su constante: la barra estira cada tick durante exactamente un tick, así
+                    // que si los dos números se separan el dibujo va por delante o por detrás del
+                    // dato (ver [POSITION_TICK_MS]).
+                    kotlinx.coroutines.delay(POSITION_TICK_MS.toLong())
                     playbackViewModel.updatePosition()
                 }
             }
@@ -339,60 +490,77 @@ fun MusicPlayerScreen(
     }
 
     // --- Composición de capas ---
-    // El snackbar solo debe reservar el alto del MiniPlayer cuando la píldora está REALMENTE en
-    // pantalla: su ruta lo permite Y hay canción (misma condición que [PlayerOverlay]). En
-    // onboarding, ajustes o cualquier pantalla sin mini player, el inset fijo dejaba el snackbar
-    // flotando alto sobre una barra que no existe. Sin píldora, basta el margen normal sobre la navbar.
-    val miniPlayerShown = currentSong != null && when (appState.currentRoute) {
-        Screen.Library.route, Screen.PlaylistDetail.route, Screen.Favorites.route,
-        Screen.ArtistDetail.route, Screen.AlbumDetail.route, Screen.GenreDetail.route -> true
-        else -> false
-    }
+    // El snackbar solo reserva el alto del MiniPlayer cuando la píldora está REALMENTE en pantalla
+    // (el estado Collapsed de la capa; en onboarding, ajustes, o con el player abierto, el inset fijo
+    // dejaría el snackbar flotando sobre una barra que no existe).
+    val miniPlayerShown = playerLayer == PlayerLayerState.Collapsed
 
     // El hostState viaja por CompositionLocal para que los diálogos full-screen (ventana propia,
     // que tapa el host de abajo) puedan montar su propio SnackbarHost sobre el mismo estado.
     CompositionLocalProvider(LocalSnackbarHostState provides snackbarHostState) {
         SharedTransitionLayout {
             // Las filas de lista están a ocho pantallas de aquí y necesitan DOS cosas para poder
-            // ser el origen de la carátula del reproductor: el scope compartido y saber si les
-            // toca serlo AHORA. Van por CompositionLocal en vez de por parámetro porque atravesar
-            // todas las firmas intermedias por un detalle de la carátula no compensa.
+            // ser el origen del morph del reproductor: el scope compartido y saber si les toca
+            // serlo AHORA. Van por CompositionLocal en vez de por parámetro porque atravesar todas
+            // las firmas intermedias por un detalle de la animación no compensa.
             //
-            // Hay fila origen solo mientras el reproductor está ABIERTO y se abrió DESDE una fila;
-            // en cualquier otro caso es null y las filas se comportan como siempre (si no,
-            // ocultarían su carátula sin que nadie la recoja).
+            // La fila que participa en el morph AHORA, en tres momentos y solo en ellos (ver
+            // [ContainerOriginRole]): la que se está PREPARANDO (visible, un frame, antes de que el
+            // player exista); la del morph en vigor mientras el player está abierto o abriéndose
+            // (oculta); y la que recibe el CIERRE mientras la capa se contrae (visible). En cualquier
+            // otro caso es null y las filas no declaran nada. Sale del origen CONGELADO
+            // (`morphOrigin`), el mismo que usa la capa para sus keys: las dos puntas del morph se
+            // deciden en un solo sitio y no pueden discrepar ni un frame. `hidden = playerExpanded`
+            // porque ese booleano cambia en el frame que arranca cada sentido: true desde el primer
+            // frame de la apertura, false desde el primero del cierre.
             //
-            // Va en un `State` (ver [LocalArtOriginSongId]) y no como valor suelto: así las filas
-            // lo leen dentro de un `derivedStateOf` y solo recompone la que cambia de veredicto, en
-            // vez de las diez visibles a la vez justo en el frame que arranca la transición.
-            val artOriginSongId = rememberUpdatedState(
-                if (appState.playerExpanded && appState.playerArtOrigin == PlayerArtOrigin.ROW) {
-                    currentSong?.id
-                } else null
+            // Va en un `State` (ver [RowOriginHost]) y no como valor suelto: así las filas lo leen
+            // dentro de un `derivedStateOf` y solo recompone la que cambia de papel, en vez de las
+            // diez visibles a la vez justo en el frame que arranca la transición.
+            val layerInFlight = playerLayerTransition.isRunning ||
+                playerLayerTransition.currentState != playerLayerTransition.targetState
+            val rowOrigin = rememberUpdatedState(
+                appState.pendingRowOrigin?.let { RowOrigin(it, hidden = false) }
+                    ?: morphOrigin.songId
+                        ?.takeIf { morphOrigin.kind == PlayerArtOrigin.ROW && (playerExpanded || layerInFlight) }
+                        ?.let { RowOrigin(it, hidden = playerExpanded) }
             )
             ProvideAppSharedTransitionScope(
                 scope = this@SharedTransitionLayout,
-                artOriginSongId = artOriginSongId
+                rowOrigin = rememberRowOriginHost(rowOrigin, appState)
             ) {
             // Box: permite montar el PlayerOverlay como capa flotante SOBRE el NavHost.
             Box(modifier = Modifier.fillMaxSize()) {
-                AppNavHost(
-                    appState = appState,
-                    startDestination = startDestination,
-                    loggedIn = loggedIn,
-                    authLoading = authLoading,
-                    authError = authError,
-                    onConnectOneDrive = { activity -> authViewModel.signIn(activity) },
-                    onDisconnectOneDrive = { authViewModel.logout() },
-                    onRequestSync = { syncViewModel.refreshSongs(force = false) },
-                    playbackViewModel = playbackViewModel,
-                    libraryViewModel = libraryViewModel,
-                    sourcesViewModel = sourcesViewModel,
-                    sharedTransitionScope = this@SharedTransitionLayout
-                )
+                // El NavHost va bajo la paleta RETENIDA (ver `underlayScheme`): mientras el
+                // reproductor crece o se contrae, la biblioteca conserva la paleta anterior y se
+                // repinta con la nueva cuando la capa asienta — con el player tapándola y sin nada
+                // en movimiento. `MaterialTheme` con la MISMA instancia de esquema no invalida su
+                // subárbol (`Values.equals`), así que esto no cuesta nada mientras no cambia.
+                MaterialTheme(colorScheme = underlayScheme) {
+                    AppNavHost(
+                        appState = appState,
+                        startDestination = startDestination,
+                        loggedIn = loggedIn,
+                        accountPhotoPath = accountPhotoPath,
+                        accountInitial = accountInitial,
+                        authLoading = authLoading,
+                        authError = authError,
+                        onConnectOneDrive = { activity -> authViewModel.signIn(activity) },
+                        onDisconnectOneDrive = { authViewModel.logout() },
+                        onRequestSync = { syncViewModel.refreshSongs(force = false) },
+                        playbackViewModel = playbackViewModel,
+                        libraryViewModel = libraryViewModel,
+                        sourcesViewModel = sourcesViewModel,
+                        snackbarManager = snackbarManager,
+                        sharedTransitionScope = this@SharedTransitionLayout
+                    )
+                }
 
                 PlayerOverlay(
                     appState = appState,
+                    layerTransition = playerLayerTransition,
+                    morphOrigin = morphOrigin,
+                    underlayScheme = underlayScheme,
                     playbackViewModel = playbackViewModel,
                     libraryViewModel = libraryViewModel,
                     snackbarManager = snackbarManager,
@@ -413,6 +581,47 @@ fun MusicPlayerScreen(
                 )
             }
             } // ProvideAppSharedTransitionScope
+        }
+    }
+}
+
+/**
+ * Pantalla de espera cuando restaurar la sesión se alarga (ver `AuthViewModel.sessionRestoreSlow`).
+ *
+ * Sustituye a lo que hacía el timeout viejo: dar la sesión por inexistente y soltar al usuario en el
+ * onboarding con su cuenta intacta en disco. Aquí no se decide nada — se sigue esperando y solo se
+ * cuenta lo que ocurre, así que cuando MSAL responda la app continúa al destino correcto por sí
+ * sola. De ahí que no haya botón: no hay ninguna acción que ofrecer que mejore la situación.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun SessionRestoreSlowScreen() {
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 32.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            LoadingIndicator()
+            Spacer(modifier = Modifier.height(24.dp))
+            Text(
+                text = stringResource(R.string.session_restore_slow_title),
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onBackground,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = stringResource(R.string.session_restore_slow_body),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
         }
     }
 }

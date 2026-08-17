@@ -47,6 +47,7 @@ import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import androidx.compose.foundation.basicMarquee
 import com.qhana.siku.ui.components.MaterialSymbol
@@ -93,7 +94,12 @@ class AmbientPlayerActivity : ComponentActivity() {
     }
 
     private fun startTimeout(minutes: Int) {
-        countDownTimer = object : CountDownTimer(minutes * 60 * 1000L, 1000) {
+        // El intervalo de tick ES la duración total: `onTick` está vacío —aquí solo interesa el
+        // final— y con el segundo literal que había antes el timer despertaba la CPU una vez por
+        // segundo durante todo el modo ambiente para no hacer nada. De paso desaparece el
+        // `* 60 * 1000` a mano: la conversión la nombra `TimeUnit`.
+        val totalMs = TimeUnit.MINUTES.toMillis(minutes.toLong())
+        countDownTimer = object : CountDownTimer(totalMs, totalMs) {
             override fun onTick(millisUntilFinished: Long) {}
             override fun onFinish() { finish() }
         }.start()
@@ -156,7 +162,14 @@ fun AmbientPlayerScreen(
             }
         }
     }
-    LaunchedEffect(isPlaying) { while (isPlaying) { musicController.updatePosition(); delay(1000) } }
+    // Mismo reloj que el bucle de posición de `MusicPlayerScreen` (ver [POSITION_TICK_MS]): esta
+    // pantalla es otra vista del MISMO estado, así que su cadencia no es una decisión aparte.
+    LaunchedEffect(isPlaying) {
+        while (isPlaying) {
+            musicController.updatePosition()
+            delay(POSITION_TICK_MS.toLong())
+        }
+    }
 }
 
 @Composable

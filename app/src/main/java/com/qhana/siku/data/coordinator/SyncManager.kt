@@ -50,6 +50,7 @@ class SyncManager @Inject constructor(
     private val lightMetadataFetcher: LightMetadataFetcher,
     private val trackInfoBackfiller: TrackInfoBackfiller,
     private val artworkHealingManager: ArtworkHealingManager,
+    private val localLibraryChangeMonitor: LocalLibraryChangeMonitor,
     private val snackbarManager: com.qhana.siku.data.util.SnackbarManager,
     private val downloadScheduler: com.qhana.siku.worker.DownloadScheduler
 ) {
@@ -64,7 +65,7 @@ class SyncManager @Inject constructor(
         // MB/s en líneas rápidas; el log de throughput al final de processQueue permite
         // validarlo. Si aparecen 429 del lado de OneDrive, volver a 16-24.
         // MAX es el TECHO: el nº real de workers se calcula por corrida en
-        // computeParallelism() según el ancho de banda del enlace WiFi.
+        // initialParallelism() según el enlace, y se reajusta en caliente durante la corrida.
         //
         // NO es private: el ConnectionPool del cliente "download" (AppModule) se dimensiona
         // con este mismo valor — si el pool ocioso fuera menor que el nº de workers, las
@@ -73,10 +74,41 @@ class SyncManager @Inject constructor(
         internal const val MAX_PARALLEL_WIFI = 32
         private const val MIN_PARALLEL_WIFI = 4
 
-        // Throughput observado POR CONEXIÓN contra OneDrive (~0.4-0.9 MB/s). Se usa como
-        // divisor para dimensionar workers: más conexiones que enlace/valor-por-conexión
-        // solo añaden contención local (timeouts del watchdog en WiFi débil).
-        private const val ONEDRIVE_PER_CONNECTION_MBPS = 0.5
+        // NO hay constante de "throughput por conexión de OneDrive". La hubo (0.5 MB/s) y era una
+        // medición hecha en UN teléfono, UNA cuenta y UNA conexión, de la que salía el reparto de
+        // conexiones de todo el mundo. Ahora ese número lo mide el aparato del usuario mientras
+        // descarga (ver [adjustParallelism]): se arranca por el MÍNIMO y se sube en cuanto se
+        // comprueba que sobra enlace.
+        //
+        // Cadencia con la que se remide y se redimensiona la corrida. La ventana no necesita que
+        // ninguna descarga TERMINE —mide caudal, no piezas—, así que basta con que sea holgada
+        // frente al arranque de una conexión (handshake TLS y primeros bloques, del orden de
+        // décimas de segundo) y corta frente a lo que dura un sync. Diez segundos deja el
+        // paralelismo ajustado en el primer medio minuto y sin remedir a cada frame.
+        private const val RESIZE_WINDOW_MS = 10_000L
+
+        // Peso de la corrida nueva al promediarla con lo aprendido: a partes iguales. NO es una
+        // medición de nada —es la mezcla más simple que existe— y lo que consigue es que ninguna
+        // corrida mande por sí sola: se llega a un valor nuevo en dos o tres syncs, que es el orden
+        // en el que cambia una red de verdad.
+        private const val THROUGHPUT_SMOOTHING = 0.5f
+
+        // Fracción del enlace a partir de la cual se da por saturado y la corrida deja de servir
+        // como medición del cap por conexión (ver [launchParallelismSupervisor]). No hay una frontera nítida
+        // que descubrir: `downlinkKbps()` es la CAPACIDAD que estima el sistema, no una medida, y
+        // suele venir redondeada al alza, así que exigir holgura evita concluir "OneDrive me está
+        // capando" a partir del ruido de esa estimación. Se elige por el lado que no aprende: si se
+        // sube demasiado, entran muestras saturadas y el ajuste se autoconfirma; si se baja, solo se
+        // desaprovechan corridas y manda la semilla, que es el comportamiento de siempre.
+        private const val SATURATED_LINK_FRACTION = 0.8
+
+        // El enlace lo reporta el sistema en kbps y todo lo demás de este archivo va en MB/s.
+        private const val KBPS_PER_MBPS = 8_000.0
+
+        // Conversiones de las cuentas de caudal, para que no queden factores sueltos en medio de
+        // una división.
+        private const val MILLIS_PER_SECOND = 1_000.0
+        private const val BYTES_PER_MB = 1024.0 * 1024.0
 
         // Workers de la fase finalize (análisis de audio + tags + BD). Es trabajo CPU/IO
         // local: si corriera dentro del worker de descarga, cada análisis dejaría una
@@ -143,6 +175,14 @@ class SyncManager @Inject constructor(
     private val downloadsDirty = AtomicBoolean(false)
     private var publisherJob: Job? = null
     private val publisherLock = Any()
+
+    /**
+     * Veces que la cola se ha quedado esperando a que vuelva la red o el WiFi. Igual que
+     * `RequestCoordinator.throttleEvents`, solo sirve para descartar mediciones de throughput: son
+     * segundos de reloj sin bajar un byte, y meterlos en la cuenta haría parecer lenta una conexión
+     * que estuvo ausente, no lenta.
+     */
+    private val networkWaits = AtomicInteger(0)
 
     // Lista de fallidas respaldada por BD (v18): sobrevive a la muerte del proceso, a
     // diferencia del viejo MutableStateFlow en memoria que se vaciaba con cada restart.
@@ -297,6 +337,14 @@ class SyncManager @Inject constructor(
     suspend fun refreshLocalSources(): Int {
         val localSources = sourceRegistry.activeSources().filter { !it.type.isCloud }
         if (localSources.isEmpty()) return 0
+        // ¿Cambió algo desde el último listado? El disparador de este método es "el usuario volvió
+        // a la app", que ocurre muchísimas veces por sesión y casi nunca coincide con haber
+        // copiado música. Sin esta pregunta, cada alt-tab pagaba el walk entero (ver
+        // [LocalLibraryChangeMonitor], que también explica por qué no basta con la señal).
+        if (!localLibraryChangeMonitor.shouldRefresh()) {
+            Log.d(TAG, "Refresco local omitido: sin cambios en el almacenamiento")
+            return 0
+        }
         if (!syncMutex.tryLock()) {
             Log.d(TAG, "Refresco local omitido: ya hay un sync en marcha")
             return 0
@@ -341,6 +389,9 @@ class SyncManager @Inject constructor(
             // nube no se pueden resolver aquí y solo se cargarían para nada en cada vuelta a la
             // app. Va después del discover, que es lo que exige la migración de ids locales.
             artworkHealingManager.resolvePendingArtwork(localOnly = true)
+            // Se consume la señal SOLO aquí, con el listado ya hecho: si esto se hubiera saltado
+            // por el mutex o cancelado a medias, la marca sigue puesta para el siguiente intento.
+            localLibraryChangeMonitor.markRefreshed()
             added
         } finally {
             localRefreshJob.set(null)
@@ -567,6 +618,12 @@ class SyncManager @Inject constructor(
                 }
             }
             isScanning.set(false)
+            // Un sync completo hace un superconjunto del refresco local, así que cuenta como
+            // listado a todos los efectos. Sin esto, el primer regreso a la app después de un
+            // scan volvía a listar el almacenamiento entero por tener la cuenta del intervalo
+            // parada en el arranque del proceso — la misma duplicación que ya obligó a inventar
+            // `skipStartupLocalRefresh` en la UI, colándose por la otra puerta.
+            localLibraryChangeMonitor.markRefreshed()
         }
 
         val reason = queueStopReason.get()
@@ -814,7 +871,13 @@ class SyncManager @Inject constructor(
     private suspend fun runDownloadsPublisher() {
         try {
             while (activeDownloadsMap.isNotEmpty() || downloadsDirty.get()) {
-                if (downloadsDirty.getAndSet(false)) {
+                // Sin nadie suscrito no se construye el snapshot: el único consumidor de esta lista
+                // es UI (el panel de descargas y el progreso de las filas), y durante un sync
+                // masivo con la app cerrada esto era un `toList()` de hasta 32 elementos tres veces
+                // por segundo durante toda la corrida, para un valor que nadie iba a leer. La marca
+                // NO se consume en ese caso, así que al volver la UI ve el estado real en la
+                // siguiente vuelta en lugar de esperar al próximo cambio.
+                if (_activeDownloads.subscriptionCount.value > 0 && downloadsDirty.getAndSet(false)) {
                     _activeDownloads.value = activeDownloadsMap.values.toList()
                 }
                 delay(ACTIVE_DOWNLOADS_PUBLISH_MS)
@@ -869,7 +932,7 @@ class SyncManager @Inject constructor(
         // Fast-fail de auth con mensaje claro (la resolución de URL vive ahora en la fuente).
         when (val tokenResult = authManager.getAccessToken().firstOrNull()) {
             is AuthResult.Success -> { /* ok */ }
-            is AuthResult.Error -> return MusicDownloader.Result.Error("Auth error: ${tokenResult.message}")
+            is AuthResult.Error -> return MusicDownloader.Result.Error("Auth error: ${tokenResult.reason}")
             else -> return MusicDownloader.Result.Error("Authentication failed")
         }
 
@@ -941,7 +1004,9 @@ class SyncManager @Inject constructor(
 
     /**
      * Pipeline real productor-consumidor: el productor mete canciones en un Channel a
-     * medida que hay espacio, y N workers las consumen en paralelo. A diferencia del
+     * medida que hay espacio, y un número VARIABLE de workers las consume en paralelo — arranca
+     * prudente y se redimensiona en caliente según lo que dé la red (ver [initialParallelism] y
+     * [launchParallelismSupervisor]). A diferencia del
      * batch-scope anterior, un worker libre arranca la siguiente canción al instante
      * sin esperar a que otros 4 hermanos del mismo lote terminen. Eso elimina las
      * burbujas de throughput cuando alguna descarga es más lenta que el resto.
@@ -971,7 +1036,7 @@ class SyncManager @Inject constructor(
         // enlace que no da para alimentarlas (descargas lentas → stalls del watchdog de 60s
         // → reintentos que empeoran la congestión). Se dimensiona una vez por corrida; si
         // la calidad cambia a mitad de cola, la corrida siguiente lo recoge.
-        val parallelism = computeParallelism()
+        val parallelism = initialParallelism()
 
         // Emitimos Downloading(0, total) ANTES de arrancar los workers. Si no, el estado se
         // queda en Scanning hasta que la PRIMERA descarga complete (~50s con FLAC grandes en
@@ -986,17 +1051,18 @@ class SyncManager @Inject constructor(
         val startedAt = System.currentTimeMillis()
         val attempted = java.util.Collections.synchronizedSet(LinkedHashSet<String>(256))
 
-        // Buffer del channel = parallelism*2: cuando un worker termina, ya hay
-        // trabajo en el buffer para él sin esperar al productor (que puede estar
-        // consultando la BD).
-        val workChannel = Channel<Song>(capacity = parallelism * 2)
+        // Buffer del channel dimensionado con el MÁXIMO y no con el paralelismo inicial: las
+        // conexiones se ajustan en caliente (ver launchParallelismSupervisor), así que el buffer
+        // tiene que dar de comer también al techo. Sigue siendo el doble de conexiones, para que un
+        // worker que termina encuentre trabajo sin esperar al productor.
+        val workChannel = Channel<Song>(capacity = MAX_PARALLEL_WIFI * 2)
 
         // Pipeline de finalize desacoplado: el análisis post-descarga (metadata, ReplayGain,
         // carátula, BD) es trabajo local que toma segundos por canción. Dentro del worker de
         // descarga dejaba la conexión OneDrive ociosa ese tiempo — con N workers, varios
         // MB/s perdidos. Los bytes ya están en disco: aunque la cola se detenga por
         // batería/red, finalizar lo ya descargado es gratis y evita re-descargas.
-        val finalizeChannel = Channel<Pair<Song, java.io.File>>(capacity = parallelism * 2)
+        val finalizeChannel = Channel<Pair<Song, java.io.File>>(capacity = MAX_PARALLEL_WIFI * 2)
         val finalizers = List(FINALIZE_PARALLELISM) {
             launch {
                 for ((song, file) in finalizeChannel) {
@@ -1015,81 +1081,112 @@ class SyncManager @Inject constructor(
             }
         }
 
-        val workers = List(parallelism) {
-            launch {
-                for (song in workChannel) {
-                    // Drenaje: si la cola se detuvo (logout, batería, red), seguimos
-                    // consumiendo sin descargar para no dejar al productor bloqueado en
-                    // send(). Las canciones drenadas siguen "needing work" en BD y las
-                    // retoma el próximo sync.
-                    if (stopSignal.value || queueStopReason.get() != null) continue
+        // Paralelismo VIVO: el supervisor sube el objetivo lanzando workers nuevos y lo baja
+        // dejando que se retiren al terminar su canción — nunca cancelándolos, que tiraría una
+        // descarga a medias. `workerJobs` crece durante la corrida, así que el join del final se
+        // hace sobre una foto y se repite hasta que no aparezcan más (ver más abajo).
+        val parallelismState = ParallelismState(parallelism)
+        val workerJobs = java.util.Collections.synchronizedList(mutableListOf<Job>())
 
-                    // Pausa/stop del usuario: drenar los temas YA en el buffer del canal sin
-                    // descargarlos (siguen "needing work"; se retoman al reanudar). Sin este
-                    // check, la pausa solo frenaba al productor y los ~parallelism*2 temas ya
-                    // bufferizados seguían bajando ("le puse pausa y sigue descargando").
-                    if (!musicPreferences.loadDownloadControlState().allowsMassDownload) continue
+        fun spawnWorker() {
+            val job = launch {
+                var retired = false
+                try {
+                    for (song in workChannel) {
+                        // Drenaje: si la cola se detuvo (logout, batería, red), seguimos
+                        // consumiendo sin descargar para no dejar al productor bloqueado en
+                        // send(). Las canciones drenadas siguen "needing work" en BD y las
+                        // retoma el próximo sync.
+                        if (stopSignal.value || queueStopReason.get() != null) continue
 
-                    // Mismo razonamiento para la red medida, y por el mismo motivo: el gate de
-                    // WiFi vivía SOLO en el productor, así que al salir de casa las canciones ya
-                    // bufferizadas (hasta parallelism*2) se seguían bajando con datos móviles
-                    // durante todo el plazo de gracia. Aquí no hay prioritarias que respetar:
-                    // esas nunca pasan por el canal (ver handlePrioritySong).
-                    if (!networkManager.isWifi()) continue
+                        // Pausa/stop del usuario: drenar los temas YA en el buffer del canal sin
+                        // descargarlos (siguen "needing work"; se retoman al reanudar). Sin este
+                        // check, la pausa solo frenaba al productor y los ~parallelism*2 temas ya
+                        // bufferizados seguían bajando ("le puse pausa y sigue descargando").
+                        if (!musicPreferences.loadDownloadControlState().allowsMassDownload) continue
 
-                    // Otra vía ya la está bajando (el usuario pulsó "descargar" sobre una canción
-                    // que el masivo tenía encolada): se salta. Sigue "needing work" en BD si esa
-                    // descarga fallara, así que no se pierde — lo que no puede pasar es que las
-                    // dos escriban el mismo archivo temporal.
-                    if (!downloadsInFlight.add(song.id)) continue
+                        // Mismo razonamiento para la red medida, y por el mismo motivo: el gate de
+                        // WiFi vivía SOLO en el productor, así que al salir de casa las canciones ya
+                        // bufferizadas (hasta parallelism*2) se seguían bajando con datos móviles
+                        // durante todo el plazo de gracia. Aquí no hay prioritarias que respetar:
+                        // esas nunca pasan por el canal (ver handlePrioritySong).
+                        if (!networkManager.isWifi()) continue
 
-                    val onProgress: (Float) -> Unit = {
-                        activeDownloadsMap[song.id] = ActiveDownload(song, it)
-                        markDownloadsDirty()
-                    }
-                    activeDownloadsMap[song.id] = ActiveDownload(song, 0f)
-                    markDownloadsDirty()
+                        // Otra vía ya la está bajando (el usuario pulsó "descargar" sobre una canción
+                        // que el masivo tenía encolada): se salta. Sigue "needing work" en BD si esa
+                        // descarga fallara, así que no se pierde — lo que no puede pasar es que las
+                        // dos escriban el mismo archivo temporal.
+                        if (!downloadsInFlight.add(song.id)) continue
 
-                    // El remove va en finally: si el worker se cancela (logout/pull-to-refresh)
-                    // durante la descarga, hay que sacar la canción del mapa igual, o el
-                    // publicador lo vería no-vacío para siempre y no publicaría el estado final.
-                    val stage = try {
-                        downloadWithTransientRetry(song, onProgress)
-                    } finally {
-                        downloadsInFlight.remove(song.id)
-                        activeDownloadsMap.remove(song.id)
-                        markDownloadsDirty()
-                    }
-
-                    when (stage) {
-                        is MusicDownloader.DownloadStage.Success -> {
-                            bytesDownloaded.addAndGet(stage.targetFile.length())
-                            finalizeChannel.send(song to stage.targetFile)
+                        val onProgress: (Float) -> Unit = {
+                            activeDownloadsMap[song.id] = ActiveDownload(song, it)
+                            markDownloadsDirty()
                         }
-                        is MusicDownloader.DownloadStage.Error -> {
-                            // Un fallo causado por que la RED SE CAYÓ a mitad del sync no es de la
-                            // canción: registrarlo le pone `nextRetryAt` y el sync que WorkManager
-                            // reanuda en cuanto vuelve la red se salta justo a las que el corte
-                            // interrumpió. Se drenan sin penalizar, como ya hace el corte por red
-                            // medida (que sale por `Cancelled`); siguen "needing work" en BD.
-                            if (queueStopReason.get() == IncompleteReason.NETWORK_LOST) {
-                                Log.d(TAG, "Descarga de ${song.title} abortada por corte de red: sin backoff")
-                            } else {
-                                recordDownloadFailure(song, stage.message, stage.kind == MusicDownloader.ErrorKind.TRANSIENT)
-                                failedCount.incrementAndGet()
-                                updateProgress(current.incrementAndGet(), total, failedCount.get())
+                        activeDownloadsMap[song.id] = ActiveDownload(song, 0f)
+                        markDownloadsDirty()
+
+                        // El remove va en finally: si el worker se cancela (logout/pull-to-refresh)
+                        // durante la descarga, hay que sacar la canción del mapa igual, o el
+                        // publicador lo vería no-vacío para siempre y no publicaría el estado final.
+                        val stage = try {
+                            downloadWithTransientRetry(song, onProgress)
+                        } finally {
+                            downloadsInFlight.remove(song.id)
+                            activeDownloadsMap.remove(song.id)
+                            markDownloadsDirty()
+                        }
+
+                        when (stage) {
+                            is MusicDownloader.DownloadStage.Success -> {
+                                bytesDownloaded.addAndGet(stage.targetFile.length())
+                                finalizeChannel.send(song to stage.targetFile)
                             }
+                            is MusicDownloader.DownloadStage.Error -> {
+                                // Un fallo causado por que la RED SE CAYÓ a mitad del sync no es de la
+                                // canción: registrarlo le pone `nextRetryAt` y el sync que WorkManager
+                                // reanuda en cuanto vuelve la red se salta justo a las que el corte
+                                // interrumpió. Se drenan sin penalizar, como ya hace el corte por red
+                                // medida (que sale por `Cancelled`); siguen "needing work" en BD.
+                                if (queueStopReason.get() == IncompleteReason.NETWORK_LOST) {
+                                    Log.d(TAG, "Descarga de ${song.title} abortada por corte de red: sin backoff")
+                                } else {
+                                    recordDownloadFailure(song, stage.message, stage.kind == MusicDownloader.ErrorKind.TRANSIENT)
+                                    failedCount.incrementAndGet()
+                                    updateProgress(current.incrementAndGet(), total, failedCount.get())
+                                }
+                            }
+                            MusicDownloader.DownloadStage.Cancelled -> { /* drenada, no cuenta */ }
+                            // Batería baja: detener la cola con motivo explícito (NO stopSignal:
+                            // eso es para logout). ScanWorker devuelve retry() y WorkManager
+                            // reanuda cuando la constraint de batería lo permita.
+                            MusicDownloader.DownloadStage.SkippedLowBattery ->
+                                queueStopReason.compareAndSet(null, IncompleteReason.LOW_BATTERY)
                         }
-                        MusicDownloader.DownloadStage.Cancelled -> { /* drenada, no cuenta */ }
-                        // Batería baja: detener la cola con motivo explícito (NO stopSignal:
-                        // eso es para logout). ScanWorker devuelve retry() y WorkManager
-                        // reanuda cuando la constraint de batería lo permita.
-                        MusicDownloader.DownloadStage.SkippedLowBattery ->
-                            queueStopReason.compareAndSet(null, IncompleteReason.LOW_BATTERY)
+
+                        // Sobran conexiones porque el supervisor bajó el objetivo: este worker se
+                        // retira AQUÍ, con su canción ya terminada. Cancelarlo a mitad tiraría una
+                        // descarga entera, y salir antes de procesar perdería la que ya sacó del
+                        // canal.
+                        if (parallelismState.claimRetirement()) {
+                            retired = true
+                            break
+                        }
                     }
+                } finally {
+                    // Quien se retiró ya se descontó al reclamar el hueco; el resto llega aquí al
+                    // cerrarse el canal (fin normal) o por cancelación.
+                    if (!retired) parallelismState.active.decrementAndGet()
                 }
             }
+            workerJobs.add(job)
         }
+
+        repeat(parallelism) {
+            parallelismState.active.incrementAndGet()
+            spawnWorker()
+        }
+        val parallelismSupervisor =
+            launchParallelismSupervisor(parallelismState, bytesDownloaded, ::spawnWorker)
 
         // Productor
         producerActive.set(true)
@@ -1201,37 +1298,209 @@ class SyncManager @Inject constructor(
             workChannel.close()
         }
 
-        workers.joinAll()
+        // El supervisor se para ANTES de esperar a los workers: si siguiera vivo podría lanzar uno
+        // nuevo justo mientras se hace el join y la espera no lo cubriría.
+        parallelismSupervisor.cancelAndJoin()
+        // Join sobre una FOTO de la lista, repetido hasta que no aparezcan jobs nuevos: `spawnWorker`
+        // añade durante la corrida, así que un `joinAll` único sobre la lista viva podría perderse
+        // al último refuerzo. Con el supervisor ya parado esto converge en una o dos vueltas.
+        while (true) {
+            val snapshot = workerJobs.toList()
+            snapshot.joinAll()
+            if (workerJobs.size == snapshot.size) break
+        }
         finalizeChannel.close()
         finalizers.joinAll()
 
-        // Métrica para tunear MAX_PARALLEL_WIFI: buscar "Throughput" en logcat tras un
-        // sync masivo. Si no escala respecto a 16 conexiones, OneDrive está capando la
-        // cuenta o aparecieron 429.
-        val elapsedSec = (System.currentTimeMillis() - startedAt) / 1000.0
-        val mb = bytesDownloaded.get() / (1024.0 * 1024.0)
+        val elapsedSec = (System.currentTimeMillis() - startedAt) / MILLIS_PER_SECOND
+        val mb = bytesDownloaded.get() / BYTES_PER_MB
         if (mb > 0 && elapsedSec > 0) {
-            Log.i(TAG, "Throughput: %.1f MB en %.0fs -> %.2f MB/s (%d conexiones)"
-                .format(mb, elapsedSec, mb / elapsedSec, parallelism))
+            Log.i(TAG, "Throughput: %.1f MB en %.0fs -> %.2f MB/s (%d conexiones al final)"
+                .format(mb, elapsedSec, mb / elapsedSec, parallelismState.active.get()))
         }
+        persistLearnedThroughput(parallelismState)
 
         Pair(downloadedCount.get(), failedCount.get())
     }
 
     /**
-     * Dimensiona los workers de descarga según el enlace: conexiones = ancho de banda del
-     * enlace / throughput por-conexión de OneDrive, acotado a [MIN_PARALLEL_WIFI,
-     * MAX_PARALLEL_WIFI]. Si el sistema no reporta ancho de banda (0), se asume línea
-     * rápida y se usa el techo (comportamiento histórico).
+     * Con cuántas conexiones ARRANCA la corrida. A partir de ahí manda [adjustParallelism], que
+     * remide cada [RESIZE_WINDOW_MS] y sube o baja en caliente.
+     *
+     * Tres casos, y ninguno usa un número traído de fuera:
+     * - **Ya se aprendió** el throughput por conexión en corridas anteriores: se dimensiona con él
+     *   y con el enlace de AHORA, así que cambiar de 2,4 a 5 GHz se nota en el acto y no hay que
+     *   volver a descubrir nada.
+     * - **Todavía no**: se arranca por el MÍNIMO. Es deliberadamente prudente — cuatro conexiones
+     *   no congestionan ningún enlace, y si sobra ancho de banda la primera ventana lo detecta y
+     *   sube en diez segundos. Al revés no funcionaría: empezar alto en un WiFi débil provoca la
+     *   contención que este cálculo existe para evitar, y encima la medición saldría contaminada.
+     * - **El sistema no reporta enlace** (0): sin esa referencia no hay forma de saber si sobra o
+     *   falta, así que el ajuste automático no puede operar y se conserva el comportamiento
+     *   histórico de asumir línea rápida.
      */
-    private fun computeParallelism(): Int {
+    private fun initialParallelism(): Int {
         val kbps = networkManager.downlinkKbps()
-        if (kbps <= 0) return MAX_PARALLEL_WIFI
-        val linkMBps = kbps / 8_000.0
-        val computed = kotlin.math.ceil(linkMBps / ONEDRIVE_PER_CONNECTION_MBPS).toInt()
-            .coerceIn(MIN_PARALLEL_WIFI, MAX_PARALLEL_WIFI)
-        Log.i(TAG, "Paralelismo adaptativo: enlace %.1f MB/s -> %d conexiones".format(linkMBps, computed))
+        if (kbps <= 0) {
+            Log.i(TAG, "Paralelismo: sin dato de enlace -> $MAX_PARALLEL_WIFI conexiones (sin ajuste)")
+            return MAX_PARALLEL_WIFI
+        }
+        val linkMBps = kbps / KBPS_PER_MBPS
+        val learned = musicPreferences.loadOneDriveThroughputMBps().toDouble()
+        val computed = if (learned > 0.0) {
+            kotlin.math.ceil(linkMBps / learned).toInt().coerceIn(MIN_PARALLEL_WIFI, MAX_PARALLEL_WIFI)
+        } else {
+            MIN_PARALLEL_WIFI
+        }
+        Log.i(
+            TAG,
+            "Paralelismo inicial: enlace %.1f MB/s, %s -> %d conexiones"
+                .format(linkMBps, if (learned > 0.0) "%.2f MB/s aprendidos".format(learned) else "sin medición previa", computed)
+        )
         return computed
+    }
+
+    /**
+     * Estado del ajuste de paralelismo de UNA corrida. Vive en un objeto y no en variables sueltas
+     * porque lo comparten el supervisor (que mide y decide) y los workers (que se retiran solos).
+     *
+     * @property target conexiones que se quieren ahora mismo.
+     * @property active conexiones vivas; se reserva ANTES de lanzar la corrutina, o dos vueltas
+     *   seguidas del supervisor lanzarían el mismo refuerzo dos veces.
+     * @property learnedPerConnMBps último throughput por conexión que se pudo medir de verdad, o 0.
+     */
+    private class ParallelismState(initial: Int) {
+        val target = AtomicInteger(initial)
+        val active = AtomicInteger(0)
+        @Volatile var learnedPerConnMBps = 0.0
+
+        /**
+         * ¿Le toca a ESTE worker retirarse? Solo cuando sobran, y solo uno por hueco: el CAS es lo
+         * que impide que todos los workers lean el mismo exceso y se vayan todos a la vez.
+         */
+        fun claimRetirement(): Boolean {
+            while (true) {
+                val current = active.get()
+                if (current <= target.get()) return false
+                if (active.compareAndSet(current, current - 1)) return true
+            }
+        }
+    }
+
+    /**
+     * Remide la corrida y cambia el número de descargas en paralelo EN CALIENTE.
+     *
+     * **Por qué en caliente y no entre corridas**: el paralelismo se fijaba una vez al empezar, así
+     * que aprender de una corrida solo servía para la siguiente — y la corrida que más importa es
+     * justo la primera, la de estrenar la app con la biblioteca entera. Ajustando por ventanas, el
+     * arranque puede ser prudente (cuatro conexiones) sin castigar ese sync: si sobra enlace, la
+     * primera ventana lo ve y sube en diez segundos.
+     *
+     * **Qué se mide y qué se deduce.** De la ventana sale el caudal agregado. Comparado con el
+     * enlace que reporta el sistema:
+     * - si el agregado está por DEBAJO de [SATURATED_LINK_FRACTION] del enlace, sobra ancho de banda
+     *   y el límite lo pone OneDrive por conexión: `agregado / conexiones` es entonces una medida
+     *   legítima de ese cap, y de ella sale cuántas conexiones harían falta para llenar el enlace;
+     * - si el agregado ronda el enlace, la red es el límite y la división **no** mide el cap sino el
+     *   ancho de banda repartido. Esa muestra se descarta: usarla haría que el ajuste se
+     *   AUTOCONFIRMARA (mide `enlace/P`, recalcula `P`, se queda donde estaba), congelando para
+     *   siempre un exceso de conexiones que es justo la contención a evitar.
+     *
+     * Con el cap ya aprendido, el objetivo se recalcula contra el enlace de cada ventana, y por eso
+     * el sistema sabe **bajar** además de subir: si la señal empeora a mitad del sync, el enlace cae
+     * y el objetivo baja con él.
+     *
+     * **Descartes.** Una ventana no enseña nada si no bajó bytes, si hubo throttling (segundos de
+     * reloj esperando a OneDrive que harían parecer lenta la conexión, subiendo conexiones justo
+     * cuando el servidor pedía menos), o si es la ventana INMEDIATAMENTE posterior a un cambio: ahí
+     * conviven conexiones a medio arrancar con otras en régimen y el caudal no representa a ninguna
+     * de las dos configuraciones.
+     */
+    private fun CoroutineScope.launchParallelismSupervisor(
+        state: ParallelismState,
+        bytesDownloaded: java.util.concurrent.atomic.AtomicLong,
+        spawnWorker: () -> Unit
+    ): Job = launch {
+        var windowStartMs = System.currentTimeMillis()
+        var windowStartBytes = bytesDownloaded.get()
+        var windowThrottles = requestCoordinator.throttleEvents
+        var windowNetworkWaits = networkWaits.get()
+        var skipWindow = false
+
+        while (isActive) {
+            delay(RESIZE_WINDOW_MS)
+
+            val now = System.currentTimeMillis()
+            val bytes = bytesDownloaded.get()
+            val windowSec = (now - windowStartMs) / MILLIS_PER_SECOND
+            val windowMB = (bytes - windowStartBytes) / BYTES_PER_MB
+            val workers = state.active.get()
+            val throttled = requestCoordinator.throttleEvents > windowThrottles
+            // Una espera de red DENTRO de la ventana infla el reloj sin bajar bytes. Una espera
+            // larga se descarta sola (la ventana siguiente no tiene bytes), pero la que la parte por
+            // la mitad sí cuela, y haría parecer lenta una conexión que estuvo ausente, no lenta.
+            val waitedForNetwork = networkWaits.get() > windowNetworkWaits
+            val measuredNow = !skipWindow && !throttled && !waitedForNetwork &&
+                windowMB > 0.0 && windowSec > 0.0 && workers > 0
+
+            windowStartMs = now
+            windowStartBytes = bytes
+            windowThrottles = requestCoordinator.throttleEvents
+            windowNetworkWaits = networkWaits.get()
+            skipWindow = false
+            if (!measuredNow) continue
+
+            val linkMBps = networkManager.downlinkKbps() / KBPS_PER_MBPS
+            if (linkMBps <= 0.0) continue
+            val aggregateMBps = windowMB / windowSec
+
+            if (aggregateMBps < linkMBps * SATURATED_LINK_FRACTION) {
+                state.learnedPerConnMBps = aggregateMBps / workers
+            }
+            val perConn = state.learnedPerConnMBps
+            if (perConn <= 0.0) continue
+
+            val desired = kotlin.math.ceil(linkMBps / perConn).toInt()
+                .coerceIn(MIN_PARALLEL_WIFI, MAX_PARALLEL_WIFI)
+            if (desired == state.target.get()) continue
+
+            Log.i(
+                TAG,
+                ("Redimensionando descargas: %.2f MB/s con %d conexiones, enlace %.1f MB/s, " +
+                    "%.2f MB/s por conexión -> %d conexiones")
+                    .format(aggregateMBps, workers, linkMBps, perConn, desired)
+            )
+            state.target.set(desired)
+            // Subir es lanzar; bajar lo resuelven los propios workers al terminar su canción (ver
+            // ParallelismState.claimRetirement), porque cancelarlos a mitad tiraría una descarga.
+            while (state.active.get() < desired) {
+                state.active.incrementAndGet()
+                spawnWorker()
+            }
+            skipWindow = true
+        }
+    }
+
+    /**
+     * Guarda para las próximas corridas el throughput por conexión aprendido en ésta.
+     *
+     * Se promedia a partes iguales con lo que hubiera: cada corrida pesa tanto como toda la historia
+     * previa, así que un cambio real de red se refleja en dos o tres syncs pero una tarde rara no
+     * reconfigura nada por sí sola. Si no se pudo medir (enlace saturado todo el rato, que es lo
+     * normal con archivos grandes y WiFi modesto), no se toca lo guardado.
+     */
+    private fun persistLearnedThroughput(state: ParallelismState) {
+        val measured = state.learnedPerConnMBps.toFloat()
+        if (!measured.isFinite() || measured <= 0f) return
+        val previous = musicPreferences.loadOneDriveThroughputMBps()
+        val blended =
+            if (previous > 0f) previous + (measured - previous) * THROUGHPUT_SMOOTHING else measured
+        musicPreferences.saveOneDriveThroughputMBps(blended)
+        Log.i(
+            TAG,
+            "Throughput por conexión: %.2f MB/s medido, %.2f MB/s tras suavizar (antes %.2f)"
+                .format(measured, blended, previous)
+        )
     }
 
     /**
@@ -1281,6 +1550,9 @@ class SyncManager @Inject constructor(
      */
     private suspend fun awaitNetwork(timeoutMs: Long, condition: () -> Boolean): Boolean {
         if (condition()) return true
+        // Se va a esperar de verdad: el reloj de la corrida seguirá corriendo sin descargar nada,
+        // así que su throughput ya no mide la conexión (ver [launchParallelismSupervisor]).
+        networkWaits.incrementAndGet()
         withTimeoutOrNull(timeoutMs) {
             merge(
                 networkManager.status.map { },

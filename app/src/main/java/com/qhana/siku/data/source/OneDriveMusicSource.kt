@@ -60,15 +60,17 @@ class OneDriveMusicSource @Inject constructor(
         // devuelva Failed(isAuthError=true) — antes esto lo hacía SyncManager.startSync.
         val token = when (val result = authManager.getAccessToken().firstOrNull()) {
             is AuthResult.Success -> result.token
-            is AuthResult.Error -> throw SourceAuthException("Auth error: ${result.message}")
+            is AuthResult.Error -> throw SourceAuthException("Auth error: ${result.reason}")
             else -> throw SourceAuthException("Authentication failed")
         }
 
         if (force) {
             Log.d(TAG, "Force refresh: clearing delta token for full rescan")
             musicPreferences.clearDeltaToken()
-            // Pull-to-refresh recupera también carátulas huérfanas si las hay.
-            try { artworkHealingManager.heal() } catch (e: CancellationException) {
+            // Pull-to-refresh recupera también carátulas huérfanas si las hay. `force`: el barrido
+            // del arranque va gateado por el conteo del directorio, y este gesto es precisamente la
+            // vía para pedirlo entero (ver ArtworkHealingManager.heal).
+            try { artworkHealingManager.heal(force = true) } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.w(TAG, "Artwork healing skipped: ${e.message}")

@@ -1,6 +1,7 @@
 package com.qhana.siku.data.source
 
 import com.qhana.siku.data.auth.AuthManager
+import com.qhana.siku.data.auth.AuthErrorReason
 import com.qhana.siku.data.auth.AuthResult
 import com.qhana.siku.data.cache.UrlCache
 import com.qhana.siku.data.coordinator.ArtworkHealingManager
@@ -82,7 +83,7 @@ class OneDriveMusicSourceTest {
 
     @Test
     fun `auth error lanza SourceAuthException y no toca la red`() = runTest {
-        every { authManager.getAccessToken() } returns flowOf(AuthResult.Error("token invalido"))
+        every { authManager.getAccessToken() } returns flowOf(AuthResult.Error(AuthErrorReason.TOKEN_REFRESH_FAILED))
 
         var thrown = false
         try { source.discover(force = false, ctx()) } catch (e: SourceAuthException) { thrown = true }

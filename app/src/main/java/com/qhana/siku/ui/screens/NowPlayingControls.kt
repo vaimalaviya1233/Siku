@@ -2,13 +2,9 @@ package com.qhana.siku.ui.screens
 
 import androidx.compose.animation.*
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -242,6 +238,9 @@ internal class PlayButtonSpinState(
  */
 private const val COOKIE_SPIN_PERIOD_MS = 18_000
 
+/** Una vuelta completa, en grados. */
+private const val FULL_TURN_DEGREES = 360f
+
 @Composable
 internal fun rememberPlayButtonSpin(isPlayingOrBuffering: Boolean): PlayButtonSpinState {
     // Morph continuo píldora (pausa) ↔ Cookie9Sided (reproduciendo); mismo token que las dimensiones
@@ -261,20 +260,49 @@ internal fun rememberPlayButtonSpin(isPlayingOrBuffering: Boolean): PlayButtonSp
     val spinning by remember {
         derivedStateOf { playing.value || morphProgress.value > 0f }
     }
-    val angle: State<Float> = if (spinning) {
-        // El ÚNICO tween que queda en el reproductor, y no puede salir del MotionScheme: todos sus
-        // tokens son `FiniteAnimationSpec` (springs que se asientan en un objetivo) y esto es una
-        // rotación INFINITA a velocidad constante. Un spring aquí no significaría nada.
-        rememberInfiniteTransition(label = "cookieSpin").animateFloat(
-            initialValue = 0f,
-            targetValue = 360f,
-            animationSpec = infiniteRepeatable(tween(COOKIE_SPIN_PERIOD_MS, easing = LinearEasing)),
-            label = "cookieAngle"
-        )
-    } else {
-        remember { mutableFloatStateOf(0f) }
+    // El giro NO es un `rememberInfiniteTransition`, y el motivo está MEDIDO (Perfetto, 17 ago):
+    // una animación infinita invalida el dibujo en CADA vsync, así que con el reproductor abierto
+    // la app producía 120 frames por segundo sin parar por una rotación de 0,17° por frame — que en
+    // el borde de la cookie es un tercio de píxel, o sea nada visible. Dos costes: batería durante
+    // toda la reproducción, y peor, **buffer stuffing**: en cuanto un frame llega tarde (el morph de
+    // apertura), la app queda un buffer por delante de SurfaceFlinger, y mientras no deje de producir
+    // la cola no drena; ese estado sobrevivía al cierre y se comía el primer scroll de la lista
+    // (frames presentados tarde y tirados hasta la primera pausa). La regla que sale de ahí:
+    // **no dibujar lo que no mueve ni un píxel**. El reloj sigue siendo continuo (`withFrameNanos`,
+    // que NO produce frames si nadie invalida) pero el ángulo publicado solo cambia cuando el borde
+    // de la cookie se ha desplazado al menos un píxel — así entre actualizaciones hay vsyncs vacíos,
+    // la cola drena sola y el giro se ve exactamente igual.
+    val density = LocalDensity.current
+    // Paso angular mínimo = un píxel en el borde de la cookie: atan(1 px / radio en px). Derivado
+    // del tamaño real del botón y de la densidad, no un número elegido.
+    val stepDegrees = remember(density) {
+        with(density) {
+            Math.toDegrees(kotlin.math.atan(1.0 / (PlayButtonPlayingSize.toPx() / 2.0))).toFloat()
+        }
     }
-    return PlayButtonSpinState(morphProgress, angle)
+    val angleState = remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(spinning, stepDegrees) {
+        if (!spinning) {
+            angleState.floatValue = 0f
+            return@LaunchedEffect
+        }
+        val startNanos = withFrameNanos { it }
+        var published = 0f
+        angleState.floatValue = 0f
+        while (true) {
+            withFrameNanos { now ->
+                val turns = (now - startNanos) / (COOKIE_SPIN_PERIOD_MS * 1_000_000.0)
+                val continuous = (turns * FULL_TURN_DEGREES).toFloat()
+                if (continuous - published >= stepDegrees) {
+                    published = continuous
+                    // Módulo una vuelta: la rotación es periódica y así el Float no pierde precisión
+                    // tras horas de reproducción.
+                    angleState.floatValue = continuous % FULL_TURN_DEGREES
+                }
+            }
+        }
+    }
+    return PlayButtonSpinState(morphProgress, angleState)
 }
 
 /**
@@ -559,12 +587,12 @@ internal fun PlaybackControls(
         val glyphEnterScale = appSpatialSpec<Float>()
         val glyphExitScale = appFastSpatialSpec<Float>()
         val playWidth by animateDpAsState(
-            targetValue = if (isPlayingOrBuffering) 88.dp else 132.dp,
+            targetValue = if (isPlayingOrBuffering) PlayButtonPlayingSize else PlayButtonPausedWidth,
             animationSpec = transportSpec,
             label = "playButtonWidth"
         )
         val playHeight by animateDpAsState(
-            targetValue = if (isPlayingOrBuffering) 88.dp else 80.dp,
+            targetValue = if (isPlayingOrBuffering) PlayButtonPlayingSize else PlayButtonPausedHeight,
             animationSpec = transportSpec,
             label = "playButtonHeight"
         )
@@ -717,9 +745,13 @@ internal fun PlaybackControls(
                                 label = "playPause"
                             ) { state ->
                                 when (state) {
-                                    PlaybackState.BUFFERING ->
+                                    PlaybackState.BUFFERING -> {
+                                        // Sonda (solo debug): la primera composición de un LoadingIndicator
+                                        // construye 7 Morphs entre MaterialShapes en el hilo principal.
+                                        SideEffect { com.qhana.siku.data.util.JankProbe.mark { "LoadingIndicator del play compuesto" } }
                                         // LoadingIndicator expressive: morfea entre MaterialShapes.
                                         LoadingIndicator(color = playButtonContentColor, modifier = Modifier.size(44.dp))
+                                    }
                                     PlaybackState.PLAYING ->
                                         MaterialSymbol("pause", size = 32.sp, color = playButtonContentColor, fill = true)
                                     else ->
@@ -916,7 +948,7 @@ internal fun BottomActionBar(
         // Que use la paleta primaria NO reabre lo de "la primaria es del play": la barra entera ya
         // es `primaryContainer`. Lo que sigue siendo exclusivo del play es el ROL `primary`, y el
         // reparto de énfasis lo hace el tono, no la familia.
-        bar.withTone(activeTone.coerceIn(0.0, 100.0)).let { Color(it.toInt()) }
+        bar.withTone(activeTone.coerceIn(HCT_TONE_MIN, HCT_TONE_MAX)).let { Color(it.toInt()) }
     }
     // Glifo activo: parte del MISMO color que los iconos inactivos de la barra, para que lo único
     // que cambie al encender sea el disco de detrás. `ensureContrast` lo corrige si el relleno se
@@ -1321,5 +1353,20 @@ private fun keepsGlyph(discTone: Double, glyphTone: Double): Boolean {
     return darkWins == (glyphTone < discTone)
 }
 
-
+/**
+ * Las dos formas del botón de play, que MORFA entre ellas según el estado: cuadrado cuando suena
+ * (con las esquinas redondeadas del shape animado, o sea un círculo) y píldora ancha en pausa.
+ *
+ * Los tres números van juntos porque describen UNA pieza en sus dos estados, y estaban escritos
+ * inline dentro de los `animateDpAsState`. Lo que importa es la relación: en pausa el botón se
+ * ENSANCHA y se achata —invitando a pulsarlo, que es cuando el usuario quiere reanudar— y al sonar
+ * se contrae al cuadrado.
+ *
+ * **Ojo con las coincidencias**: 88 y 132 aparecen también en el destello del doble toque y en el
+ * fundido de las letras, y no tienen ninguna relación con esto. Compartir el dígito no es compartir
+ * el concepto.
+ */
+private val PlayButtonPlayingSize = 88.dp
+private val PlayButtonPausedWidth = 132.dp
+private val PlayButtonPausedHeight = 80.dp
 

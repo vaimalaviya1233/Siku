@@ -10,4 +10,9 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose") version "2.3.0" apply false
     id("com.google.devtools.ksp") version "2.3.2" apply false
     id("com.google.dagger.hilt.android") version "2.58" apply false
+    // Baseline profile: precompila (AOT) las clases y métodos del recorrido crítico, que si no
+    // se interpretan y JITean en los primeros arranques. Las librerías de Compose traen el suyo;
+    // el código de la APP no tenía ninguno. La versión va alineada con androidx.benchmark — si la
+    // resolución falla, es el único número que hay que mover.
+    id("androidx.baselineprofile") version "1.4.1" apply false
 }

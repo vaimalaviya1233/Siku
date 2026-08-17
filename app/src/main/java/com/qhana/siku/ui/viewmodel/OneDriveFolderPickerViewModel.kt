@@ -1,12 +1,16 @@
 package com.qhana.siku.ui.viewmodel
 
+import android.content.Context
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.qhana.siku.data.model.AppError
 import com.qhana.siku.data.model.AppResult
 import com.qhana.siku.data.repository.OneDriveFolderBrowser
 import com.qhana.siku.data.repository.RemoteFolder
+import com.qhana.siku.ui.toUserMessage
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -24,6 +28,7 @@ import javax.inject.Inject
  */
 @HiltViewModel
 class OneDriveFolderPickerViewModel @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val browser: OneDriveFolderBrowser
 ) : ViewModel() {
 
@@ -85,7 +90,7 @@ class OneDriveFolderPickerViewModel @Inject constructor(
                     }
                     is AppResult.Error -> _state.update {
                         if (it.crumbs.last().id != parentId) it
-                        else it.copy(isLoading = false, error = result.error.message)
+                        else it.copy(isLoading = false, error = result.error.toUserMessage(context))
                     }
                     // El browser nunca devuelve Loading (es una suspend que ya resolvió), pero la
                     // rama existe para que añadir un estado al sealed no pase inadvertido aquí.
@@ -99,7 +104,7 @@ class OneDriveFolderPickerViewModel @Inject constructor(
                 // así que el diálogo quedaba sin salida más que cerrarlo.
                 _state.update {
                     if (it.crumbs.last().id != parentId) it
-                    else it.copy(isLoading = false, error = e.message ?: e.javaClass.simpleName)
+                    else it.copy(isLoading = false, error = AppError.fromException(e).toUserMessage(context))
                 }
             }
         }

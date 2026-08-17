@@ -5,6 +5,7 @@ import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -36,7 +37,6 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
-import com.qhana.siku.data.model.PlaybackState
 import com.qhana.siku.data.model.Playlist
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.ui.components.AddToPlaylistBottomSheet
@@ -46,6 +46,7 @@ import com.qhana.siku.ui.components.DetailPlayButtons
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.TonalChip
 import com.qhana.siku.ui.components.SongItem
+import com.qhana.siku.ui.components.SongRowContainer
 import com.qhana.siku.ui.components.SongOverflowButton
 import com.qhana.siku.ui.components.songRowBackground
 import com.qhana.siku.ui.components.overSharedElementsModifier
@@ -54,19 +55,27 @@ import com.qhana.siku.ui.viewmodel.BrowseViewModel
 
 import com.qhana.siku.ui.theme.appEffectsSpec
 import com.qhana.siku.ui.theme.AppBoundsTransform
+import com.qhana.siku.ui.theme.DetailContentTheme
 
 /**
- * Detalle de álbum, estilo INMERSIVO (misma familia visual que el detalle de artista):
- * carátula grande edge-to-edge con nombre/artista superpuestos que se desvanece con el
- * scroll, fila pegajosa de controles ([DetailStickyControls]) y canciones en tarjetas
- * segmentadas con overflow.
+ * Detalle de álbum, estilo INMERSIVO (misma familia visual que el detalle de artista): carátula
+ * grande edge-to-edge con nombre/artista superpuestos, botonera compacta [DetailPlayButtons] que
+ * scrollea CON el contenido, y canciones en tarjetas segmentadas con overflow. La topbar es mínima
+ * y solo lleva el nombre, que aparece con el scroll.
+ *
+ * **La imagen NO se desvanece y la botonera NO se queda pegada arriba**: las dos cosas se probaron
+ * y el usuario las descartó (ver la sección de detalles en CLAUDE.md, "NO reintroducir"). Este KDoc
+ * las describía como si siguieran ahí, con un enlace a un composable que ya no existe.
  */
-@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
+@OptIn(
+    ExperimentalMaterial3Api::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+    ExperimentalSharedTransitionApi::class
+)
 @Composable
 fun AlbumDetailScreen(
     albumName: String,
     currentSong: Song?,
-    playbackState: PlaybackState,
     favorites: Set<String>,
     playlists: List<Playlist>,
     onBackClick: () -> Unit,
@@ -74,6 +83,9 @@ fun AlbumDetailScreen(
     onPlayAll: (List<Song>, Int) -> Unit,
     onShufflePlay: (List<Song>) -> Unit,
     onToggleFavorite: (String) -> Unit,
+    onAddToQueue: (Song) -> Unit,
+    /** Encolar TODAS las canciones del álbum, desde la botonera de la cabecera. */
+    onAddAllToQueue: (List<Song>) -> Unit,
     onAddSongToPlaylist: (Long, String) -> Unit,
     /** Crear lista nueva; [pendingSongId] = canción del flujo "agregar a lista" que debe nacer dentro. */
     onCreatePlaylist: (name: String, pendingSongId: String?) -> Unit,
@@ -84,6 +96,21 @@ fun AlbumDetailScreen(
 ) {
     val songs by remember(albumName) { viewModel.getAlbumSongs(albumName) }
         .collectAsStateWithLifecycle(emptyList())
+
+    // La pista de la que sale la CARÁTULA del header. Se calcula una vez y se usa para las dos
+    // cosas —la imagen y el seed del tema— justamente para que no puedan discrepar: el color de
+    // esta pantalla tiene que ser el de la portada que se está viendo, no el de otra pista del
+    // álbum que quizá tenga una portada distinta.
+    val headerSong = remember(songs) { songs.firstOrNull { it.albumArtUriString != null } }
+
+    // Seed del tema local. Sale de los colores YA persistidos en `songs` (extraídos en su día por
+    // ArtworkRepository), así que no cuesta ni una consulta ni una extracción: viajan en el propio
+    // modelo. `secondary` en oscuro y `primary` en claro es el mismo reparto por tema que usa el
+    // resaltado de la biblioteca; son seeds CRUDOS, que es lo que MaterialKolor espera.
+    val isDark = isSystemInDarkTheme()
+    val albumSeed = remember(headerSong, isDark) {
+        headerSong?.colors?.let { if (isDark) it.secondary else it.primary }
+    }
 
     // Artista del header: si el álbum mezcla artists (feats), "Varios artistas" (no
     // clickeable); si es uno solo, clickeable → detalle del artista.
@@ -100,7 +127,7 @@ fun AlbumDetailScreen(
     // Text viaja y ESCALA desde el nombre grande del header hasta el hueco de la topbar,
     // interpolando entre ambas posiciones medidas, conducido por el offset de scroll.
     val listState = rememberLazyListState()
-    val titleFadePx = with(LocalDensity.current) { 300.dp.toPx() }
+    val titleFadePx = with(LocalDensity.current) { ComponentConfig.DetailTitleFadeRange.toPx() }
     val rawTitleFraction by remember {
         derivedStateOf {
             if (listState.firstVisibleItemIndex > 0) 1f
@@ -129,6 +156,15 @@ fun AlbumDetailScreen(
     var headerTitleHeight by remember { mutableIntStateOf(0) }
     var barTitleAnchor by remember { mutableStateOf(Offset.Zero) }
 
+    // Estado compartido de la CARÁTULA del header, HOISTADO: lo usa la cabecera para su `sharedBounds`
+    // y el título/topbar para saber si deben elevarse al overlay (solo si la portada morfa de verdad,
+    // o sea si venimos de un tile — ver `overSharedElementsModifier`). Uno solo, dos lectores: crear
+    // un segundo con la misma key sería un target duplicado.
+    val headerImageSharedState = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
+        with(sharedTransitionScope) { rememberSharedContentState(key = "album_image_$albumName") }
+    } else null
+
+    DetailContentTheme(albumSeed) {
     Scaffold(
         modifier = modifier,
         contentWindowInsets = WindowInsets(0, 0, 0, 0)
@@ -144,7 +180,7 @@ fun AlbumDetailScreen(
                     MaterialSymbol(
                         "album",
                         size = 64.sp,
-                        color = colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                        color = colorScheme.outline
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
@@ -170,7 +206,7 @@ fun AlbumDetailScreen(
                 item {
                     AlbumImmersiveHeader(
                         albumName = albumName,
-                        albumArtUri = songs.firstOrNull { it.albumArtUriString != null }?.albumArtUriString,
+                        albumArtUri = headerSong?.albumArtUriString,
                         singleArtist = singleArtist,
                         songCount = songs.size,
                         // La primera pista que lo declare: dentro de un álbum el año es el mismo
@@ -179,6 +215,7 @@ fun AlbumDetailScreen(
                         onArtistClick = onArtistClick,
                         sharedTransitionScope = sharedTransitionScope,
                         animatedVisibilityScope = animatedVisibilityScope,
+                        headerImageSharedState = headerImageSharedState,
                         // El nombre del header es un PLACEHOLDER invisible que solo aporta
                         // layout y su posición: el texto real lo dibuja el título viajero.
                         onTitlePositioned = { pos, height ->
@@ -192,6 +229,7 @@ fun AlbumDetailScreen(
                     DetailPlayButtons(
                         onPlayAll = { onPlayAll(songs, 0) },
                         onShuffle = { onShufflePlay(songs) },
+                        onAddToQueue = { onAddAllToQueue(songs) },
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp)
                     )
                 }
@@ -200,29 +238,42 @@ fun AlbumDetailScreen(
                     items = songs,
                     key = { _, song -> song.id }
                 ) { index, song ->
-                    val isPlaying = currentSong?.id == song.id && playbackState == PlaybackState.PLAYING
+                    // La canción actual, esté sonando o en PAUSA: mismo criterio que la cola y la
+                    // lista de canciones (el resaltado marca "cargada", no "reproduciendo ahora").
+                    val isPlaying = currentSong?.id == song.id
                     val rowBackground = songRowBackground(colorScheme.surfaceContainer, isPlaying)
-                    Surface(
-                        color = colorScheme.surfaceContainer,
-                        shape = rememberListItemShape(index, songs.size),
+                    // Punta ORIGEN del container transform hacia el reproductor: la fila crece hasta
+                    // ser el player. Fuera del envoltorio va lo que la coloca en la lista; dentro, la
+                    // superficie que morfa (ver [SongRowContainer]).
+                    SongRowContainer(
+                        songId = song.id,
                         modifier = Modifier
                             .animateItem()
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 1.dp)
                     ) {
-                        SongItem(
-                            song = song,
-                            isPlaying = isPlaying,
-                            modifier = Modifier.clickable { onPlayAll(songs, index) },
-                            trailingContent = {
-                                SongOverflowButton(
-                                    isFavorite = song.id in favorites,
-                                    onToggleFavorite = { onToggleFavorite(song.id) },
-                                    onAddToPlaylist = { songIdForPlaylist = song.id },
-                                    rowBackground = rowBackground
-                                )
-                            }
-                        )
+                        Surface(
+                            color = colorScheme.surfaceContainer,
+                            // isActive: el ítem en reproducción usa la forma redondeada (16 dp), igual
+                            // que en la cola y la lista de canciones, en vez de la esquina agrupada.
+                            shape = rememberListItemShape(index, songs.size, isActive = isPlaying),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            SongItem(
+                                song = song,
+                                isPlaying = isPlaying,
+                                modifier = Modifier.clickable { onPlayAll(songs, index) },
+                                trailingContent = {
+                                    SongOverflowButton(
+                                        isFavorite = song.id in favorites,
+                                        onToggleFavorite = { onToggleFavorite(song.id) },
+                                        onAddToPlaylist = { songIdForPlaylist = song.id },
+                                        onAddToQueue = { onAddToQueue(song) },
+                                        rowBackground = rowBackground
+                                    )
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -236,7 +287,7 @@ fun AlbumDetailScreen(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
-                    .then(overSharedElementsModifier(sharedTransitionScope, animatedVisibilityScope))
+                    .then(overSharedElementsModifier(sharedTransitionScope, animatedVisibilityScope, headerImageSharedState))
                     .background(colorScheme.surface.copy(alpha = topBarAlpha))
             ) {
                 Row(
@@ -279,7 +330,7 @@ fun AlbumDetailScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(end = 40.dp)
-                    .then(overSharedElementsModifier(sharedTransitionScope, animatedVisibilityScope))
+                    .then(overSharedElementsModifier(sharedTransitionScope, animatedVisibilityScope, headerImageSharedState))
                     .graphicsLayer {
                         val f = FastOutSlowInEasing.transform(topBarAlpha)
                         // titleMedium (16sp) / headlineLarge (32sp)
@@ -330,6 +381,7 @@ fun AlbumDetailScreen(
             }
         )
     }
+    } // DetailContentTheme
 }
 
 @OptIn(ExperimentalSharedTransitionApi::class)
@@ -344,14 +396,17 @@ private fun AlbumImmersiveHeader(
     onArtistClick: (String) -> Unit,
     sharedTransitionScope: SharedTransitionScope? = null,
     animatedVisibilityScope: AnimatedVisibilityScope? = null,
+    // HOISTADO desde el parent (mismo objeto que gatea la elevación del título): así el
+    // `isMatchFound` que decide el morph y el que decide elevar son EL MISMO.
+    headerImageSharedState: SharedTransitionScope.SharedContentState? = null,
     onTitlePositioned: (Offset, Int) -> Unit = { _, _ -> }
 ) {
     // La carátula llega volando desde la celda de la pestaña Álbumes (sharedBounds,
     // misma key que AlbumTileCard).
-    val sharedModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
+    val sharedModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null && headerImageSharedState != null) {
         with(sharedTransitionScope) {
             Modifier.sharedBounds(
-                sharedContentState = rememberSharedContentState(key = "album_image_$albumName"),
+                sharedContentState = headerImageSharedState,
                 animatedVisibilityScope = animatedVisibilityScope,
                 // Spring del tema en vez del default de la API (ver AppBoundsTransform).
                 boundsTransform = AppBoundsTransform
@@ -361,7 +416,7 @@ private fun AlbumImmersiveHeader(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(380.dp)
+            .height(ComponentConfig.DetailHeaderHeight)
             .then(sharedModifier)
     ) {
         if (albumArtUri != null) {
@@ -382,13 +437,20 @@ private fun AlbumImmersiveHeader(
             }
         }
 
-        // Scrim inferior: funde la carátula con el fondo y da contraste al texto.
+        // Scrim inferior REFORZADO: funde la carátula con el fondo y —clave— deja el título apoyado
+        // sobre `surface` CASI SÓLIDO, no sobre la imagen. Así el `onSurface` del nombre contrasta
+        // SIEMPRE, sea la carátula clara u oscura (y se adapta a tema claro/oscuro por el propio rol).
+        // El scrim viejo (0.4→surface) solo llegaba a ~0.73·surface donde EMPIEZA el texto, y una
+        // carátula clara tapaba la parte alta de las letras. La imagen sigue inmersiva en el 70 % de
+        // arriba con su fade suave; solo el 15 % inferior (la banda del título) queda sólido.
         Box(
             modifier = Modifier
                 .matchParentSize()
                 .background(
                     Brush.verticalGradient(
-                        0.4f to Color.Transparent,
+                        0.3f to Color.Transparent,
+                        0.7f to colorScheme.surface.copy(alpha = 0.5f),
+                        0.85f to colorScheme.surface,
                         1f to colorScheme.surface
                     )
                 )

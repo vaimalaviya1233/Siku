@@ -11,6 +11,7 @@ import com.qhana.siku.data.config.AppConfig
 import com.qhana.siku.data.local.DuplicatePair
 import com.qhana.siku.data.local.MusicDatabase
 import com.qhana.siku.data.local.SongDao
+import com.qhana.siku.data.util.FuzzyMatch
 import com.qhana.siku.data.local.SongEntity
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.model.SongSourceFilter
@@ -67,18 +68,51 @@ class SongRepository @Inject constructor(
     override fun getSongsPaging(
         query: String,
         sortOrder: SortOrder,
-        sourceFilters: Set<SongSourceFilter>
+        sourceFilters: Set<SongSourceFilter>,
+        approximateIds: List<String>
     ): Flow<PagingData<Song>> {
         val (sortColumn, sortAsc) = sortColumnFor(sortOrder)
 
         return Pager(
             config = PagingConfig(pageSize = 20, enablePlaceholders = true),
             pagingSourceFactory = {
-                val sqlQuery = SongDao.buildPagingQuery(query, sortColumn, sortAsc, sourceFilters)
+                val sqlQuery =
+                    SongDao.buildPagingQuery(query, sortColumn, sortAsc, sourceFilters, approximateIds)
                 songDao.getSongsPagingRaw(sqlQuery)
             }
         ).flow.map { pagingData -> pagingData.map { it.toSong() } }
     }
+
+    override suspend fun countSongsMatching(
+        query: String,
+        sourceFilters: Set<SongSourceFilter>
+    ): Int = withContext(Dispatchers.IO) {
+        songDao.getSongCountRaw(SongDao.buildSearchCountQuery(query, sourceFilters))
+    }
+
+    override suspend fun findApproximateSongIds(query: String): List<String> =
+        withContext(Dispatchers.Default) {
+            if (query.isBlank()) return@withContext emptyList()
+            // El texto se lee en IO y la comparación corre en Default: son miles de distancias de
+            // edición, o sea CPU, y el dispatcher de IO está para esperas.
+            val rows = withContext(Dispatchers.IO) { songDao.getSearchableText() }
+            rows.asSequence()
+                .map { row ->
+                    // El mejor de los tres campos: da igual si la errata fue en el título o en el
+                    // artista, y el que mejor casa es el que decide la posición de la canción.
+                    val best = minOf(
+                        FuzzyMatch.score(row.title, query),
+                        FuzzyMatch.score(row.artist, query),
+                        FuzzyMatch.score(row.album, query)
+                    )
+                    row.id to best
+                }
+                .filter { it.second != FuzzyMatch.NO_MATCH }
+                .sortedBy { it.second }
+                .take(APPROXIMATE_SEARCH_LIMIT)
+                .map { it.first }
+                .toList()
+        }
 
     override suspend fun getSongsSnapshot(
         query: String,
@@ -269,7 +303,7 @@ class SongRepository @Inject constructor(
     }
 
     override suspend fun markDownloadFailed(songId: String, error: String, transient: Boolean, attempts: Int, nextRetryAt: Long): Unit = withContext(Dispatchers.IO) {
-        songDao.markDownloadFailed(songId, attempts, error.take(200), if (transient) "TRANSIENT" else "PERMANENT", nextRetryAt)
+        songDao.markDownloadFailed(songId, attempts, error.take(MAX_STORED_ERROR_CHARS), if (transient) "TRANSIENT" else "PERMANENT", nextRetryAt)
     }
 
     override suspend fun clearDownloadError(songId: String): Unit = withContext(Dispatchers.IO) {
@@ -444,6 +478,11 @@ class SongRepository @Inject constructor(
         songIds.chunked(SQLITE_VAR_LIMIT).forEach { songDao.markArtworkAttempted(it, now) }
     }
 
+    override suspend fun markLightTagsAttempted(songIds: List<String>): Unit = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        songIds.chunked(SQLITE_VAR_LIMIT).forEach { songDao.markLightTagsAttempted(it, now) }
+    }
+
     override suspend fun clearArtworkAttempted(songIds: List<String>): Unit = withContext(Dispatchers.IO) {
         songIds.chunked(SQLITE_VAR_LIMIT).forEach { songDao.clearArtworkAttempted(it) }
     }
@@ -474,5 +513,39 @@ class SongRepository @Inject constructor(
         // SQLite limita SQLITE_MAX_VARIABLE_NUMBER a 999 en Android < 12 (API < 31).
         // Chunkeamos por debajo para que IN (:ids) nunca lance "too many SQL variables".
         const val SQLITE_VAR_LIMIT = 900
+
+        /**
+         * Tope del mensaje de error que se guarda con una descarga fallida.
+         *
+         * **Se dimensiona contra los mensajes que la app REALMENTE produce**, que están medidos: el
+         * más largo de los `dl_err_*` son 58 caracteres (`dl_err_content_type`), y con su parámetro
+         * relleno ronda los 80; un `"HTTP 500: Internal Server Error"` son 31. O sea que doscientos
+         * es más del doble del peor caso legítimo y ningún mensaje propio llega a truncarse.
+         *
+         * Lo que recorta es la cola imprevisible. Aquí NO llegan stacktraces —los mensajes se
+         * componen a mano— pero `dl_err_exception` interpola el `message` de la excepción, y las de
+         * OkHttp arrastran a veces la URL firmada de OneDrive: cientos de caracteres de token que
+         * nadie va a leer. Multiplicado por las canciones que fallan a la vez cuando un sync se cae
+         * en bloque, es lo que se queda en la tabla.
+         *
+         * Coincide además con lo que la UI puede enseñar (dos líneas de `bodySmall` en el gestor de
+         * descargas, del orden de cien caracteres), así que el `Text` corta antes que esto: no hay
+         * forma de que el truncado esconda algo visible.
+         */
+        const val MAX_STORED_ERROR_CHARS = 200
+
+        /**
+         * Tope de canciones que puede rescatar la búsqueda por aproximación.
+         *
+         * Sale de [SQLITE_VAR_LIMIT]: esos ids viajan como parámetros de un `IN (...)` dentro de la
+         * consulta paginada, y SQLite no admite más de 999 en Android por debajo de la 12. Se queda
+         * holgadamente por debajo porque a la consulta le hacen falta además sus propios binds (el
+         * texto del LIKE y los filtros de origen).
+         *
+         * No es una restricción sentida: son coincidencias APROXIMADAS ordenadas de más a menos
+         * parecida, y quien buscaba algo concreto lo tiene en las primeras. Si una búsqueda de dos
+         * letras se pareciera a media biblioteca, cortar es además lo correcto.
+         */
+        const val APPROXIMATE_SEARCH_LIMIT = 500
     }
 }

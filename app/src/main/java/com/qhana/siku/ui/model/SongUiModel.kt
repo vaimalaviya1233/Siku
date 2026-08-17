@@ -2,6 +2,7 @@ package com.qhana.siku.ui.model
 
 import androidx.compose.runtime.Immutable
 import com.qhana.siku.data.model.Song
+import com.qhana.siku.ui.components.formatTime
 
 /**
  * Modelo optimizado para la UI.
@@ -31,11 +32,9 @@ data class SongUiModel(
  * Extension para convertir Song a SongUiModel
  */
 fun Song.toUiModel(isActive: Boolean = false): SongUiModel {
-    // Formatear duración aquí para no hacerlo en cada frame
-    val totalSeconds = duration / 1000
-    val minutes = totalSeconds / 60
-    val seconds = totalSeconds % 60
-    val durationFormatted = "%d:%02d".format(minutes, seconds)
+    // Formatear duración aquí para no hacerlo en cada frame. El formato sale de `formatTime`, que
+    // es el mismo que usan el reproductor y las listas: aquí vivía una segunda copia del cálculo.
+    val durationFormatted = formatTime(duration)
 
     return SongUiModel(
         id = id,

@@ -9,6 +9,7 @@ import com.qhana.siku.data.backup.PlaylistBackupRepository
 import com.qhana.siku.data.model.AppError
 import com.qhana.siku.data.model.AppResult
 import com.qhana.siku.data.util.SnackbarManager
+import com.qhana.siku.ui.toUserMessage
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -67,7 +68,7 @@ class BackupViewModel @Inject constructor(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                snackbarManager.show(e.message ?: e.javaClass.simpleName)
+                snackbarManager.show(AppError.fromException(e).toUserMessage(context))
             } finally {
                 _isBusy.value = false
             }
@@ -93,6 +94,6 @@ class BackupViewModel @Inject constructor(
         // El scope Files.ReadWrite.AppFolder es nuevo: una sesión guardada de antes no lo tiene y
         // Graph responde 403 hasta que el usuario vuelve a consentir.
         is AppError.Auth -> context.getString(R.string.backup_needs_reconnect)
-        else -> context.getString(R.string.backup_error, error.message)
+        else -> context.getString(R.string.backup_error, error.toUserMessage(context))
     }
 }

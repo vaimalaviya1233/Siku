@@ -178,7 +178,16 @@ import kotlin.math.sqrt
  * reconstruirla (stop/prepare). Las GANANCIAS sí son en vivo.
  */
 @Singleton
-class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
+class EqualizerAudioProcessor @Inject constructor(
+    /**
+     * Exciter armónico, insertado entre los refuerzos y el detector del limitador (ver
+     * [queueInput]). Vive DENTRO de este processor y no como un `AudioProcessor` aparte por dos
+     * motivos: la cadena ya está en `double` (uno propio costaría dos conversiones por bloque) y su
+     * salida TIENE que pasar por el limitador, porque añade picos que no existían — por fuera solo
+     * podría ir antes del EQ o después del limitador, y las dos posiciones están descartadas.
+     */
+    private val clarity: com.qhana.siku.player.audio.clarity.Clarity
+) : BaseAudioProcessor() {
 
     companion object {
         /** Frecuencias centrales clásicas de 5 bandas de Android. */
@@ -187,11 +196,52 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         /** 10 bandas ISO por octava (EQ gráfico clásico). */
         private val BANDS_10 = floatArrayOf(31f, 62f, 125f, 250f, 500f, 1_000f, 2_000f, 4_000f, 8_000f, 16_000f)
 
+        /**
+         * Los dos modos de la interfaz. Estaban escritos como `5` y `10` sueltos en siete sitios
+         * (aquí, `MusicPreferences` ×3, `PlaybackViewModel`, `EqCurve` y el chip de la hoja), y de
+         * ellos solo uno tenía nombre: el layout de bandas es una propiedad del PROCESSOR, así que
+         * es él quien los publica.
+         *
+         * Son un par CERRADO, no un rango: el modo se elige entre estos dos y cualquier otro valor
+         * —una preferencia corrupta, un perfil de una versión futura— cae al de 5 por
+         * [bandsFor], que es el default histórico.
+         */
+        internal const val BANDS_5_COUNT = 5
+
         /** Tamaño del modo de 10 bandas; lo usa [EqCurve] para deducir el Q. */
         internal const val BANDS_10_COUNT = 10
 
+        /** El otro modo, para cuando hay que tocar los dos (aplanar, migrar una curva). */
+        internal fun otherBandCount(count: Int): Int =
+            if (count == BANDS_10_COUNT) BANDS_5_COUNT else BANDS_10_COUNT
+
+        /**
+         * Lleva a uno de los dos modos válidos cualquier número que venga de FUERA (DataStore, el
+         * JSON de un perfil). El `if (x == 10) 10 else 5` estaba copiado en tres sitios de
+         * `MusicPreferences`, que es donde entran precisamente los valores en los que no se puede
+         * confiar.
+         */
+        internal fun normalizedBandCount(count: Int): Int =
+            if (count == BANDS_10_COUNT) BANDS_10_COUNT else BANDS_5_COUNT
+
         /** Layout de bandas del modo [count]. Copia defensiva: los arrays maestros son privados. */
-        fun bandsFor(count: Int): FloatArray = (if (count == 10) BANDS_10 else BANDS_5).copyOf()
+        fun bandsFor(count: Int): FloatArray =
+            (if (count == BANDS_10_COUNT) BANDS_10 else BANDS_5).copyOf()
+
+        /**
+         * Paso de TODOS los sliders de ganancia del EQ, en dB. Vive aquí y no en la hoja porque de
+         * él se deriva [GAIN_MATCH_EPSILON_DB], que es lógica y no presentación.
+         */
+        const val GAIN_STEP_DB = 0.5f
+
+        /**
+         * Tolerancia para dar dos curvas por iguales. **Derivada del paso del slider**: medio paso
+         * es, por construcción, menos que la diferencia más pequeña que el usuario PUEDE introducir
+         * y mucho más que el error de redondeo que dejan la interpolación entre modos y el viaje a
+         * DataStore. Así el emparejado con un preset no depende de un epsilon elegido a ojo — si
+         * algún día el slider se afina, esto lo sigue solo.
+         */
+        const val GAIN_MATCH_EPSILON_DB = GAIN_STEP_DB / 2f
 
         const val MAX_GAIN_DB = 12f
 
@@ -847,10 +897,62 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
      * Se calcula ESTÉ O NO aplicándose ([limiterEnabled]): apagado, el número es lo que reduciría.
      * Es lo que convierte el medidor en un diagnóstico útil para decidir si hace falta encenderlo,
      * en vez de en un adorno que solo funciona cuando ya tomaste la decisión.
+     *
+     * Con el limitador apagado eso vale **mientras alguien esté mirando** ([meterObservers]): la
+     * envolvente se sigue calculando siempre —es aritmética por frame—, pero el detector inter-
+     * muestra que la alimenta se salta si nadie va a leer el resultado. Sin observadores el valor
+     * queda en el último publicado, que es exactamente lo que nadie está mirando; al abrir la hoja
+     * vuelve a ser true-peak desde el primer bloque.
      */
     @Volatile
     var gainReductionDb: Float = 0f
         private set
+
+    /**
+     * Cuántos consumidores tiene AHORA MISMO el medidor de [gainReductionDb] — en la práctica, 0 o
+     * 1: la hoja del ecualizador abierta.
+     *
+     * Existe porque el detector true-peak no es gratis y con el limitador apagado su único cliente
+     * es ese medidor. El FIR polifásico cuesta [TRUE_PEAK_TAPS] MAC por canal y frame (96 en
+     * estéreo, ~4,2 M MAC/s a 44,1 kHz), del mismo orden que la cascada entera de biquads: o sea que
+     * calcularlo con el limitador apagado y la hoja cerrada venía a DUPLICAR el coste de CPU del DSP
+     * propio durante horas de reproducción, para un número que nadie lee. Y es el peor sitio posible
+     * para gastar de más, porque con el ecualizador activo el offload al DSP está desactivado y esta
+     * cuenta la paga la CPU.
+     *
+     * Es un CONTADOR y no un booleano por la razón de siempre: dos colectores del mismo flow (una
+     * hoja que se recompone mientras otra se va) apagarían el detector al cerrarse el primero.
+     */
+    private val meterObservers = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /**
+     * Lo setea `MusicPlaybackService` para que reconstruya la pipeline del sink cuando el resultado
+     * de [shouldProcess] cambie por un motivo que NO pasa por el toggle ni por un cambio de ruta:
+     * abrir o cerrar la hoja del EQ (cruce de [meterObservers] por 0). El sink solo lee
+     * [shouldProcess] al configurarse, así que sin este aviso la hoja abierta sobre una curva plana
+     * no llegaría a sonar. Se invoca en el hilo del colector del medidor; el servicio reprograma al
+     * suyo antes de tocar el player.
+     */
+    @Volatile
+    var onProcessingConditionChanged: (() -> Unit)? = null
+
+    /**
+     * Lo llama el flow FRÍO que alimenta el medidor (`PlaybackViewModel.eqGainReductionDb`) al
+     * empezar y al terminar de colectarse. Mientras nadie mire y el limitador esté apagado, el
+     * detector inter-muestra se salta ([queueInput]).
+     *
+     * El cruce por 0 avisa a [onProcessingConditionChanged]: "hoja abierta" es uno de los términos
+     * de [shouldProcess], así que abrir la primera vista o cerrar la última puede cambiar si el
+     * processor transforma o cede el offload.
+     */
+    fun addMeterObserver() {
+        if (meterObservers.getAndIncrement() == 0) onProcessingConditionChanged?.invoke()
+    }
+
+    fun removeMeterObserver() {
+        val prev = meterObservers.getAndUpdate { if (it > 0) it - 1 else 0 }
+        if (prev == 1) onProcessingConditionChanged?.invoke()
+    }
 
     fun isEnabled(): Boolean = enabled
 
@@ -858,6 +960,51 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
     fun setEnabled(value: Boolean) {
         enabled = value
     }
+
+    /**
+     * ¿La configuración actual altera el audio de forma AUDIBLE, o es un passthrough transparente?
+     *
+     * Con el toggle encendido pero todo neutro —bandas a 0, sin refuerzos, preamp 0, limitador y
+     * Clarity apagados— [queueInput] emite bit-perfect (un preamp de 0 dB es ×1.0 exacto y las
+     * bandas por debajo del umbral se saltan): el ÚNICO efecto de tener el processor en la cadena
+     * es impedir el audio offload del sink, o sea gastar CPU para no cambiar ni un bit. El servicio
+     * usa esto para devolverle el offload al DSP en ese caso (ver [shouldProcess]).
+     *
+     * El umbral por banda es [IDENTITY_EPSILON_DB], el MISMO por debajo del cual la cascada ya
+     * salta la banda por identidad ([recomputeCompensation]): lo que el DSP considera transparente
+     * para no gastar un biquad cuenta aquí como transparente para ceder el offload. Los refuerzos y
+     * el preamp usan el mismo suelo. El limitador y Clarity cuentan si están encendidos (el primero
+     * arrastra además el detector true-peak, que no es gratis).
+     */
+    fun isAudiblyActive(): Boolean {
+        val c = config
+        for (g in c.gainsDb) if (abs(g) >= IDENTITY_EPSILON_DB) return true
+        if (c.bassBoostDb >= IDENTITY_EPSILON_DB) return true
+        if (c.trebleBoostDb >= IDENTITY_EPSILON_DB) return true
+        if (abs(c.preampDb) >= IDENTITY_EPSILON_DB) return true
+        if (limiterEnabled) return true
+        if (clarity.isEnabled() && clarity.getGainDb() >= IDENTITY_EPSILON_DB) return true
+        return false
+    }
+
+    /**
+     * ¿Debe el processor TRANSFORMAR el audio (pipeline float, sin offload) o puede quedarse
+     * transparente y cederle el offload al DSP? Es la condición ÚNICA de la que dependen a la vez
+     * [onConfigure] (devolver un formato float o NOT_SET) y el modo de offload del sink
+     * (`MusicPlaybackService.isOffloadRequested`) — tenerla en un solo sitio es lo que impide que el
+     * processor procese mientras el sink cree que hay offload, o al revés.
+     *
+     * Tres términos:
+     *  - [enabled]: el toggle del usuario. Apagado, nunca se procesa y el offload queda libre.
+     *  - [isAudiblyActive]: encendido pero neutro no cambia el audio → se cede el offload igual.
+     *  - [meterObservers] > 0: la hoja del EQ está abierta. Aunque la curva esté plana se PROCESA,
+     *    para que subir un slider desde plano suene EN VIVO; sin esto no se oiría hasta cerrar la
+     *    hoja, porque el sink solo consulta esta condición al reconstruirse. El precio es un único
+     *    reajuste de pipeline al ABRIR la hoja sobre una curva plana —entrar al modo de edición—,
+     *    nunca durante el arrastre (mientras la hoja está abierta la condición ya es `true` y no
+     *    vuelve a cambiar).
+     */
+    fun shouldProcess(): Boolean = enabled && (isAudiblyActive() || meterObservers.get() > 0)
 
     /** Ganancia en vivo de una banda; audible en el siguiente buffer procesado. */
     fun setBandGain(band: Int, db: Float) {
@@ -991,13 +1138,14 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
     fun getBandGains(): FloatArray = config.gainsDb.copyOf()
 
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
-        // El `enabled` va PRIMERO, antes de mirar el encoding: con el EQ apagado este processor
-        // tiene que ser transparente ante CUALQUIER formato (NOT_SET = inactivo, la pipeline queda
-        // idéntica a la stock). Al revés —comprobando el encoding antes— un formato que no fuera
-        // 16-bit ni float tumbaba el sink con una UnhandledAudioFormatException por un processor
-        // que ni siquiera iba a hacer nada; o sea que apagar el EQ no bastaba para quitarlo de en
-        // medio, que es justo lo único que se le pide a un módulo desactivado.
-        if (!enabled) return AudioProcessor.AudioFormat.NOT_SET
+        // La transparencia va PRIMERO, antes de mirar el encoding: cuando el processor no debe
+        // transformar ([shouldProcess] false — apagado, o encendido pero neutro y con la hoja del
+        // EQ cerrada) tiene que ser transparente ante CUALQUIER formato (NOT_SET = inactivo, la
+        // pipeline queda idéntica a la stock y el sink puede hacer offload). Al revés —comprobando
+        // el encoding antes— un formato que no fuera 16-bit ni float tumbaba el sink con una
+        // UnhandledAudioFormatException por un processor que ni siquiera iba a hacer nada; o sea que
+        // estar inactivo no bastaba para quitarlo de en medio, que es justo lo único que se le pide.
+        if (!shouldProcess()) return AudioProcessor.AudioFormat.NOT_SET
         if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT &&
             inputAudioFormat.encoding != C.ENCODING_PCM_FLOAT
         ) {
@@ -1046,6 +1194,8 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
             snapshot.frequencies, channels, sampleRate,
             snapshot.bassBoostFreq, snapshot.trebleBoostFreq
         )
+        // Idempotente: sale por la primera comparación salvo que cambien la tasa o los canales.
+        clarity.configure(inputAudioFormat.sampleRate, channels)
         if (dirty || layoutChanged) {
             // Sin getOrNull: devuelve Float? y eso BOXEA en el hilo de audio.
             val gains = snapshot.gainsDb
@@ -1091,6 +1241,17 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         val delayFrames = limiterDelayFrames
         val limiting = limiterEnabled
         val threshold = limiterThreshold
+        // ¿Hace falta el detector inter-muestra en este bloque? Solo si alguien va a usar su
+        // resultado: el limitador aplicándose, o el medidor de la hoja del EQ abierto (ver
+        // [meterObservers]). Se lee UNA vez por bloque, como el resto de la configuración del
+        // limitador, y no por frame.
+        //
+        // Lo que se salta es el FIR, que es lo caro; la HISTORIA se sigue escribiendo siempre (dos
+        // asignaciones a un array por muestra, ruido comparado con 48 MAC por canal). Esa asimetría
+        // es deliberada: mantenerla fresca hace que encender el limitador —o abrir la hoja— empiece
+        // a estimar con la ventana real desde el primer frame, en vez de arrastrar 12 muestras de
+        // historia obsoleta o de ceros justo en el instante en que el usuario pide protección.
+        val detectTruePeak = limiting || meterObservers.get() > 0
         var minGain = 1.0
 
         var f = 0
@@ -1111,6 +1272,22 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
                     sample = cascade[indices[k]].process(sample, ch)
                 }
                 frame[ch] = sample
+                ch++
+            }
+
+            // (1b) Exciter, DESPUÉS de todo el shaping tonal y ANTES del limitador. El orden no es
+            // negociable en ninguno de los dos extremos: delante del EQ, los refuerzos volverían a
+            // amplificar los armónicos que Clarity acaba de sintetizar; detrás del limitador, los
+            // picos que añade saldrían sin nadie que los atrape. Trabaja sobre el frame ya montado,
+            // así que el detector true-peak ve la señal definitiva.
+            //
+            // Latencia CERO: no lleva línea de retardo, así que su interruptor no cambia la
+            // sincronización de nada y no hay que drenarlo al final de la pista.
+            clarity.processFrame(frame)
+
+            ch = 0
+            while (ch < channels) {
+                val sample = frame[ch]
                 val mag = if (sample < 0) -sample else sample
                 if (mag > framePeak) framePeak = mag
                 // Historia del detector, duplicada para que su ventana quede contigua.
@@ -1124,11 +1301,13 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
             // sobre las muestras se sigue cumpliendo exactamente aunque el estimador se quede
             // corto, y de paso el medidor pasa a reflejar el overshoot inter-muestra, que es lo
             // que de verdad recorta aguas abajo. Ver [TRUE_PEAK_PHASES].
-            ch = 0
-            while (ch < channels) {
-                val tp = truePeakOf(ch)
-                if (tp > framePeak) framePeak = tp
-                ch++
+            if (detectTruePeak) {
+                ch = 0
+                while (ch < channels) {
+                    val tp = truePeakOf(ch)
+                    if (tp > framePeak) framePeak = tp
+                    ch++
+                }
             }
             truePeakPos++
             if (truePeakPos == TRUE_PEAK_TAPS_PER_PHASE) truePeakPos = 0
@@ -1340,6 +1519,8 @@ class EqualizerAudioProcessor @Inject constructor() : BaseAudioProcessor() {
         // El retardo guarda audio de ANTES del salto: soltarlo tras un seek sonaría como un eco
         // del punto anterior, y su pico ya expirado seguiría gobernando la ganancia.
         resetLimiterState()
+        // Clarity arrastra el estado de sus filtros, que traen energía del punto anterior.
+        clarity.reset()
     }
 
     override fun onReset() {

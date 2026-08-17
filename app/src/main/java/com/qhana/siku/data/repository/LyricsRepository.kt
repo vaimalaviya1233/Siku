@@ -1,5 +1,6 @@
 package com.qhana.siku.data.repository
 
+import com.qhana.siku.data.remote.HttpStatus
 import com.qhana.siku.data.remote.LrcLibApi
 import com.qhana.siku.data.remote.LrcLibResponse
 import kotlinx.coroutines.withTimeout
@@ -35,7 +36,7 @@ class LyricsRepository @Inject constructor(
                 fetchFromLrcLib(title, artist, album, durationSeconds)
             }
         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-            LyricsResult.Error("Timeout")
+            LyricsResult.Error(LyricsErrorReason.TIMEOUT)
         }
     }
 
@@ -48,14 +49,14 @@ class LyricsRepository @Inject constructor(
                 else LyricsCandidatesResult.Found(candidates)
             }
         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-            LyricsCandidatesResult.Error("Timeout")
+            LyricsCandidatesResult.Error(LyricsErrorReason.TIMEOUT)
         } catch (e: IOException) {
-            LyricsCandidatesResult.Error(e.message ?: "Network error", isOffline = e.isUnreachable())
+            LyricsCandidatesResult.Error(LyricsErrorReason.NETWORK, isOffline = e.isUnreachable())
         } catch (e: retrofit2.HttpException) {
-            if (e.code() == 404) LyricsCandidatesResult.Empty
-            else LyricsCandidatesResult.Error("HTTP ${e.code()}")
+            if (e.code() == HttpStatus.NOT_FOUND) LyricsCandidatesResult.Empty
+            else LyricsCandidatesResult.Error(LyricsErrorReason.SERVER)
         } catch (e: Exception) {
-            LyricsCandidatesResult.Error(e.message ?: "Unknown error")
+            LyricsCandidatesResult.Error(LyricsErrorReason.UNKNOWN)
         }
     }
 
@@ -72,14 +73,14 @@ class LyricsRepository @Inject constructor(
                 else -> LyricsResult.NotFound
             }
         } catch (e: IOException) {
-            LyricsResult.Error(e.message ?: "Network error", isOffline = e.isUnreachable())
+            LyricsResult.Error(LyricsErrorReason.NETWORK, isOffline = e.isUnreachable())
         } catch (e: retrofit2.HttpException) {
-            if (e.code() == 404) LyricsResult.NotFound
-            else LyricsResult.Error("HTTP ${e.code()}")
+            if (e.code() == HttpStatus.NOT_FOUND) LyricsResult.NotFound
+            else LyricsResult.Error(LyricsErrorReason.SERVER)
         } catch (e: com.google.gson.JsonSyntaxException) {
             LyricsResult.NotFound
         } catch (e: Exception) {
-            LyricsResult.Error(e.message ?: "Unknown error")
+            LyricsResult.Error(LyricsErrorReason.UNKNOWN)
         }
     }
 

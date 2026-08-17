@@ -18,7 +18,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.SharingStarted
+import com.qhana.siku.data.util.WhileUiSubscribed
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.mapLatest
@@ -52,9 +52,14 @@ class SyncViewModel @Inject constructor(
                         val status = progress.getString("status") ?: context.getString(R.string.repair_default_status)
                         val pVal = progress.getFloat("progress", 0f)
 
+                        // `Downloading` cuenta ítems (hechos de un total) y el worker reporta una
+                        // FRACCIÓN, así que se expresa sobre una escala de porcentaje. El 100 va una
+                        // sola vez: escribirlo en los dos campos dejaba el numerador y el
+                        // denominador como dos números independientes que solo por costumbre
+                        // pertenecían a la misma escala.
                         _repairState.value = SyncStatus.Downloading(
-                            current = (pVal * 100).toInt(),
-                            total = 100,
+                            current = (pVal * PERCENT_SCALE).toInt(),
+                            total = PERCENT_SCALE,
                             failed = 0,
                             currentMessage = context.getString(R.string.repair_in_progress, status)
                         )
@@ -103,7 +108,7 @@ class SyncViewModel @Inject constructor(
         }
     }.stateIn(
         viewModelScope,
-        kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000),
+        WhileUiSubscribed,
         SyncStatus.Idle
     )
     
@@ -112,7 +117,7 @@ class SyncViewModel @Inject constructor(
     // Respaldada por BD (v18): la lista sobrevive a la muerte del proceso.
     val failedDownloads = syncManager.failedDownloads.stateIn(
         viewModelScope,
-        kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5000),
+        WhileUiSubscribed,
         emptyList()
     )
 
@@ -153,6 +158,10 @@ class SyncViewModel @Inject constructor(
      */
     fun refreshSongs(force: Boolean = true) {
         viewModelScope.launch {
+            // Se pide un escaneo nuevo: el fallo del anterior deja de ser noticia y su banner se
+            // retira. Sin esto seguiría en pantalla contradiciendo al progreso que está a punto de
+            // aparecer, y volvería a salir en cada arranque hasta que un escaneo llegara al final.
+            musicPreferences.saveLastSyncFailure(null)
             val needsNetwork = sourceRegistry.activeSources().any { it.type.isCloud }
             downloadScheduler.scheduleScan(force, requiresNetwork = needsNetwork)
         }
@@ -175,7 +184,7 @@ class SyncViewModel @Inject constructor(
     /** Estado de control persistido (ACTIVE/PAUSED/STOPPED). */
     val downloadControlState: StateFlow<DownloadControlState> =
         musicPreferences.downloadControlStateFlow.stateIn(
-            viewModelScope, SharingStarted.WhileSubscribed(5000), DownloadControlState.ACTIVE
+            viewModelScope, WhileUiSubscribed, DownloadControlState.ACTIVE
         )
 
     /**
@@ -188,13 +197,13 @@ class SyncViewModel @Inject constructor(
             musicRepository.getTotalDownloadedBytesFlow(),
             musicPreferences.storageLimitBytesFlow
         ) { used, cap -> StorageUsage(usedBytes = used, capBytes = cap) }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+            .stateIn(viewModelScope, WhileUiSubscribed, null)
 
     /** Tope de almacenamiento en GB (0 = sin límite), para el diálogo de opciones. */
     @OptIn(ExperimentalCoroutinesApi::class)
     val storageLimitGb: StateFlow<Float> =
         musicPreferences.storageLimitBytesFlow.mapLatest { it / BYTES_PER_GB }.stateIn(
-            viewModelScope, SharingStarted.WhileSubscribed(5000), 0f
+            viewModelScope, WhileUiSubscribed, 0f
         )
 
     /**
@@ -219,7 +228,7 @@ class SyncViewModel @Inject constructor(
                 val pending = musicRepository.countSongsNeedingWork()
                 if (pending > 0) DownloadBannerState(control, pending) else null
             }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+            .stateIn(viewModelScope, WhileUiSubscribed, null)
 
     // --- Duplicados entre fuentes (v23) ---
 
@@ -254,6 +263,16 @@ class SyncViewModel @Inject constructor(
         val bytes = if (gb <= 0f) 0L else (gb * BYTES_PER_GB).toLong()
         musicPreferences.saveStorageLimitBytes(bytes)
         viewModelScope.launch(Dispatchers.IO) { syncManager.enforceStorageLimit() }
+    }
+
+    private companion object {
+        /**
+         * Escala sobre la que se expresa un progreso que llega como fracción, para encajarlo en un
+         * `SyncStatus.Downloading` que cuenta ítems (hechos / total). No es una preferencia: es la
+         * definición de porcentaje, y el numerador y el denominador tienen que salir de aquí los dos
+         * o dejarían de pertenecer a la misma escala.
+         */
+        const val PERCENT_SCALE = 100
     }
 }
 

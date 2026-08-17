@@ -98,7 +98,7 @@ fun DownloadStateBanner(
                         pending
                     ),
                     style = MaterialTheme.typography.bodySmall,
-                    color = accent.copy(alpha = 0.8f)
+                    color = accent.copy(alpha = ACCENT_SECONDARY_ALPHA)
                 )
                 Spacer(Modifier.height(8.dp))
                 Row(

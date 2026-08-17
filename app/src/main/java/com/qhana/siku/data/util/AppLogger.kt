@@ -2,6 +2,7 @@ package com.qhana.siku.data.util
 
 import android.content.Context
 import android.util.Log
+import com.qhana.siku.BuildConfig
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,6 +28,13 @@ import javax.inject.Singleton
  * [BufferedWriter] abierto y flushea por lote (≥50 entradas o ≥5s). Antes, cada
  * log() lanzaba una corrutina y abría/escribía/cerraba el archivo por línea, lo
  * que provocaba I/O constante durante toda la reproducción.
+ *
+ * **El volcado a disco es SOLO en debug** ([BuildConfig.DEBUG]): en release no existe ninguna
+ * pantalla ni exportación que lea `playback_debug.log`, así que sin root el archivo es inaccesible
+ * — escribirlo sería I/O de por vida (con el servicio de reproducción el proceso vive días) para un
+ * archivo que nadie puede abrir. En release ni se arranca el consumidor ni se encola nada; el
+ * logcat, en cambio, se emite siempre (es barato y sí se puede capturar con la app conectada). Si
+ * algún día se añade una pantalla de diagnóstico, el gate pasa a esa preferencia.
  */
 @Singleton
 class AppLogger @Inject constructor(
@@ -57,7 +65,8 @@ class AppLogger @Inject constructor(
     private val channel = Channel<LogEntry>(capacity = 256, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
     init {
-        scope.launch { consumeLoop() }
+        // Sin lector en release, el consumidor —y con él el writer y toda la I/O— solo existe en debug.
+        if (BuildConfig.DEBUG) scope.launch { consumeLoop() }
     }
 
     fun log(category: String, message: String, level: LogLevel = LogLevel.INFO) {
@@ -73,8 +82,9 @@ class AppLogger @Inject constructor(
             LogLevel.ERROR -> Log.e(logTag, message)
         }
 
-        // Persistencia: solo encolar, sin lanzar corrutinas por llamada.
-        channel.trySend(entry)
+        // Persistencia: solo encolar (sin lanzar corrutinas por llamada), y solo en debug — en
+        // release no hay consumidor que vacíe el canal ni archivo que nadie pueda leer.
+        if (BuildConfig.DEBUG) channel.trySend(entry)
     }
 
     fun playback(message: String, level: LogLevel = LogLevel.INFO) = log(CAT_PLAYBACK, message, level)
@@ -85,6 +95,13 @@ class AppLogger @Inject constructor(
     /**
      * Único consumidor del canal: mantiene el writer abierto y flushea por lote.
      * Flush cuando pasaron ≥5s desde el último flush O hay ≥50 entradas acumuladas.
+     *
+     * La espera es BLOQUEANTE cuando no hay nada pendiente de volcar, y solo con plazo cuando sí
+     * lo hay. La versión anterior ponía el timeout siempre, así que sin actividad el bucle
+     * despertaba cada 5 s para comprobar que no había nada que hacer y volver a dormirse —
+     * unos 17 000 despertares al día en un proceso que, por el servicio de reproducción, vive
+     * días enteros. Con el buffer vacío no existe ningún plazo que vigilar: lo único que puede
+     * dar trabajo es que llegue una entrada, y eso ya es una señal (convención 13).
      */
     private suspend fun consumeLoop() {
         var writer: BufferedWriter? = openWriter()
@@ -92,8 +109,16 @@ class AppLogger @Inject constructor(
         var lastFlush = System.currentTimeMillis()
         try {
             while (true) {
-                // Espera la próxima entrada hasta 5s; null = timeout → flush por tiempo.
-                val entry = withTimeoutOrNull(FLUSH_INTERVAL_MS) { channel.receive() }
+                val entry = if (pending == 0) {
+                    // Nada escrito sin volcar: dormir hasta que alguien loguee.
+                    channel.receive()
+                } else {
+                    // Hay líneas en el buffer: despertar a más tardar cuando toque el flush por
+                    // tiempo, para que no se queden ahí si el logueo se detiene de golpe.
+                    val elapsed = System.currentTimeMillis() - lastFlush
+                    val remaining = (FLUSH_INTERVAL_MS - elapsed).coerceAtLeast(0L)
+                    withTimeoutOrNull(remaining) { channel.receive() }
+                }
                 if (entry != null) {
                     try {
                         writer?.write(formatEntryForFile(entry))

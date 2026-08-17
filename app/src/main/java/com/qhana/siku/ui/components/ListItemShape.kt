@@ -13,7 +13,9 @@ fun rememberListItemShape(
     isActive: Boolean = false,
     activeRadius: Dp = 16.dp,
     inactiveRadius: Dp = 4.dp,
-    pronouncedRadius: Dp = 24.dp
+    // 16dp = esquina externa del grupo por spec de M3 (el primer ítem arriba, el último abajo);
+    // coincide con `activeRadius`, así que un ítem seleccionado ("reproduciendo ahora") queda igual.
+    pronouncedRadius: Dp = 16.dp
 ): androidx.compose.ui.graphics.Shape {
     return remember(index, count, isActive) {
         if (isActive) {

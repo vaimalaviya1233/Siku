@@ -80,7 +80,10 @@ fun LyricsSearchSheet(
                         // LrcLib; relanza la misma consulta sin cerrar la hoja.
                         Spacer(Modifier.height(16.dp))
                         Button(onClick = onRetry) {
-                            MaterialSymbol("refresh", size = 18.sp, color = MaterialTheme.colorScheme.onPrimary)
+                            // Sin color explícito: hereda el LocalContentColor del Button (así se
+                            // atenúa solo si alguna vez se deshabilita, en vez de quedar brillante
+                            // sobre un texto apagado — mismo criterio que el botón del onboarding).
+                            MaterialSymbol("refresh", size = 18.sp)
                             Spacer(Modifier.width(8.dp))
                             Text(stringResource(R.string.common_retry))
                         }
@@ -142,6 +145,10 @@ private fun CandidateItem(
             onClick = onClick,
             onLongClick = onLongClick
         ),
+        // Contenedor TRANSPARENTE: el default de `ListItem` es `surface` (casi blanco en el tema
+        // claro), que pintaba un bloque blanco sobre el crema de la hoja (`surfaceContainerLow`).
+        // Transparente deja ver el color real de la hoja y las filas dejan de "cortarse".
+        colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
         headlineContent = {
             Text(candidate.trackName, fontWeight = FontWeight.SemiBold, maxLines = 1)
         },
@@ -166,7 +173,7 @@ private fun CandidateItem(
                         )
                         Spacer(Modifier.width(8.dp))
                     }
-                    Badge(text = candidate.badgeLabel(), color = candidate.badgeColor())
+                    Badge(text = candidate.badgeLabel(), colors = candidate.badgeColors())
                 }
             }
         }
@@ -217,16 +224,17 @@ private fun LyricsPreviewDialog(
 }
 
 @Composable
-private fun Badge(text: String, color: androidx.compose.ui.graphics.Color) {
+private fun Badge(text: String, colors: BadgeColors) {
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
-            .background(color.copy(alpha = 0.15f))
+            // Contenedor tonal por ROL (par container/on-container), no un alpha sobre el contenido.
+            .background(colors.container)
             .padding(horizontal = 8.dp, vertical = 2.dp)
     ) {
         Text(
             text,
-            color = color,
+            color = colors.content,
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.Medium
         )
@@ -241,11 +249,27 @@ private fun LyricsCandidate.badgeLabel(): String = when {
     else -> stringResource(R.string.lyrics_badge_none)
 }
 
+/** Par contenedor/contenido de un badge, para que el tinte salga de roles del scheme y no de un alpha. */
+private data class BadgeColors(
+    val container: androidx.compose.ui.graphics.Color,
+    val content: androidx.compose.ui.graphics.Color
+)
+
 @Composable
-private fun LyricsCandidate.badgeColor(): androidx.compose.ui.graphics.Color = when {
-    instrumental -> MaterialTheme.colorScheme.tertiary
-    hasSynced -> MaterialTheme.colorScheme.primary
-    else -> MaterialTheme.colorScheme.onSurfaceVariant
+private fun LyricsCandidate.badgeColors(): BadgeColors = when {
+    instrumental -> BadgeColors(
+        MaterialTheme.colorScheme.tertiaryContainer,
+        MaterialTheme.colorScheme.onTertiaryContainer
+    )
+    hasSynced -> BadgeColors(
+        MaterialTheme.colorScheme.primaryContainer,
+        MaterialTheme.colorScheme.onPrimaryContainer
+    )
+    // `onSurfaceVariant` no tiene par de contenedor; el neutro va sobre `surfaceContainerHighest`.
+    else -> BadgeColors(
+        MaterialTheme.colorScheme.surfaceContainerHighest,
+        MaterialTheme.colorScheme.onSurfaceVariant
+    )
 }
 
 private fun stripTimestamps(text: String): String =

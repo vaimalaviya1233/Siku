@@ -16,15 +16,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.HazeTint
-import dev.chrisbanes.haze.hazeEffect
 
+import com.materialkolor.hct.Hct
 import com.qhana.siku.ui.theme.appSpatialSpec
 
 /**
@@ -59,6 +56,22 @@ fun TonalChip(
  */
 fun onContainerColor(container: Color): Color =
     if (androidx.core.graphics.ColorUtils.calculateLuminance(container.toArgb()) > 0.5) Color.Black else Color.White
+
+/**
+ * Blanco o negro, el que MÁS contraste tenga sobre [container], medido con el ratio WCAG real.
+ *
+ * No es lo mismo que [onContainerColor], que decide por umbral de luminancia 0.5: el cruce de
+ * contraste entre blanco y negro está en L ≈ 0.179, así que para todo acento medio (0.18 < L < 0.5)
+ * aquel umbral elige BLANCO cuando el negro contrasta más del doble — medido sobre el acento marrón
+ * de la captura (L ≈ 0.30): blanco 2.6:1, negro 7.0:1. Sobre texto se nota poco; sobre un elemento
+ * FINO como el handle de la barra de progreso es la diferencia entre verlo y no verlo.
+ *
+ * Se añade en vez de corregir [onContainerColor] porque ese umbral gobierna ya muchas superficies
+ * (chips, glifos) y cambiarlo repintaría media app sin haberlo pedido.
+ */
+fun maxContrastOn(container: Color): Color =
+    if (contrastRatio(Color.Black, container) >= contrastRatio(Color.White, container)) Color.Black
+    else Color.White
 
 /**
  * Tono del MISMO matiz de [base] con la luminosidad fijada a [lightness] (HSL: conserva
@@ -107,6 +120,123 @@ fun onAccentContentColor(container: Color): Color {
  * uniformemente en toda la pantalla.
  */
 
+// ============== SUPERFICIE DERIVADA DEL FONDO REAL ==============
+
+/**
+ * Separación tonal (HCT) entre una superficie y el fondo sobre el que se apoya. 8 = el recorrido
+ * COMPLETO de la escala de contenedores de M3 en tema claro (`surface` 98 →
+ * `surfaceContainerHighest` 90): la mayor distancia que el spec sigue leyendo como "otra superficie"
+ * sin llegar al salto de un botón de acción. Por debajo de ~4 (dos niveles) la capa se funde con el
+ * fondo.
+ */
+private const val TONAL_LAYER_DELTA = 8.0
+
+/** Centro de la escala de tono HCT: decide si la capa se aleja del fondo hacia abajo o hacia arriba. */
+private const val TONAL_LAYER_MID_TONE = 50.0
+
+/**
+ * Opacidad del contenido DESHABILITADO: el valor del spec de M3, el mismo que aplican por dentro
+ * `Button`, `TextField` y compañía. Es de los pocos alphas legítimos del sistema —junto a los state
+ * layers y los scrims—; la jerarquía de texto NO se hace así, sino con roles (`onSurface` vs
+ * `onSurfaceVariant`), que llevan su contraste medido contra la superficie.
+ *
+ * Vive aquí, compartida, porque estaba declarada TRES veces con dos nombres distintos
+ * (`DisabledAlpha`, `DISABLED_ALPHA`) y una cuarta suelta en el código: cuatro copias del mismo
+ * token del spec que nada obligaba a mantener iguales.
+ */
+internal const val DISABLED_CONTENT_ALPHA = 0.38f
+
+/**
+ * Contenido SECUNDARIO sobre un contenedor de ACENTO (el color del álbum, `primaryContainer`,
+ * `secondaryContainer`…): subtítulos de banners y tarjetas teñidas.
+ *
+ * **Es la excepción a "la jerarquía se hace con roles, no con alpha"**, y tiene motivo: M3 ofrece el
+ * par `onSurface`/`onSurfaceVariant` para la escala neutra, pero NO hay un `onPrimaryContainerVariant`
+ * ni equivalente para los contenedores de acento — y menos aún para un color derivado de la carátula
+ * en vivo, que no es un rol del tema. Sin rol al que recurrir, atenuar es la única herramienta.
+ *
+ * Alto a propósito (80 %): lo justo para que se lea como segundo nivel sin bajar el contraste de un
+ * texto que ya vive sobre un fondo de color. Estaba escrito a mano en DIEZ sitios.
+ */
+internal const val ACCENT_SECONDARY_ALPHA = 0.8f
+
+/**
+ * Pista NO recorrida de una barra de progreso teñida con el acento. El mismo color que el tramo
+ * recorrido, muy rebajado: es lo que hace que la barra se lea como una pieza —un canal y su
+ * relleno— en vez de como dos colores distintos.
+ *
+ * Estaba repetido en los banners de sync y en las barras del reproductor. Ojo con confundirlo con el
+ * `0.2f` que algunos callers pasan al construir `inactiveTrackColor`: ese alpha lo SOBRESCRIBE el
+ * componente al pintar (`copy` reemplaza el canal, no lo multiplica), así que no es el que se ve.
+ */
+internal const val ACCENT_TRACK_ALPHA = 0.25f
+
+/** Contraste mínimo por defecto del contenido sobre la capa: AA de texto. */
+private const val TONAL_LAYER_MIN_CONTRAST = 4.5f
+
+/**
+ * Extremos de la escala de tono HCT (negro y blanco). No es una decisión de esta app sino el rango
+ * que define HCT, y hay que acotar a él cada vez que se DESPLAZA un tono: `Hct.from` con un tono
+ * fuera de rango no falla, devuelve otro color. Estaba escrito como `coerceIn(0.0, 100.0)` en las
+ * cuatro superficies que derivan tono (aquí, el MiniPlayer ×2 y el toolbar del NowPlaying).
+ */
+internal const val HCT_TONE_MIN = 0.0
+internal const val HCT_TONE_MAX = 100.0
+
+/**
+ * Paso con el que [ensureContrast] barre la luminosidad buscando el ratio pedido. Es la resolución
+ * de una BÚSQUEDA, no un valor de diseño: fino de más solo cuesta iteraciones (25 como mucho para
+ * recorrer la escala entera, sobre un `remember`), y grueso de más devolvería un color más extremo
+ * de lo necesario, o sea un acento apagado sin motivo.
+ */
+private const val CONTRAST_SEARCH_STEP = 0.04f
+
+/** Par contenedor/contenido de una superficie derivada del fondo que tiene debajo. */
+@Immutable
+data class TonalLayerColors(val container: Color, val content: Color)
+
+/**
+ * Colores de una superficie que se apoya sobre [background], DERIVADOS de ese fondo real en vez de
+ * un rol fijo de la paleta.
+ *
+ * Por qué no un rol a secas: los roles de contenedor viven en la MISMA banda tonal que las
+ * superficies sobre las que se apoyan (`secondaryContainer` ≈ `surfaceContainerHigh`, ~90 vs 92), así
+ * que la capa se ve o no según lo que la paleta activa haya hecho con esa banda — y sobre un fondo
+ * que ES ese mismo rol desaparece del todo. Los parches habituales (un borde, una sombra, interpolar
+ * hacia blanco o negro) no pueden arreglarlo: no GARANTIZAN separación, que es lo único que se pide.
+ *
+ * La regla: se conservan hue y croma de [role] (sigue siendo un color de la paleta, no un gris
+ * inventado) y se le fija el TONO a [TONAL_LAYER_DELTA] puntos del fondo, alejándose del extremo de
+ * la escala. Es como M3 construye sus propios niveles de superficie, así que la separación sale
+ * idéntica en cualquier paleta y en cualquiera de los dos temas: la dirección la decide el tono
+ * MEDIDO del fondo, no una rama `isSystemInDarkTheme()`.
+ *
+ * **Sirve para UNA capa sobre otra, no para apilar tres.** Vale para una píldora sobre un fondo,
+ * pero no para el MiniPlayer, donde el botón tiene que verse a la vez sobre el contenedor y sobre el
+ * relleno de progreso: al derivar dos veces seguidas con "aléjate del extremo", un fondo de tono
+ * medio hace que la segunda invierta el sentido y vuelva al color del primero (probado el 31 jul,
+ * ver `MiniPlayerSurfaces`, que apila en una sola dirección).
+ */
+@Composable
+fun rememberTonalLayerColors(
+    background: Color,
+    role: Color = MaterialTheme.colorScheme.secondaryContainer,
+    onRole: Color = MaterialTheme.colorScheme.onSecondaryContainer,
+    minContrast: Float = TONAL_LAYER_MIN_CONTRAST
+): TonalLayerColors = remember(background, role, onRole, minContrast) {
+    val backgroundTone = Hct.fromInt(background.toArgb()).tone
+    val roleHct = Hct.fromInt(role.toArgb())
+    val tone = (
+        if (backgroundTone > TONAL_LAYER_MID_TONE) backgroundTone - TONAL_LAYER_DELTA
+        else backgroundTone + TONAL_LAYER_DELTA
+    ).coerceIn(HCT_TONE_MIN, HCT_TONE_MAX)
+    val container = Color(Hct.from(roleHct.hue, roleHct.chroma, tone).toInt())
+    TonalLayerColors(
+        container = container,
+        content = ensureContrast(onRole, container, minContrast)
+    )
+}
+
 /**
  * Ratio de contraste WCAG entre dos colores: (L_claro + 0.05) / (L_oscuro + 0.05), en [1, 21].
  */
@@ -137,9 +267,9 @@ fun ensureContrast(content: Color, container: Color, minRatio: Float = 3f): Colo
     val hsl = FloatArray(3)
     androidx.core.graphics.ColorUtils.colorToHSL(content.toArgb(), hsl)
     var l = hsl[2]
-    val step = 0.04f
     while (true) {
-        l = (if (goingDark) l - step else l + step).coerceIn(0f, 1f)
+        l = (if (goingDark) l - CONTRAST_SEARCH_STEP else l + CONTRAST_SEARCH_STEP)
+            .coerceIn(0f, 1f)
         hsl[2] = l
         val candidate = Color(androidx.core.graphics.ColorUtils.HSLToColor(hsl))
         if (contrastRatio(candidate, container) >= minRatio || l <= 0f || l >= 1f) return candidate
@@ -157,54 +287,47 @@ fun ensureContrast(content: Color, container: Color, minRatio: Float = 3f): Colo
 fun vividAccentColor(base: Color): Color {
     val hsv = FloatArray(3)
     android.graphics.Color.colorToHSV(base.toArgb(), hsv)
-    if (hsv[1] >= 0.15f) hsv[1] = hsv[1].coerceAtLeast(0.65f)
-    hsv[2] = hsv[2].coerceIn(0.75f, 0.95f)
+    if (hsv[SATURATION] >= VIVID_MIN_SATURATION) {
+        hsv[SATURATION] = hsv[SATURATION].coerceAtLeast(VIVID_TARGET_SATURATION)
+    }
+    hsv[VALUE] = hsv[VALUE].coerceIn(VIVID_MIN_VALUE, VIVID_MAX_VALUE)
     return Color(android.graphics.Color.HSVToColor(hsv))
 }
 
+/** Índices del array que devuelve `Color.colorToHSV`. */
+private const val SATURATION = 1
+private const val VALUE = 2
+
 /**
- * Contenedor de VIDRIO ESMERILADO (frosted glass) vía Haze: desenfoca el fondo que tiene
- * detrás ([hazeState] marcado con `hazeSource` en la capa de fondo) y le aplica un velo
- * tenue [tint]. Como toma el color real del fondo pixel a pixel, NUNCA desentona con el
- * gradiente/carátula — a diferencia de un contenedor de color sólido.
+ * Saturación por debajo de la cual un color se considera ACROMÁTICO y no se aviva. Es la guarda del
+ * kdoc de [vividAccentColor]: `colorToHSV` le da hue 0 a un gris, así que saturarlo lo teñiría de
+ * un rojo que no está en la carátula. Solo decide si el color entra o no en el ajuste — el juicio
+ * de "¿es gris?" que gobierna el TEMA se hace en croma HCT (`ArtworkRepository.isAchromatic`), que
+ * es independiente del tono; aquí basta con una criba sobre el color ya elegido.
+ */
+private const val VIVID_MIN_SATURATION = 0.15f
+
+/** Saturación mínima a la que se lleva un color cromático para que no se pierda sobre la carátula. */
+private const val VIVID_TARGET_SATURATION = 0.65f
+
+/**
+ * Banda de brillo del acento.
  *
- * En Android 12+ (API 31) el blur es real; en 8–11 Haze degrada a solo el velo translúcido.
+ * **El suelo es el que trabaja**: estos distintivos son cuadrados de ~24 dp sobre una CARÁTULA
+ * arbitraria, y con el estilo "fiel a la carátula" el `primary` puede venir muy oscuro, en cuyo caso
+ * el distintivo se pierde contra una portada oscura. Subirlo garantiza que se despegue de la imagen
+ * pase lo que pase.
+ *
+ * El techo es una guarda menor: evita que quede tan claro que se lea como blanco en vez de como
+ * color. NO hace falta para que el icono de dentro se vea —de eso se ocupa `onContainerColor`, que
+ * elige negro o blanco según la luminancia del distintivo— y por eso puede ir tan alto.
+ *
+ * Ninguno de los dos está medido: son una banda elegida para que el resultado sea siempre un color
+ * vivo y visible, y su acierto se juzga MIRANDO las tarjetas del inicio sobre carátulas distintas,
+ * no razonando sobre los números.
  */
-/**
- * Permite DESACTIVAR temporalmente el blur de [GlassSurface] (que es caro por frame) mientras
- * corre una animación pesada —p. ej. el slide de apertura de NowPlaying—, cayendo a un panel
- * tonal sólido. Se reactiva al asentarse la transición. Por defecto activo.
- */
-val LocalGlassBlurEnabled = compositionLocalOf { true }
-
-@Composable
-fun GlassSurface(
-    hazeState: HazeState,
-    shape: Shape,
-    tint: Color,
-    modifier: Modifier = Modifier,
-    blurRadius: Dp = 28.dp,
-    content: @Composable () -> Unit
-) {
-    val blurEnabled = LocalGlassBlurEnabled.current
-    // Fallback sin blur: el velo tinte compuesto sobre un tonal opaco (surfaceContainerHighest),
-    // así el panel se lee como sólido durante la transición sin el coste del RenderEffect.
-    val fallbackColor = tint.compositeOver(MaterialTheme.colorScheme.surfaceContainerHighest)
-    Box(
-        modifier = modifier
-            .clip(shape)
-            .then(
-                if (blurEnabled) Modifier.hazeEffect(state = hazeState) {
-                    this.blurRadius = blurRadius
-                    this.tints = listOf(HazeTint(tint))
-                    this.noiseFactor = 0f
-                } else Modifier.background(fallbackColor)
-            )
-    ) {
-        content()
-    }
-}
-
+private const val VIVID_MIN_VALUE = 0.75f
+private const val VIVID_MAX_VALUE = 0.95f
 
 /**
  * Barra de progreso Expressive estilo Apple Music.
@@ -281,7 +404,7 @@ fun UnifiedProgressBar(
                                 .fillMaxWidth()
                                 .height(trackHeight)
                                 .clip(CircleShape)
-                                .background(inactiveTrackColor.copy(alpha = 0.2f))
+                                .background(inactiveTrackColor.copy(alpha = ACCENT_TRACK_ALPHA))
                         ) {
                             Box(
                                 modifier = Modifier
@@ -306,7 +429,7 @@ fun UnifiedProgressBar(
                     .height(trackHeight)
                     .clip(CircleShape),
                 color = trackColor,
-                trackColor = inactiveTrackColor.copy(alpha = 0.2f)
+                trackColor = inactiveTrackColor.copy(alpha = ACCENT_TRACK_ALPHA)
             )
         }
 

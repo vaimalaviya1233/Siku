@@ -26,6 +26,7 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.qhana.siku.data.repository.ArtworkRepository
 import com.qhana.siku.data.util.AppLogger
+import com.qhana.siku.data.util.JankProbe
 import com.qhana.siku.data.util.SnackbarManager
 import com.qhana.siku.service.MusicPlaybackService
 import com.qhana.siku.ui.MusicPlayerScreen
@@ -63,16 +64,33 @@ class MainActivity : ComponentActivity() {
     // condición de retención del splash.
     private val authViewModel: AuthViewModel by viewModels()
 
+    // Solo para decidir si el splash tiene que esperar a MSAL (ver onCreate). Sus dos consultas
+    // leen la caché en memoria de MusicPreferences, así que responden sin tocar disco.
+    @Inject
+    lateinit var localMusicSource: com.qhana.siku.data.source.LocalMusicSource
+
     private var pendingNowPlayingNavigation by mutableStateOf(false)
     private var userWantsScreenOn = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val splashScreen = installSplashScreen()
         super.onCreate(savedInstanceState)
-        // Retiene el splash del sistema hasta que MSAL resuelva la sesión (isLoggedIn
-        // deja de ser null); el NavHost compone entonces directo en el destino correcto
-        // sin flash del Login. tryRestoreSession tiene su propio timeout, no cuelga.
-        splashScreen.setKeepOnScreenCondition { authViewModel.isLoggedIn.value == null }
+        // Sonda de frames largos (apagada salvo `adb shell setprop log.tag.JankProbe DEBUG`; ver JankProbe).
+        JankProbe.start()
+        // Retiene el splash del sistema hasta que MSAL resuelva la sesión (isLoggedIn deja de ser
+        // null); el NavHost compone entonces directo en el destino correcto sin flash del Login.
+        // tryRestoreSession tiene su propio timeout, no cuelga.
+        //
+        // Pero SOLO si esa respuesta puede cambiar el destino. Con una fuente local ya configurada
+        // el arranque es la biblioteca haya sesión o no (`hasAnySource = loggedIn || hasLocalSource`
+        // en MusicPlayerScreen), así que esperar a que una librería de autenticación lea sus
+        // credenciales de disco es tiempo de splash regalado — y quien nunca conectó OneDrive lo
+        // pagaba en cada arranque en frío sin recibir nada a cambio.
+        val hasLocalSource =
+            localMusicSource.scansWholeDevice() || localMusicSource.folderUris().isNotEmpty()
+        splashScreen.setKeepOnScreenCondition {
+            !hasLocalSource && authViewModel.isLoggedIn.value == null
+        }
         appLogger.lifecycle("onCreate() - savedInstanceState=${savedInstanceState != null}")
 
         enableEdgeToEdge(
@@ -116,9 +134,27 @@ class MainActivity : ComponentActivity() {
             val rawSeed = if (chosenArgb != null && !isAchromatic) Color(chosenArgb) else null
             var lastSeed by remember { mutableStateOf<Color?>(null) }
             LaunchedEffect(rawSeed) { if (rawSeed != null) lastSeed = rawSeed }
-            // Acromática → seedeamos el gris con estilo Monochrome (neutro, sin heredar nada).
-            // Cromática → el color (o el último mientras extrae). Cold start sin nada → dynamic/baseline.
-            val seedColor = if (isAchromatic) chosenArgb?.let { Color(it) } else (rawSeed ?: lastSeed)
+            // El puente `lastSeed` SOLO es válido mientras la extracción está en curso, y eso solo
+            // ocurre si la canción TIENE carátula. Una canción SIN carátula (albumArtUri null) nunca
+            // producirá color —`ArtworkRepository.getAlbumColors` corta en null de forma PERMANENTE,
+            // no transitoria—, así que heredar `lastSeed` dejaba CLAVADO el acento de la canción
+            // anterior. Una canción sin carátula usa un NEUTRO FIJO (gris puro croma 0 → esquema
+            // Monochrome, la misma ruta que una carátula acromática), no dynamic/baseline: así el
+            // tema es estable y no depende del wallpaper. Sin esto se conservaba el color previo.
+            val currentSong = themeNowPlaying.song
+            val currentSongHasArt = currentSong?.albumArtUri != null
+            val noArtNeutral = currentSong != null && !currentSongHasArt && rawSeed == null && !isAchromatic
+            // Acromática o sin carátula → gris neutro con estilo Monochrome (no hereda nada).
+            // Cromática → el color (o el último mientras extrae, SOLO con carátula).
+            // Cold start sin canción → dynamic/baseline.
+            val seedColor = when {
+                isAchromatic -> chosenArgb?.let { Color(it) }
+                rawSeed != null -> rawSeed
+                currentSongHasArt -> lastSeed
+                noArtNeutral -> Color(ArtworkRepository.NEUTRAL_SEED_ARGB)
+                else -> null
+            }
+            val useMonochrome = isAchromatic || noArtNeutral
             // Estilo elegido en Ajustes → Apariencia. Se observa del DataStore: cambiarlo
             // repinta el tema en vivo, sin recrear la Activity ni recompilar para probar otro.
             val paletteStyleName by themePlaybackViewModel.themePaletteStyle.collectAsStateWithLifecycle()
@@ -127,11 +163,18 @@ class MainActivity : ComponentActivity() {
             // (ver `animateColors` en MusicPlayerTheme) y el cambio de canción lo coreografían
             // los reveals del NowPlaying, no un fundido global.
             val playerExpandedState = rememberSaveable { mutableStateOf(false) }
+            // La fila que se está PREPARANDO para abrir el player (ver `MusicAppState.openPlayer`):
+            // el frame ANTERIOR a expandir. El tema tiene que congelarse ya en ese frame y no en el
+            // siguiente — el seed de la canción tocada cambia en ese mismo frame, y con la
+            // animación encendida el esquema saldría a medias (roles animados viejos, fijos nuevos)
+            // y recompondría el árbol entero dos veces: ahí y al llegar el definitivo. Transitorio,
+            // no `rememberSaveable`: nunca hay que restaurar una preparación a medias.
+            val pendingRowOriginState = remember { mutableStateOf<String?>(null) }
             MusicPlayerTheme(
                 seedColor = seedColor,
-                monochrome = isAchromatic,
+                monochrome = useMonochrome,
                 paletteStyle = paletteStyleFromName(paletteStyleName),
-                animateColors = !playerExpandedState.value
+                animateColors = !playerExpandedState.value && pendingRowOriginState.value == null
             ) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
@@ -145,7 +188,8 @@ class MainActivity : ComponentActivity() {
                             userWantsScreenOn = enabled
                             updateKeepScreenOn(enabled)
                         },
-                        playerExpandedState = playerExpandedState
+                        playerExpandedState = playerExpandedState,
+                        pendingRowOriginState = pendingRowOriginState
                     )
                 }
             }

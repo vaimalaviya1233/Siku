@@ -40,6 +40,19 @@ class ArtworkRepository @Inject constructor(
     // Mutexes para evitar extracción duplicada de la misma canción
     private val extractionMutexes = ConcurrentHashMap<String, Mutex>()
 
+    /**
+     * Seeds de imágenes que NO son la carátula de una canción — hoy, la foto de artista de Deezer
+     * que seedea el tema de su pantalla de detalle. Va aparte de [memoryCache] porque la clave es
+     * otra: allí es el id de la canción y aquí el URI de la imagen, que es lo único que identifica
+     * a una foto que no pertenece a ninguna fila de `songs`.
+     *
+     * **Solo en memoria, a propósito.** Persistirlo pedía una columna en `artists` y su migración,
+     * y el cálculo no lo merece: la imagen ya está en el caché de DISCO de Coil (lo caro es
+     * bajarla, no cuantizarla), así que tras un reinicio la re-extracción son unos milisegundos
+     * sobre un bitmap de 256 px. Si algún día se nota, la columna es un cambio aditivo.
+     */
+    private val imageSeedCache = LruCache<String, Int>(IMAGE_SEED_CACHE_ENTRIES)
+
 
     /**
      * Invalida el caché de colores para una canción específica (RAM y DB).
@@ -203,7 +216,15 @@ class ArtworkRepository @Inject constructor(
                     .data(uri)
                     .size(ANALYSIS_BITMAP_PX)
                     .allowHardware(false)
-                    .memoryCachePolicy(CachePolicy.ENABLED)
+                    // El caché de MEMORIA queda fuera a propósito. Este bitmap de 256 px es un
+                    // insumo del análisis y no lo vuelve a pedir NADIE: guardarlo solo servía para
+                    // ocupar sitio en el mismo pool que las carátulas de las listas (el 25 % del
+                    // heap, ver `IMAGE_MEMORY_CACHE_FRACTION`) y expulsarlas. Se notaba justo
+                    // cuando más molesta: durante un backfill de colores —lotes de 500— la lista
+                    // que el usuario está scrolleando se queda sin sus miniaturas y hay que
+                    // redecodificarlas. El de DISCO sí se conserva: ese evita volver a BAJAR la
+                    // imagen, que es lo caro de verdad, y no compite con nada.
+                    .memoryCachePolicy(CachePolicy.DISABLED)
                     .diskCachePolicy(CachePolicy.ENABLED)
                     .build()
 
@@ -238,8 +259,27 @@ class ArtworkRepository @Inject constructor(
         }
     }
 
+    /**
+     * Seed de una imagen SUELTA, identificada por su URI y no por una canción: la foto de artista
+     * con la que el detalle de artista seedea su tema local.
+     *
+     * Misma extracción que la de una carátula ([extractColorsOptimized] → Celebi + Score), así que
+     * una foto y una portada dan colores comparables y las dos pantallas de detalle se ven
+     * hermanas. Cachea en memoria por URI y devuelve `null` si la imagen no se pudo cargar — que
+     * el caller debe tratar como "esta pantalla no tiene color propio", nunca como un gris.
+     *
+     * Los fallos NO se cachean: una foto que no cargó por falta de red tiene que poder reintentarse
+     * al volver a entrar, igual que en [getAlbumColors].
+     */
+    suspend fun seedForImage(uri: String): Int? {
+        imageSeedCache.get(uri)?.let { return it }
+        val seed = extractColorsOptimized(uri, uri)?.primary ?: return null
+        imageSeedCache.put(uri, seed)
+        return seed
+    }
+
     // --- DEBUGGING ---
-    
+
     data class DebugColorInfo(
         val bitmap: Bitmap,
         val candidates: List<ColorCandidate>,
@@ -506,7 +546,7 @@ class ArtworkRepository @Inject constructor(
         // veía como "#000000" en el selector —parecía un fallo, no una decisión— y como acento 1:1
         // es ilegible. El croma 0 sigue disparando el esquema Monochrome del tema igual de bien, y
         // el tono da igual porque este color se re-tonaliza al pintarlo (ver [NEUTRAL_SEED_TONE]).
-        val neutral = Hct.from(0.0, 0.0, NEUTRAL_SEED_TONE).toInt()
+        val neutral = NEUTRAL_SEED_ARGB
 
         val candidates = rankCandidates(populationByColor)
 
@@ -607,6 +647,14 @@ class ArtworkRepository @Inject constructor(
         private const val COLOR_CACHE_ENTRIES = 2000
 
         /**
+         * Entradas del caché de seeds por URI ([seedForImage]). Dos órdenes de magnitud menos que
+         * [COLOR_CACHE_ENTRIES] porque el uso también lo es: son las pantallas de detalle de
+         * artista que se visitan en una sesión, no una biblioteca entera scrolleándose. Con 200
+         * caben de sobra las de cualquier sesión real y ocupan unos cientos de bytes.
+         */
+        private const val IMAGE_SEED_CACHE_ENTRIES = 200
+
+        /**
          * Lado en px al que se reduce la carátula ANTES de cuantizarla. Lo comparten la
          * extracción real y el visor de candidatos del diálogo de color: si difirieran, el visor
          * enseñaría un ranking distinto del que la app aplicó.
@@ -676,5 +724,12 @@ class ArtworkRepository @Inject constructor(
         // re-tonaliza igual—, así que se elige el centro de la escala: no sugiere ningún tema, a
         // diferencia de un T40 o un T80, que ahora significarían "ya proyectado".
         private const val NEUTRAL_SEED_TONE = 50.0
+
+        /**
+         * Gris PURO (croma 0) que representa una carátula SIN color. Dispara el esquema Monochrome
+         * del tema igual que un neutro extraído. Lo usa la extracción ([extractSeedColor]) y el
+         * tema global para una canción sin carátula (seed fijo en vez de heredar el color anterior).
+         */
+        val NEUTRAL_SEED_ARGB: Int = Hct.from(0.0, 0.0, NEUTRAL_SEED_TONE).toInt()
     }
 }

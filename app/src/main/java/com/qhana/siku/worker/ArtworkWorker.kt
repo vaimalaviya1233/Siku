@@ -18,7 +18,8 @@ class ArtworkWorker @AssistedInject constructor(
     @Assisted context: Context,
     @Assisted params: WorkerParameters,
     private val musicRepository: IMusicRepository,
-    private val artworkRepository: ArtworkRepository
+    private val artworkRepository: ArtworkRepository,
+    private val syncManager: com.qhana.siku.data.coordinator.SyncManager
 ) : CoroutineWorker(context, params) {
 
     companion object {
@@ -32,6 +33,13 @@ class ArtworkWorker @AssistedInject constructor(
          * reintentaba para siempre con backoff: el trabajo nunca se completa y nunca se rinde.
          * Es un backfill cosmético —los colores se re-extraen solos en la próxima corrida—, así
          * que rendirse es preferible a insistir eternamente.
+         *
+         * **Ojo: `runAttemptCount` cuenta TODOS los reintentos, incluidos los de ceder el turno al
+         * sync**, así que tras un escaneo largo el presupuesto puede llegar gastado y una excepción
+         * posterior se dará por definitiva al primer intento. Es tolerable a propósito: darse por
+         * vencido aquí no pierde nada (el cursor está persistido y el siguiente arranque vuelve a
+         * encolar el trabajo), y separar ambos contadores exigiría persistir uno propio para un
+         * backfill que nadie está esperando.
          */
         private const val MAX_RUN_ATTEMPTS = 5
 
@@ -42,6 +50,22 @@ class ArtworkWorker @AssistedInject constructor(
     private val prefs by lazy { applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+        // Mal momento: hay un escaneo o unas descargas en marcha, que es exactamente con lo que
+        // este backfill no debe competir — recorre la biblioteca entera decodificando imágenes y
+        // cuantizándolas, o sea disco, CPU y BD, los tres recursos que el sync está usando.
+        //
+        // Se pregunta por el ESTADO en vez de esperar un plazo desde el arranque (que es lo que
+        // hacía el `setInitialDelay` a solas): el sync se encola en ese mismo arranque y dura
+        // minutos, así que ningún retardo razonable acierta a esquivarlo. Apartarse y dejar que
+        // WorkManager reprograme sí, porque la condición se vuelve a evaluar cada vez.
+        //
+        // Es trabajo cosmético y reanudable —el cursor está persistido y lo que falte se recoge en
+        // la corrida siguiente—, así que ceder el turno no cuesta nada.
+        if (syncManager.state.value.isRunning) {
+            Log.d(TAG, "Sync en marcha: se cede el turno y se reprograma")
+            return@withContext Result.retry()
+        }
+
         try {
             val allSongs = musicRepository.getSongsWithoutColors()
             if (allSongs.isEmpty()) { prefs.edit().clear().apply(); return@withContext Result.success() }
