@@ -25,17 +25,17 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
 import coil3.compose.AsyncImage
-import coil3.request.ImageRequest
+import com.qhana.siku.ui.components.nowPlayingArtRequest
 import coil3.request.crossfade
 import com.qhana.siku.data.model.PlaybackOrigin
 import com.qhana.siku.data.model.Song
+import com.qhana.siku.ui.LocalPlayerOnScreen
 import com.qhana.siku.ui.components.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -178,7 +178,9 @@ internal fun PlaybackSourceChip(
 
     val originIcon = when (origin) {
         PlaybackOrigin.LOCAL -> "sd_card"
-        PlaybackOrigin.DOWNLOADED -> "cloud_done"
+        // `offline_pin` y no `cloud_done`: lo que el chip afirma es que la canción está EN EL
+        // DISPOSITIVO y suena sin red, no que la nube terminó de sincronizar.
+        PlaybackOrigin.DOWNLOADED -> "offline_pin"
         PlaybackOrigin.STREAMING -> "stream"
     }
     val originLabel = when (origin) {
@@ -221,10 +223,12 @@ internal fun PlaybackSourceChip(
                 )
             }
             Spacer(modifier = Modifier.width(if (compact) 8.dp else 10.dp))
+            // Sin `.copy(fontWeight = Medium)`: los dos roles `label` YA son Medium por token
+            // (`LabelSmallWeight`/`LabelMediumWeight`), así que ese override no cambiaba nada y
+            // solo hacía creer que aquí había una decisión de peso.
             Text(
                 text = originLabel,
-                style = (if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelMedium)
-                    .copy(fontWeight = FontWeight.Medium),
+                style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelMedium,
                 color = chipContentColor
             )
         }
@@ -337,12 +341,9 @@ internal fun AlbumArtSection(
         var incomingArt by remember { mutableStateOf<Pair<String, String?>?>(null) }
         val reveal = remember { Animatable(0f) }
 
-        // ¿El reproductor ya está ABIERTO y quieto, o todavía subiendo desde la píldora? El mismo
-        // gate lo usa el reveal del transporte en [NowPlayingLayouts]: durante el slide la pantalla
-        // entera ya se está moviendo y encadenar encima otra animación se lee como un tirón.
-        val playerSettled = animatedVisibilityScope?.transition?.let {
-            it.currentState == it.targetState
-        } ?: true
+        // ¿El reproductor está ABIERTO, quieto y a la vista? Mismo gate que el reveal del transporte
+        // en [NowPlayingLayouts] — ver [playerRevealEnabled] para las tres condiciones.
+        val playerSettled = playerRevealEnabled(animatedVisibilityScope)
 
         // Izado: dentro del `LaunchedEffect` ya no hay composición donde leer el tema.
         //
@@ -503,13 +504,10 @@ private fun NowPlayingArtImage(
             // (2,5 MB en ARGB_8888) por cada pista de un mismo álbum, y encima no compartía nada
             // con el MiniPlayer, que usaba otro prefijo y otro tamaño — el "reuso" que prometía no
             // existía. Ver [AlbumArt] para el porqué completo.
-            val request = remember(artUri) {
-                ImageRequest.Builder(context)
-                    .data(artUri)
-                    .crossfade(false)
-                    .size(ComponentConfig.NowPlayingArtDecodePx)
-                    .build()
-            }
+            // La petición sale de UNA función compartida con el precalentamiento: repetir aquí sus
+            // parámetros es lo que hizo que las dos rutas divergieran en el `scale` y decodificaran
+            // el mismo JPEG dos veces. Ver [nowPlayingArtRequest].
+            val request = remember(artUri) { nowPlayingArtRequest(context, artUri) }
             AsyncImage(
                 model = request,
                 contentDescription = stringResource(R.string.album_art_desc, albumName),
@@ -535,6 +533,13 @@ internal fun SongInfoSection(
     onArtistClick: (String) -> Unit,
     onAlbumClick: (String) -> Unit
 ) {
+    // El marquee del título es una animación INFINITA, así que se apaga con el reproductor guardado:
+    // el subárbol es persistente (ver [com.qhana.siku.ui.LocalPlayerOnScreen]) y un título largo
+    // desplazándose donde no se ve produce un frame por vsync para nadie. Al reaparecer arranca desde
+    // el principio, que es como se lee mejor de todas formas.
+    val titleMarquee = if (LocalPlayerOnScreen.current) {
+        Modifier.basicMarquee(iterations = Int.MAX_VALUE)
+    } else Modifier
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -543,19 +548,33 @@ internal fun SongInfoSection(
         // 3 líneas (título / artista / álbum): artista y álbum son CLICKEABLES por separado
         // y navegan a sus pantallas de detalle.
         Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+            // JERARQUÍA POR PESO, y no solo por tamaño y color. El título es el rol `*Emphasized`
+            // de Expressive (24sp Medium) y las dos líneas de apoyo son roles `body`, que nacen en
+            // Regular: 500 → 400 → 400.
+            //
+            // Hasta el 19 ago 2026 el apoyo usaba roles `title` (`titleMedium`/`titleSmall`), que
+            // en M3 ya vienen en Medium, así que **las tres líneas eran peso 500** y el bloque no
+            // tenía un solo salto de peso — la jerarquía se sostenía únicamente por tamaño y color.
+            // Se notaba comparándolo con el MiniPlayer, donde el mismo dato sí destaca porque allí
+            // el par es `titleSmallEmphasized` (Bold 700) sobre `bodySmall` (Regular 400).
+            //
+            // Subir el título NO era la salida: la escala de M3 sube el énfasis a Bold solo de
+            // 16sp hacia abajo (`titleMedium`/`titleSmall`/`labelLarge`); de `titleLarge` hacia
+            // arriba el `*Emphasized` se queda en Medium, porque a ese cuerpo la masa óptica ya la
+            // pone el tamaño. La palanca es bajar el apoyo, no engordar el titular.
             Text(
                 text = song.title,
-                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Medium),
-                // EXPERIMENTO: título/artista/álbum en primary/secondary/tertiary.
+                style = MaterialTheme.typography.headlineSmallEmphasized,
+                // Título en primary; artista y álbum en secondary.
                 color = MaterialTheme.colorScheme.primary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE)
+                modifier = titleMarquee
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = song.artist.ifBlank { stringResource(R.string.common_unknown_artist) },
-                style = MaterialTheme.typography.titleMedium,
+                style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.secondary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -567,7 +586,7 @@ internal fun SongInfoSection(
             if (song.album.isNotBlank()) {
                 Text(
                     text = song.album,
-                    style = MaterialTheme.typography.titleSmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.secondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,

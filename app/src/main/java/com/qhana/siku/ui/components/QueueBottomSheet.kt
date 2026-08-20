@@ -20,7 +20,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.ui.model.SongUiModel
@@ -206,10 +205,8 @@ fun QueueBottomSheet(
             // Top Bar
             TopAppBar(
                 title = {
-                    Text(
-                        text = stringResource(R.string.queue_title),
-                        fontWeight = FontWeight.Medium
-                    )
+                    // Sin peso propio: la app bar ya aplica el rol tipográfico de su spec.
+                    Text(text = stringResource(R.string.queue_title))
                 },
                 navigationIcon = {
                     IconButton(onClick = onDismiss) {
@@ -252,13 +249,21 @@ fun QueueBottomSheet(
                     ) { index, song ->
                         val isCurrentSong = index == localCurrentIndex
 
-                        // Shape calculado fuera del ReorderableItem
-                        val shape = rememberListItemShape(index, playlistSize, isCurrentSong)
-
                         ReorderableItem(
                             state = reorderState,
                             key = song.id
                         ) { isDragging ->
+                            // La forma se calcula DENTRO del `ReorderableItem` porque depende de
+                            // `isDragging`: una fila levantada redondea entera (el `draggedShape`
+                            // del spec, ver [rememberReorderableListItemShape]) en vez de conservar las
+                            // esquinas de 4dp con las que encajaba entre unos vecinos que ya no
+                            // tiene debajo.
+                            val shape = rememberReorderableListItemShape(
+                                index = index,
+                                count = playlistSize,
+                                isActive = isCurrentSong,
+                                isDragging = isDragging
+                            )
                             QueueItemRow(
                                 song = song,
                                 isCurrentSong = isCurrentSong,
@@ -453,17 +458,27 @@ private fun QueueItemRow(
     val contentColor = if (isCurrentSong) activeContent else colors.onSurfaceColor
     val variantColor = if (isCurrentSong) activeContent else colors.onSurfaceVariantColor
 
+    // Elevación de arrastre del SPEC, no un número elegido: `ListItemDefaults.elevation()` la
+    // resuelve desde `ListTokens.ItemDraggedContainerElevation` (Level4) y su reposo desde
+    // `ItemContainerElevation` (Level0). Da la casualidad de que el 8dp que había escrito a mano
+    // es justo ese valor — lo que cambia es que ahora sigue al token si Material lo mueve, y que
+    // el 0 de reposo también sale de ahí en vez de estar implícito.
+    val elevation = ListItemDefaults.elevation()
+    val itemElevation = if (isDragging) elevation.draggedElevation else elevation.elevation
+
     // Usar Surface es más eficiente que Modifier.clip().background()
     // Surface maneja el clipping y el dibujo de fondo en una sola pasada de renderizado cuando es posible.
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 1.dp)
-            .then(if (isDragging) Modifier.shadow(8.dp, shape) else Modifier), // Shadow solo si arrastra
+            // La sombra usa la MISMA forma que la Surface, que ahora se interpola al agarrar la
+            // fila: si se le pasara la de reposo, el halo se quedaría con las esquinas viejas.
+            .then(if (isDragging) Modifier.shadow(itemElevation, shape) else Modifier),
         shape = shape,
         color = backgroundColor,
         contentColor = contentColor,
-        tonalElevation = if (isDragging) 8.dp else 0.dp, // Elevación visual
+        tonalElevation = itemElevation,
         onClick = onClick
     ) {
         Row(

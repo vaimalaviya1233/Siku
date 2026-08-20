@@ -113,11 +113,15 @@ interface ISongRepository {
     /** Suma el historial de la perdedora a la ganadora (playCount + lastPlayedAt más reciente). */
     suspend fun mergePlayStats(loserId: String, winnerId: String)
 
-    // Visibilidad de los chips de origen: qué familias de canciones EXISTEN en la biblioteca.
+    // Visibilidad de todo lo que habla de ORIGEN: qué contiene la biblioteca de verdad.
     /** ¿Hay canciones de la fuente local? */
     fun hasLocalSongsFlow(): Flow<Boolean>
-    /** ¿Hay canciones de nube (descargadas o no)? */
-    fun hasCloudSongsFlow(): Flow<Boolean>
+    /**
+     * ¿Está la biblioteca partida entre lo que suena sin red y lo que la necesita? Ver
+     * [SongDao.buildSourceSplitQuery]: es la puerta de los chips de origen y de las acciones de
+     * origen del inicio, que aparecen y desaparecen JUNTAS por este mismo valor.
+     */
+    fun hasSourceSplitFlow(): Flow<Boolean>
     suspend fun upsertSongs(songs: List<Song>): AppResult<Int>
     suspend fun getSongsNeedingMetadataOrDownload(limit: Int = 50, offset: Int = 0): List<Song>
 

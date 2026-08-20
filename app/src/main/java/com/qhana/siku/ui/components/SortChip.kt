@@ -5,7 +5,6 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.DropdownMenuGroup
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.DropdownMenuPopup
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorPosition
 import androidx.compose.material3.MenuDefaults
@@ -18,6 +17,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
 
@@ -26,7 +27,7 @@ import com.qhana.siku.R
  * (`SortMenuIconButton`, ya eliminado — sin corchetes, que sugieren un símbolo al que se puede ir)
  * para unificar Todas/Artistas/Álbumes: las tres
  * pantallas llevan sus controles como chips en la fila sobre el contenido. Muestra el
- * criterio activo ("Ordenar: Nombre ▾") y abre el mismo menú al tocarlo. Relleno tonal
+ * criterio activo ("Nombre ▾") y abre el mismo menú al tocarlo. Relleno tonal
  * (secondaryContainer), igual que el chip de conteo y los de origen.
  *
  * @param options pares (string resource del label, valor) en el orden del menú.
@@ -39,16 +40,18 @@ fun <T> SortChip(
 ) {
     var showMenu by remember { mutableStateOf(false) }
     val currentLabelRes = options.firstOrNull { it.second == current }?.first
+    val currentLabel = if (currentLabelRes != null) stringResource(currentLabelRes) else ""
+    // El chip muestra SOLO el criterio: el "Ordenar:" ya lo dice el leadingIcon `sort`, y sumado al
+    // criterio se pasaba de los 20 caracteres que Material fija como tope del label de un chip
+    // ("Ordenar: Escuchadas recientemente" = 33) — dentro de la FlowRow eso es un chip que se lleva
+    // una fila entera para él solo. El prefijo SOBREVIVE como contentDescription: lo que en
+    // pantalla resuelve el icono, para un lector de pantalla no lo resuelve nadie.
+    val chipDescription = stringResource(R.string.sort_chip_label, currentLabel)
     Box {
         AssistChip(
             onClick = { showMenu = true },
-            label = {
-                Text(
-                    if (currentLabelRes != null)
-                        stringResource(R.string.sort_chip_label, stringResource(currentLabelRes))
-                    else stringResource(R.string.sort_chip_label, "")
-                )
-            },
+            modifier = Modifier.semantics { contentDescription = chipDescription },
+            label = { Text(currentLabel) },
             leadingIcon = { MaterialSymbol("sort", size = 18.sp) },
             trailingIcon = { MaterialSymbol("arrow_drop_down", size = 18.sp) },
             colors = AssistChipDefaults.assistChipColors(
@@ -59,7 +62,8 @@ fun <T> SortChip(
             ),
             border = null
         )
-        // Menú SEGMENTADO de M3 Expressive = `DropdownMenuPopup` + `DropdownMenuGroup`. No basta
+        // Menú SEGMENTADO de M3 Expressive = `AppMenuPopup` (nuestro `DropdownMenuPopup`, ver su
+        // kdoc) + `DropdownMenuGroup`. No basta
         // con dar forma a los items: `DropdownMenu` es el contenedor CLÁSICO (`MenuTokens`) y
         // mete los items en una superficie única, así que items con forma dentro de él no son ni
         // una cosa ni la otra. El grupo es quien aporta el contenedor `SegmentedMenuTokens`.
@@ -78,7 +82,7 @@ fun <T> SortChip(
         // `topToAnchorTop` → arranca justo debajo), sin depender de que otro no quepa. `Start` y
         // `BottomEnd` se espejan juntos en RTL, así que el menú sigue saliendo del lado del chip.
         Box(modifier = Modifier.align(Alignment.BottomEnd)) {
-            DropdownMenuPopup(
+            AppMenuPopup(
                 expanded = showMenu,
                 onDismissRequest = { showMenu = false },
                 popupPositionProvider = MenuDefaults.rememberDropdownMenuPopupPositionProvider(

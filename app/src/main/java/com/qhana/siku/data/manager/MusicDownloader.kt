@@ -1,7 +1,6 @@
 package com.qhana.siku.data.manager
 
 import android.content.Context
-import android.media.MediaMetadataRetriever
 import android.os.BatteryManager
 import android.os.StatFs
 import android.util.Log
@@ -9,11 +8,12 @@ import com.qhana.siku.R
 import com.qhana.siku.data.config.AppConfig
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.remote.HttpStatus
-import com.qhana.siku.data.repository.ArtworkRepository
 import com.qhana.siku.data.repository.IMusicRepository
 import com.qhana.siku.data.util.NetworkManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -21,12 +21,20 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import java.io.File
+import java.io.IOException
+import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 import java.util.Locale
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
@@ -36,8 +44,8 @@ import javax.inject.Singleton
 /**
  * Componente especializado en la descarga y procesamiento de archivos de música.
  * Encapsula la lógica de:
- * 1. Descarga HTTP (con soporte para rangos parciales si se requiere).
- * 2. Gestión de archivos temporales y finales.
+ * 1. Descarga HTTP reanudable y divisible por tramos (`Range`).
+ * 2. Gestión de archivos parciales y finales.
  * 3. Extracción de Metadatos (Duración, Artista, Album).
  * 4. Extracción de Carátulas incrustadas.
  * 5. Actualización de la Base de Datos.
@@ -68,6 +76,19 @@ class MusicDownloader @Inject constructor(
         private const val PROGRESS_EMIT_INTERVAL_MS = 250L
         private const val MIN_BATTERY_LEVEL = 20
         private const val MIN_DISK_SPACE_BYTES = 50L * 1024 * 1024 // 50MB mínimo
+
+        /**
+         * Nombres de los dos archivos de una descarga a medias: los bytes y el estado.
+         *
+         * NO llevan la extensión del audio a propósito (antes era `<id>.<ext>.tmp`): la extensión
+         * sale del `Content-Type` de la respuesta, así que no se conoce hasta haber pedido el
+         * archivo — y para buscar un parcial que reanudar hay que saber su nombre ANTES de pedir
+         * nada. Con la extensión dentro, además, un `Content-Type` distinto entre dos intentos
+         * dejaba huérfano el parcial del anterior.
+         */
+        private const val PART_SUFFIX = ".part"
+        private const val META_SUFFIX = ".meta"
+
         // Stall detector: si no llegan bytes nuevos en este tiempo, abortar la descarga.
         // Cubre TCP half-open (FIN packet perdido), URL OneDrive expirada mid-stream,
         // o cualquier estancamiento que el `readTimeout(5min)` de OkHttp tarda en detectar.
@@ -91,6 +112,36 @@ class MusicDownloader @Inject constructor(
          * cuelgue llegaría como una IOException genérica.
          */
         internal const val SOCKET_IDLE_TIMEOUT_MS = STALL_TIMEOUT_MS * 2
+
+        /**
+         * Tramo mínimo que se le deja a una conexión nueva al partir una descarga en dos.
+         *
+         * Sale de la tasa por conexión que OneDrive concede (~0.5 MB/s): por debajo de esto el
+         * tramo se acaba en menos de diez segundos, o sea del orden de lo que cuesta abrir la
+         * conexión y su handshake TLS, y partir deja de compensar.
+         */
+        private const val MIN_SPLIT_BYTES = 4L * 1024 * 1024
+
+        /**
+         * Tope de conexiones simultáneas contra el MISMO archivo. No es el presupuesto global —de
+         * ese se encarga [ExtraConnectionBudget]— sino el reconocimiento de que el reparto tiene
+         * rendimientos decrecientes: a partir de aquí el cuello de botella deja de ser el cap por
+         * conexión y pasa a ser el enlace, y lo único que se gana son más sockets que vigilar.
+         */
+        private const val MAX_SEGMENTS_PER_DOWNLOAD = 8
+
+        /** Cada cuánto se mira si sobra una conexión que sumar a esta descarga. */
+        private const val SEGMENT_CHECK_INTERVAL_MS = 2_000L
+
+        /**
+         * Cada cuánto se vuelca a disco el estado de la descarga.
+         *
+         * Es el tamaño del paso atrás que se da si el PROCESO muere sin avisar (a las descargas que
+         * terminan por error las salva el volcado del `catch`, que es exacto). Cinco segundos son
+         * ~2,5 MB por conexión: barato de rehacer y lo bastante espaciado como para que el `force`
+         * del canal no compita con la escritura de los bytes.
+         */
+        private const val META_FLUSH_INTERVAL_MS = 5_000L
 
         private val KNOWN_AUDIO_EXTENSIONS = setOf(
             "flac", "mp3", "m4a", "wav", "ogg", "opus", "aac", "wma", "aif", "aiff", "ape", "wv"
@@ -148,11 +199,24 @@ class MusicDownloader @Inject constructor(
 
     /**
      * Fase 1: descarga el archivo a disco. No analiza ni toca la BD.
+     *
+     * **La descarga es reanudable y divisible**, y las dos cosas salen de lo mismo: los bytes van a
+     * `<id>.part` y lo que falta se anota en `<id>.part.meta` ([PartialDownloadState]). Antes se
+     * bajaba de un tirón a un `.tmp` que el `catch` borraba, así que un corte al 99 % de un FLAC de
+     * 600 MB tiraba los 600 MB y volvía a empezar de cero — con el watchdog anti-stall disparándose
+     * otra vez en el mismo sitio, que es exactamente lo que se observó en un sync masivo real
+     * (558 MB perdidos en una sola canción). Ahora ese mismo corte cuesta lo que va del último
+     * tramo.
+     *
+     * [budget] permite ADEMÁS traerse el archivo por varios tramos a la vez cuando sobran
+     * conexiones (ver [ExtraConnectionBudget]); sin él, o si el servidor no honra `Range`, se
+     * comporta como una descarga secuencial normal.
      */
     suspend fun downloadFile(
         song: Song,
         downloadUrl: String? = null,
         isPriority: Boolean = false,
+        budget: ExtraConnectionBudget? = null,
         onProgress: (Float) -> Unit = {}
     ): DownloadStage = withContext(Dispatchers.IO) {
         if (!networkManager.isAvailable()) {
@@ -170,208 +234,575 @@ class MusicDownloader @Inject constructor(
         val url = downloadUrl ?: song.path
         if (url.isEmpty()) return@withContext DownloadStage.Error(context.getString(R.string.dl_err_empty_url))
 
+        // Ya está bajado (con cualquier extensión): ni red ni re-análisis. Cubre además la
+        // idempotencia que antes se comprobaba a mitad de la descarga, cuando ya se conocía el
+        // nombre final — aquí no hace falta esperar al Content-Type para saberlo.
+        findExistingDownload(song.id, song.size)?.let { existing ->
+            onProgress(1f)
+            return@withContext DownloadStage.Success(existing)
+        }
+
         val baseName = song.id
-        var tempFile: File? = null
+        val musicDir = File(context.filesDir, "music")
+        if (!musicDir.exists()) musicDir.mkdirs()
+        val partFile = File(musicDir, "$baseName$PART_SUFFIX")
+        val metaFile = File(musicDir, "$baseName$PART_SUFFIX$META_SUFFIX")
+
+        // Path-traversal check: defensa en profundidad. Aunque baseName=song.id es controlado por
+        // nosotros, validamos que la ruta resuelta no escape del sandbox antes de abrir nada.
+        try {
+            val safeDir = context.filesDir.canonicalPath
+            if (!partFile.canonicalPath.startsWith(safeDir)) {
+                return@withContext DownloadStage.Error("Path traversal detectado: ${partFile.path}", kind = ErrorKind.PERMANENT)
+            }
+        } catch (e: Exception) {
+            return@withContext DownloadStage.Error(
+                context.getString(R.string.dl_err_path_validation, e.message), exception = e, kind = ErrorKind.PERMANENT
+            )
+        }
+
+        runSegmentedDownload(song, url, isPriority, budget, partFile, metaFile, onProgress)
+    }
+
+    /**
+     * El cuerpo de [downloadFile] una vez resueltas las precondiciones y las rutas.
+     *
+     * Va aparte porque aquí conviven cuatro corrutinas auxiliares (watchdog, guardia de red,
+     * volcado del sidecar y expansor de conexiones) más los tramos en vuelo; mezclarlo con los
+     * chequeos previos hacía imposible seguir dónde empieza y acaba cada una.
+     */
+    private suspend fun runSegmentedDownload(
+        song: Song,
+        url: String,
+        isPriority: Boolean,
+        budget: ExtraConnectionBudget?,
+        partFile: File,
+        metaFile: File,
+        onProgress: (Float) -> Unit
+    ): DownloadStage {
         val wasStalled = AtomicBoolean(false)
         // La red pasó a medida a mitad de esta descarga (solo aplica al pipeline masivo).
         val wentMetered = AtomicBoolean(false)
 
+        // Todas las llamadas vivas de esta descarga. Cancelarlas es lo ÚNICO que rompe un `read`
+        // bloqueado EN EL ACTO: cerrar el InputStream desde otro hilo NO lo hace, aunque el
+        // comentario de la versión anterior lo diera por hecho. Medido en logcat durante un sync
+        // masivo: stall detectado a las 13:29:27 y error reportado a las 13:30:26, o sea los 60 s
+        // que tardó el `readTimeout` del socket en resolver lo que el watchdog ya sabía.
+        val calls = CopyOnWriteArrayList<Call>()
+        fun abortAllCalls() = calls.forEach { runCatching { it.cancel() } }
+
+        // Qué conexión lleva cada tramo, para que el watchdog pueda cortar SOLO la que se colgó.
+        // Por IDENTIDAD, igual que `inProgress`: tras un split dos tramos pueden compartir números.
+        val segmentCalls = java.util.IdentityHashMap<DownloadSegment, Call>()
+        val segmentCallsLock = Any()
+        fun bindCall(segment: DownloadSegment, call: Call) = synchronized(segmentCallsLock) {
+            segmentCalls[segment] = call
+        }
+        fun cancelCallOf(segment: DownloadSegment) {
+            val call = synchronized(segmentCallsLock) { segmentCalls[segment] } ?: return
+            runCatching { call.cancel() }
+        }
+
+        var borrowedConnections = 0
+        var state: PartialDownloadState? = null
+        var randomAccess: RandomAccessFile? = null
+
+        /**
+         * Deja el sidecar al día con lo que hay escrito de verdad. El `force` va ANTES de escribirlo
+         * para que el sidecar nunca prometa más bytes de los que están en disco: al revés, un corte
+         * de corriente dejaría un hueco de basura en mitad del audio, y un hueco no lo detecta el
+         * control de tamaño del final.
+         */
+        fun flushPartial() {
+            val snapshot = state ?: return
+            if (snapshot.totalBytes <= 0L || snapshot.validator == null) return
+            runCatching { randomAccess?.channel?.force(false) }
+            runCatching { metaFile.writeText(snapshot.serialize()) }
+        }
+
         try {
-            val request = Request.Builder().url(url).build()
+            // --- Apertura: descubre tamaño, validador y tipo, y deja lista la primera conexión ---
+            // Sin validador NO se reanuda: sin `ETag`/`Last-Modified` que poner en `If-Range` no hay
+            // forma de saber si los bytes del disco pertenecen al mismo archivo que el servidor va a
+            // seguir mandando, y pegar dos versiones distintas da un audio corrupto que ningún
+            // control de tamaño detecta.
+            val resumable = PartialDownloadState.load(metaFile, partFile)?.takeIf { it.validator != null }
+            val firstGap = resumable?.segments?.firstOrNull { !it.isComplete }
 
-            return@withContext okHttpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    // 408/5xx (transporte) y 429 (throttle) son recuperables; el resto de 4xx solo
-                    // se arregla con URL fresca (lo maneja runDownloadWithRetry) — si reincide, es
-                    // permanente. El 429 se compone EXPLÍCITO porque `isRetriableTransport` lo deja
-                    // fuera a propósito (ver [HttpStatus]): aquí sí entra, porque no se reintenta en
-                    // caliente sino que se reprograma con el `nextRetryAt` de la cola persistente,
-                    // que es justo esperar en vez de insistir.
-                    //
-                    // Aquí NO hace falta distinguir el 503-throttle del 503-caído como en la ruta de
-                    // Graph: los dos son transitorios y acaban en la misma cola. Y esta petición va
-                    // contra el host de CONTENIDO con una URL firmada, que no comparte el throttling
-                    // de la API.
-                    val kind = if (HttpStatus.isRetriableTransport(response.code) ||
-                        response.code == HttpStatus.TOO_MANY_REQUESTS
-                    ) {
-                        ErrorKind.TRANSIENT
-                    } else {
-                        ErrorKind.PERMANENT
+            // La conexión de apertura acaba sirviendo al tramo BASE, pero ese tramo todavía no
+            // existe aquí (depende de lo que conteste el servidor), así que se guarda para atarla
+            // en cuanto se sepa. Sin el vínculo, el watchdog no podría cortar esa conexión sola.
+            var openingCall: Call? = null
+            var opening = openRange(
+                url = url,
+                from = firstGap?.nextByte ?: 0L,
+                toInclusive = firstGap?.let { it.endExclusive - 1 },
+                ifRange = resumable?.validator,
+                onCall = { calls.add(it); openingCall = it }
+            )
+
+            if (!opening.isSuccessful) {
+                val code = opening.code
+                val message = opening.message
+                opening.close()
+                // 408/5xx (transporte) y 429 (throttle) son recuperables; el resto de 4xx solo
+                // se arregla con URL fresca (lo maneja runDownloadWithRetry) — si reincide, es
+                // permanente. El 429 se compone EXPLÍCITO porque `isRetriableTransport` lo deja
+                // fuera a propósito (ver [HttpStatus]): aquí sí entra, porque no se reintenta en
+                // caliente sino que se reprograma con el `nextRetryAt` de la cola persistente,
+                // que es justo esperar en vez de insistir.
+                //
+                // Aquí NO hace falta distinguir el 503-throttle del 503-caído como en la ruta de
+                // Graph: los dos son transitorios y acaban en la misma cola. Y esta petición va
+                // contra el host de CONTENIDO con una URL firmada, que no comparte el throttling
+                // de la API.
+                //
+                // El parcial NO se toca: un 4xx suele ser la URL firmada caducada, y los bytes ya
+                // bajados siguen valiendo para cuando el caller vuelva con una URL fresca.
+                val kind = if (HttpStatus.isRetriableTransport(code) || code == HttpStatus.TOO_MANY_REQUESTS) {
+                    ErrorKind.TRANSIENT
+                } else {
+                    ErrorKind.PERMANENT
+                }
+                return DownloadStage.Error("HTTP $code: $message", httpCode = code, kind = kind)
+            }
+
+            val contentType = opening.header("Content-Type")
+            // Content-Type validation: si OneDrive devuelve una página de error en vez
+            // del audio (HTML/JSON), abortamos antes de escribir basura a disco.
+            // Locale.ROOT: normalización de datos de protocolo. Sin él, en locale turco/azerí
+            // "APPLICATION/JSON".lowercase() da "applıcatıon/json" (i sin punto) y el startsWith falla.
+            val ctLower = contentType?.lowercase(Locale.ROOT)
+            if (ctLower != null && (ctLower.startsWith("text/") || ctLower.startsWith("application/json"))) {
+                opening.close()
+                return DownloadStage.Error(context.getString(R.string.dl_err_content_type, contentType))
+            }
+            val extension = determineExtension(contentType, url, song.title)
+
+            // Se reanuda solo si TODO encaja: el servidor honró el rango, el archivo mide lo mismo
+            // que cuando se guardó el sidecar y el cuerpo empieza justo donde se quedó. Cualquier
+            // discrepancia se trata como archivo nuevo, que siempre es correcto (solo cuesta red).
+            val resumed = resumable != null && firstGap != null &&
+                opening.code == HttpStatus.PARTIAL_CONTENT &&
+                parseContentRangeTotal(opening.header("Content-Range")) == resumable.totalBytes &&
+                parseContentRangeStart(opening.header("Content-Range")) == firstGap.nextByte
+
+            val current: PartialDownloadState
+            val baseSegment: DownloadSegment
+            if (resumed) {
+                current = resumable!!
+                baseSegment = firstGap!!
+                Log.i(TAG, "Reanudando ${song.title}: ${current.downloadedBytes}/${current.totalBytes} bytes ya en disco")
+            } else {
+                if (resumable != null) {
+                    Log.i(TAG, "El parcial de ${song.title} ya no encaja (HTTP ${opening.code}); se baja desde cero")
+                }
+                PartialDownloadState.discard(partFile, metaFile)
+                // Si se pidió un rango que arranca a mitad y se decidió NO reanudar, este cuerpo no
+                // sirve: empieza donde iba el parcial y el plan ahora es llenar el archivo desde el
+                // byte 0. Escribirlo tal cual metería el trozo equivocado al principio, y el
+                // resultado pasaría todos los controles de tamaño. Se cierra y se vuelve a pedir.
+                if (parseContentRangeStart(opening.header("Content-Range")) > 0L) {
+                    opening.close()
+                    opening = openRange(url, from = 0L, toInclusive = null, ifRange = null, onCall = { calls.add(it); openingCall = it })
+                    if (!opening.isSuccessful) {
+                        val code = opening.code
+                        opening.close()
+                        return DownloadStage.Error("HTTP $code al reabrir desde cero", httpCode = code)
                     }
-                    return@use DownloadStage.Error("HTTP ${response.code}: ${response.message}", httpCode = response.code, kind = kind)
                 }
-
-                val contentType = response.header("Content-Type")
-                // Content-Type validation: si OneDrive devuelve una página de error en vez
-                // del audio (HTML/JSON), abortamos antes de escribir basura a disco.
-                // Locale.ROOT: normalización de datos de protocolo. Sin él, en locale turco/azerí
-                // "APPLICATION/JSON".lowercase() da "applıcatıon/json" (i sin punto) y el startsWith falla.
-                val ctLower = contentType?.lowercase(Locale.ROOT)
-                if (ctLower != null && (ctLower.startsWith("text/") || ctLower.startsWith("application/json"))) {
-                    return@use DownloadStage.Error(context.getString(R.string.dl_err_content_type, contentType))
+                val total = if (opening.code == HttpStatus.PARTIAL_CONTENT) {
+                    parseContentRangeTotal(opening.header("Content-Range"))
+                } else {
+                    opening.body?.contentLength() ?: -1L
                 }
-                val extension = determineExtension(contentType, url, song.title)
+                // Sin tamaño no hay tramos que repartir ni sidecar que escribir: se copia el cuerpo
+                // tal cual. `Long.MAX_VALUE` no es un centinela caprichoso — es "acepta todo lo que
+                // venga", que es literalmente el contrato de un cuerpo sin longitud declarada.
+                baseSegment = DownloadSegment(0L, if (total > 0L) total else Long.MAX_VALUE)
+                current = PartialDownloadState(
+                    validator = opening.header("ETag") ?: opening.header("Last-Modified"),
+                    totalBytes = total,
+                    segments = listOf(baseSegment)
+                )
+            }
+            // El servidor sirve rangos: es lo que habilita reanudar y repartir en tramos.
+            val servedRange = opening.code == HttpStatus.PARTIAL_CONTENT
+            state = current
+            val totalBytes = current.totalBytes
+            // Partir el archivo exige las tres cosas: que el servidor sirva rangos, saber cuánto
+            // mide y tener con qué validar que sigue siendo el mismo archivo en cada conexión.
+            val canSegment = servedRange && totalBytes > 0L && current.validator != null
 
-                val fileName = "$baseName.$extension"
-                val musicDir = File(context.filesDir, "music")
-                if (!musicDir.exists()) musicDir.mkdirs()
+            val file = RandomAccessFile(partFile, "rw")
+            randomAccess = file
+            val fileChannel: FileChannel = file.channel
 
-                val targetFile = File(musicDir, fileName)
-                // Capturamos en un val no-null para evitar `!!` en los usos siguientes;
-                // el outer var `tempFile` se mantiene para la limpieza en el catch.
-                val tmpFile = File(musicDir, "$fileName.tmp")
-                tempFile = tmpFile
+            // --- Progreso ---
+            // Dos hilos pueden cruzarse aquí y emitir dos veces el mismo valor; es inofensivo (el
+            // consumidor solo pinta una barra) y evita un lock en el camino de cada buffer.
+            val lastEmitAt = AtomicLong(0L)
+            val lastEmitted = AtomicLong(current.downloadedBytes)
+            fun emitProgress(force: Boolean) {
+                if (totalBytes <= 0L) return
+                val done = current.downloadedBytes
+                val now = System.currentTimeMillis()
+                val byPercent = (done - lastEmitted.get()).toFloat() / totalBytes >= PROGRESS_EMIT_STEP
+                val byTime = now - lastEmitAt.get() >= PROGRESS_EMIT_INTERVAL_MS
+                if (force || byPercent || byTime) {
+                    lastEmitted.set(done)
+                    lastEmitAt.set(now)
+                    onProgress((done.toFloat() / totalBytes).coerceIn(0f, 1f))
+                }
+            }
+            // El primer aviso sale ya: al reanudar, la barra debe aparecer donde se quedó y no
+            // volver a cero (que es justo el síntoma que este rediseño elimina).
+            emitProgress(force = true)
 
-                // Path-traversal check: defensa en profundidad. Aunque baseName=song.id es
-                // controlado por nosotros, validamos que las rutas resueltas no escapen del
-                // sandbox de la app antes de abrir ningún FileOutputStream.
+            // --- Reparto de tramos ---
+            // `inProgress` va por IDENTIDAD: dos tramos distintos pueden tener los mismos números
+            // tras un split y aun así ser objetos diferentes con dueños diferentes.
+            val inProgress = java.util.Collections.newSetFromMap(
+                java.util.IdentityHashMap<DownloadSegment, Boolean>()
+            )
+            val schedulerLock = Any()
+
+            fun claimNext(): DownloadSegment? = synchronized(schedulerLock) {
+                // Primero lo que ya está pendiente y sin dueño: son los huecos que dejó el intento
+                // anterior, y bajarlos no cuesta abrir nada nuevo.
+                val idle = current.segments.firstOrNull { !it.isComplete && it !in inProgress }
+                if (idle != null) {
+                    inProgress.add(idle)
+                    return@synchronized idle
+                }
+                if (!canSegment || current.segments.size >= MAX_SEGMENTS_PER_DOWNLOAD) {
+                    return@synchronized null
+                }
+                val victim = current.segments
+                    .filter { it in inProgress }
+                    .maxByOrNull { it.pending } ?: return@synchronized null
+                val tail = victim.split(MIN_SPLIT_BYTES) ?: return@synchronized null
+                current.addSegment(tail)
+                inProgress.add(tail)
+                tail
+            }
+
+            fun releaseSegment(segment: DownloadSegment) = synchronized(schedulerLock) {
+                inProgress.remove(segment)
+            }
+
+            fun hasSplittableWork(): Boolean = synchronized(schedulerLock) {
+                canSegment && current.segments.size < MAX_SEGMENTS_PER_DOWNLOAD &&
+                    current.segments.any { it.pending >= MIN_SPLIT_BYTES * 2 }
+            }
+
+            suspend fun runSegment(segment: DownloadSegment, preOpened: Response?) {
+                // El tramo es de este worker y está parado: alinear la marca de reserva con lo
+                // escrito de verdad es lo que garantiza que los bytes que lleguen se coloquen justo
+                // donde se van a pedir (ver `rewindToConfirmed`).
+                segment.rewindToConfirmed()
+                val response = preOpened ?: run {
+                    val fresh = openRange(url, segment.nextByte, segment.endExclusive - 1, current.validator) { call ->
+                        calls.add(call)
+                        bindCall(segment, call)
+                    }
+                    // Un 200 aquí sería el archivo entero desde el byte 0: no encaja en un tramo
+                    // que empieza más adelante, así que se descarta en vez de escribirlo torcido.
+                    if (!fresh.isSuccessful || fresh.code != HttpStatus.PARTIAL_CONTENT) {
+                        val code = fresh.code
+                        fresh.close()
+                        throw IOException("Tramo ${segment.start} rechazado: HTTP $code")
+                    }
+                    fresh
+                }
                 try {
-                    val safeDir = context.filesDir.canonicalPath
-                    if (!targetFile.canonicalPath.startsWith(safeDir) || !tmpFile.canonicalPath.startsWith(safeDir)) {
-                        return@use DownloadStage.Error("Path traversal detectado: ${targetFile.path}", kind = ErrorKind.PERMANENT)
-                    }
-                } catch (e: Exception) {
-                    return@use DownloadStage.Error(context.getString(R.string.dl_err_path_validation, e.message), exception = e, kind = ErrorKind.PERMANENT)
-                }
-
-                // Idempotencia: si ya existe con el tamaño esperado, asumimos éxito previo.
-                // Un resto truncado de una corrida anterior se borra y se re-descarga.
-                if (targetFile.exists() && targetFile.length() > 0) {
-                    if (looksTruncated(targetFile.length(), song.size)) {
-                        Log.w(TAG, "Archivo previo truncado (${targetFile.length()}/${song.size} bytes) para ${song.title}, re-descargando")
-                        targetFile.delete()
-                    } else {
-                        onProgress(1.0f)
-                        return@use DownloadStage.Success(targetFile)
-                    }
-                }
-
-                val totalBytes = response.body?.contentLength() ?: -1L
-                val bytesCopiedAtomic = AtomicLong(0L)
-                var lastProgress = 0f
-                var lastProgressEmitAt = 0L
-
-                val body = response.body ?: return@use DownloadStage.Error(context.getString(R.string.dl_err_empty_body))
-                val inputStream = body.byteStream()
-
-                coroutineScope {
-                    val watchdog = launch {
-                        var lastBytes = 0L
-                        var lastProgressAt = System.currentTimeMillis()
-                        while (isActive) {
-                            delay(STALL_CHECK_INTERVAL_MS)
-                            val current = bytesCopiedAtomic.get()
-                            val now = System.currentTimeMillis()
-                            if (current > lastBytes) {
-                                lastBytes = current
-                                lastProgressAt = now
-                            } else if (now - lastProgressAt > STALL_TIMEOUT_MS) {
-                                Log.w(TAG, "Stall detected for ${song.title}: no progress in ${STALL_TIMEOUT_MS / 1000}s at $current bytes")
-                                wasStalled.set(true)
-                                try { inputStream.close() } catch (_: Exception) {}
-                                break
-                            }
+                    val input = response.body?.byteStream()
+                        ?: throw IOException(context.getString(R.string.dl_err_empty_body))
+                    val buffer = ByteArray(IO_BUFFER_SIZE)
+                    var trimmed = false
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        if (read == 0) continue
+                        val (position, accepted) = segment.reserve(read)
+                        if (accepted <= 0) {
+                            trimmed = true
+                            break
+                        }
+                        val slice = ByteBuffer.wrap(buffer, 0, accepted)
+                        var written = 0
+                        while (slice.hasRemaining()) {
+                            written += fileChannel.write(slice, position + written)
+                        }
+                        // `confirm` sella además la marca de avance del tramo, que es lo que mira
+                        // el watchdog (ver su bloque más abajo).
+                        segment.confirm(accepted)
+                        emitProgress(force = false)
+                        // Lo que sobra ya pertenece a otro tramo (un split concurrente recortó
+                        // este): se descarta y lo pedirá su nuevo dueño.
+                        if (accepted < read) {
+                            trimmed = true
+                            break
                         }
                     }
-
-                    // Corte por cambio de red, con el MISMO mecanismo que el watchdog: cerrar el
-                    // stream desde fuera es lo único que rompe un `read` bloqueante en el acto.
-                    // Cancelar la corrutina no bastaría — la lectura no es interrumpible y
-                    // seguiría consumiendo datos hasta que el socket muriera por timeout.
-                    //
-                    // Solo para el pipeline masivo: una descarga prioritaria es la canción que
-                    // el usuario está escuchando, y esa sí está permitida con datos móviles.
-                    val networkGuard = if (isPriority) null else launch {
-                        networkManager.status.first { !it.isUnmetered }
-                        Log.i(TAG, "Red medida durante la descarga de ${song.title}, abortando")
-                        wentMetered.set(true)
-                        try { inputStream.close() } catch (_: Exception) {}
+                    if (totalBytes <= 0L) {
+                        // Sin longitud declarada, el fin del cuerpo ES el fin del archivo.
+                        segment.sealAtWritten()
+                    } else if (!trimmed && !segment.isComplete) {
+                        // El cuerpo terminó "limpio" antes de tiempo: es el truncado silencioso que
+                        // de otro modo se consagraría como archivo bueno.
+                        throw IOException("Tramo incompleto $segment")
                     }
+                } finally {
+                    response.close()
+                }
+            }
 
+            suspend fun worker(firstResponse: Response?) {
+                var pendingResponse = firstResponse
+                var next: DownloadSegment? = if (firstResponse != null) baseSegment else claimNext()
+                while (true) {
+                    val segment = next ?: break
                     try {
-                        inputStream.use { input ->
-                            tmpFile.outputStream().use { output ->
-                                val buffer = ByteArray(IO_BUFFER_SIZE)
-                                var bytes = input.read(buffer)
+                        runSegment(segment, pendingResponse)
+                    } finally {
+                        pendingResponse = null
+                        releaseSegment(segment)
+                    }
+                    next = claimNext()
+                }
+            }
 
-                                while (bytes >= 0) {
-                                    output.write(buffer, 0, bytes)
-                                    val currentBytes = bytesCopiedAtomic.addAndGet(bytes.toLong())
+            synchronized(schedulerLock) { inProgress.add(baseSegment) }
+            openingCall?.let { bindCall(baseSegment, it) }
 
-                                    if (totalBytes > 0) {
-                                        val currentProgress = currentBytes.toFloat() / totalBytes.toFloat()
-                                        val now = System.currentTimeMillis()
-                                        // Lo que ocurra antes, y siempre al 100%: ver
-                                        // PROGRESS_EMIT_STEP y PROGRESS_EMIT_INTERVAL_MS.
-                                        val byPercent = currentProgress - lastProgress >= PROGRESS_EMIT_STEP
-                                        val byTime = now - lastProgressEmitAt >= PROGRESS_EMIT_INTERVAL_MS
-                                        val isFinal = currentBytes == totalBytes
-                                        if (byPercent || byTime || isFinal) {
-                                            onProgress(currentProgress)
-                                            lastProgress = currentProgress
-                                            lastProgressEmitAt = now
-                                        }
-                                    }
+            coroutineScope {
+                val scope = this
 
-                                    bytes = input.read(buffer)
+                // Watchdog anti-stall, POR TRAMO.
+                //
+                // Vigilaba el caudal AGREGADO de la descarga (`bytesThisRun`), y con los tramos
+                // paralelos eso dejó de significar lo que decía: mientras cualquiera de las cuatro
+                // conexiones avance, el total sube y una colgada pasa inadvertida. Solo se detectaba
+                // al quedarse sola, hasta un minuto tarde, y el corte se llevaba entonces a las tres
+                // que sí iban bien. Cada tramo lleva ahora su propia marca de avance
+                // ([DownloadSegment.lastProgressAtMs]) y se vigilan uno a uno.
+                //
+                // Qué se hace al encontrar uno depende de si queda con quién seguir:
+                //
+                //  · Con OTROS tramos vivos se corta SOLO su conexión. Si el colgado era un tramo
+                //    EXTRA, su `runCatching` absorbe el corte, el trozo queda sin dueño —un estado que
+                //    `claimNext` ya sabe recoger— y la descarga sigue por las demás conexiones. Si era
+                //    el tramo BASE, su excepción sube y termina la descarga igual que cualquier fallo
+                //    suyo; la ganancia entonces no es seguir, sino enterarse a tiempo en vez de un
+                //    minuto después. En los dos casos lo escrito se conserva en el `.part`.
+                //  · Si era el ÚLTIMO, la descarga entera está parada: eso sí es el stall de siempre,
+                //    con su `wasStalled` y su corte general.
+                //
+                // `markActive()` tras cortar no es un parche: entre `cancel()` y el `finally` que lo
+                // saca de `inProgress` pasan unos milisegundos, y sin refrescar la marca la vuelta
+                // siguiente lo vería igual de parado y podría contarlo como "el último".
+                val watchdog = launch {
+                    while (isActive) {
+                        delay(STALL_CHECK_INTERVAL_MS)
+                        val now = System.currentTimeMillis()
+                        val stalled = synchronized(schedulerLock) {
+                            val victim = inProgress.firstOrNull {
+                                now - it.lastProgressAtMs > STALL_TIMEOUT_MS
+                            }
+                            victim?.let { it to inProgress.size }
+                        } ?: continue
+                        val (segment, activeSegments) = stalled
+                        if (activeSegments > 1) {
+                            Log.w(TAG, "Tramo colgado en ${song.title} (${segment.start}): se corta esa conexión, siguen ${activeSegments - 1}")
+                            cancelCallOf(segment)
+                            segment.markActive()
+                        } else {
+                            Log.w(TAG, "Stall detected for ${song.title}: no progress in ${STALL_TIMEOUT_MS / 1000}s at ${current.downloadedBytes} bytes")
+                            wasStalled.set(true)
+                            abortAllCalls()
+                            break
+                        }
+                    }
+                }
+
+                // Corte por cambio de red, con el MISMO mecanismo que el watchdog. Cancelar la
+                // corrutina no bastaría: la lectura no es interrumpible y seguiría consumiendo
+                // datos hasta que el socket muriera por timeout.
+                //
+                // Solo para el pipeline masivo: una descarga prioritaria es la canción que el
+                // usuario está escuchando, y esa sí está permitida con datos móviles.
+                val networkGuard = if (isPriority) null else launch {
+                    networkManager.status.first { !it.isUnmetered }
+                    Log.i(TAG, "Red medida durante la descarga de ${song.title}, abortando")
+                    wentMetered.set(true)
+                    abortAllCalls()
+                }
+
+                val flusher = launch {
+                    while (isActive) {
+                        delay(META_FLUSH_INTERVAL_MS)
+                        flushPartial()
+                    }
+                }
+
+                val extraJobs = CopyOnWriteArrayList<Job>()
+                // Los tramos extra se lanzan en el scope PADRE, no dentro del expansor: colgados de
+                // él, pararlo (que es lo primero que se hace al terminar) se los llevaría por
+                // delante a mitad de descarga.
+                val expander = if (budget == null || !canSegment) null else launch {
+                    while (isActive) {
+                        delay(SEGMENT_CHECK_INTERVAL_MS)
+                        if (!hasSplittableWork()) continue
+                        // El permiso se pide DESPUÉS de comprobar que hay algo que partir, pero
+                        // entre las dos cosas otro tramo puede terminar y dejar sin trabajo a éste.
+                        // Si eso pasa, el worker no encuentra nada y se va: el permiso se devuelve
+                        // al acabar la descarga, que en el tramo final no le hace falta a nadie.
+                        if (!budget.tryAcquire()) continue
+                        borrowedConnections++
+                        extraJobs.add(
+                            scope.launch {
+                                // Un tramo extra que falla NO tumba la descarga: su trozo queda sin
+                                // dueño y lo recoge el worker base en su siguiente `claimNext` (o,
+                                // si ya no queda nadie, el reintento, que reanuda por ahí). Sin
+                                // este `runCatching` la excepción subiría al scope y se llevaría por
+                                // delante los tramos que sí iban bien.
+                                runCatching { worker(null) }.onFailure { e ->
+                                    if (e is kotlinx.coroutines.CancellationException) throw e
+                                    Log.w(TAG, "Tramo extra de ${song.title} abortado: ${e.message}")
                                 }
                             }
-                        }
-                    } finally {
-                        watchdog.cancel()
-                        networkGuard?.cancel()
+                        )
                     }
                 }
 
-                val tmp = tmpFile
-                if (!tmp.exists() || tmp.length() == 0L) {
-                    return@use DownloadStage.Error(context.getString(R.string.dl_err_empty_file))
+                try {
+                    worker(opening)
+                    // El expansor se para ANTES del join, o podría añadir un tramo justo mientras
+                    // se espera y la espera no lo cubriría. Mismo motivo (y mismo patrón) que el
+                    // supervisor de paralelismo de SyncManager.
+                    expander?.cancelAndJoin()
+                    while (true) {
+                        val snapshot = extraJobs.toList()
+                        snapshot.joinAll()
+                        if (extraJobs.size == snapshot.size) break
+                    }
+                } finally {
+                    expander?.cancel()
+                    watchdog.cancel()
+                    networkGuard?.cancel()
+                    flusher.cancel()
                 }
-
-                // Validar bytes recibidos vs Content-Length: un stream que terminó "limpio"
-                // antes de tiempo (conexión cortada sin excepción) deja un archivo truncado
-                // que de otro modo se renombraría como bueno y quedaría así para siempre.
-                if (totalBytes > 0 && tmp.length() < totalBytes) {
-                    tmp.delete()
-                    return@use DownloadStage.Error(
-                        context.getString(R.string.dl_err_truncated, tmp.length(), totalBytes),
-                        kind = ErrorKind.TRANSIENT
-                    )
-                }
-
-                if (targetFile.exists()) targetFile.delete()
-                val renamed = tmp.renameTo(targetFile)
-                if (!renamed) {
-                    tmp.copyTo(targetFile, overwrite = true)
-                    tmp.delete()
-                }
-
-                DownloadStage.Success(targetFile)
             }
+
+            // --- Cierre ---
+            if (totalBytes > 0L && file.length() > totalBytes) {
+                // Defensa: un servidor que mande de más no debe dejar cola de basura tras el último
+                // byte válido (el análisis de tags leería un archivo que no cuadra con su cabecera).
+                file.setLength(totalBytes)
+            }
+            runCatching { fileChannel.force(false) }
+            file.close()
+            randomAccess = null
+
+            if (!partFile.exists() || partFile.length() == 0L) {
+                return DownloadStage.Error(context.getString(R.string.dl_err_empty_file))
+            }
+            if (totalBytes > 0L && (!current.isComplete || partFile.length() < totalBytes)) {
+                // Se CONSERVA el parcial: lo que falta es justo lo que el próximo intento pedirá.
+                flushPartial()
+                return DownloadStage.Error(
+                    context.getString(R.string.dl_err_truncated, partFile.length(), totalBytes),
+                    kind = ErrorKind.TRANSIENT
+                )
+            }
+
+            val targetFile = File(partFile.parentFile, "${song.id}.$extension")
+            if (targetFile.exists()) targetFile.delete()
+            if (!partFile.renameTo(targetFile)) {
+                partFile.copyTo(targetFile, overwrite = true)
+                partFile.delete()
+            }
+            metaFile.delete()
+            onProgress(1f)
+            return DownloadStage.Success(targetFile)
         } catch (e: Exception) {
-            try { tempFile?.delete() } catch (_: Exception) {}
             // Antes que nada: cortamos NOSOTROS por un cambio de red, así que no es un fallo de
             // la canción. `Cancelled` no gasta un intento ni deja error en la cola persistente;
             // la fila sigue "needing work" y la retoma la continuación que espera WiFi.
+            //
+            // En los tres casos de corte el parcial se GUARDA, que es el cambio de fondo: el
+            // próximo intento sigue por donde iba en vez de repetir lo ya bajado.
             if (wentMetered.get()) {
-                return@withContext DownloadStage.Cancelled
+                flushPartial()
+                return DownloadStage.Cancelled
             }
             if (wasStalled.get()) {
+                flushPartial()
                 Log.w(TAG, "Download stalled for ${song.title}, marking as failed and continuing queue")
-                return@withContext DownloadStage.Error(context.getString(R.string.dl_err_stalled, (STALL_TIMEOUT_MS / 1000).toInt()))
+                return DownloadStage.Error(context.getString(R.string.dl_err_stalled, (STALL_TIMEOUT_MS / 1000).toInt()))
             }
             if (e is kotlinx.coroutines.CancellationException) {
+                flushPartial()
                 Log.d(TAG, "Download cancelled: ${song.title}")
-                return@withContext DownloadStage.Cancelled
+                return DownloadStage.Cancelled
             }
             Log.e(TAG, "Error downloading ${song.title}", e)
             // IOException (DNS, socket, timeout) es recuperable; el resto (estado inválido,
-            // bugs) no se arregla reintentando.
-            val kind = if (e is java.io.IOException) ErrorKind.TRANSIENT else ErrorKind.PERMANENT
-            return@withContext DownloadStage.Error(context.getString(R.string.dl_err_exception, e.message), exception = e, kind = kind)
+            // bugs) no se arregla reintentando — y entonces el parcial tampoco sirve de nada.
+            return if (e is IOException) {
+                flushPartial()
+                DownloadStage.Error(context.getString(R.string.dl_err_exception, e.message), exception = e, kind = ErrorKind.TRANSIENT)
+            } else {
+                PartialDownloadState.discard(partFile, metaFile)
+                DownloadStage.Error(context.getString(R.string.dl_err_exception, e.message), exception = e, kind = ErrorKind.PERMANENT)
+            }
+        } finally {
+            runCatching { randomAccess?.close() }
+            if (borrowedConnections > 0) budget?.release(borrowedConnections)
         }
     }
+
+    /**
+     * Abre una petición por un tramo del archivo y la registra en [calls] para que el watchdog
+     * pueda cancelarla.
+     *
+     * El `Range` va SIEMPRE, incluso pidiendo el archivo entero (`bytes=0-`): es lo que hace que la
+     * respuesta diga con un 206 si este servidor honra rangos, que es el dato del que dependen la
+     * reanudación y el reparto en tramos. Un 200 es una respuesta válida y significa "no los honro,
+     * aquí va todo desde el principio".
+     */
+    private fun openRange(
+        url: String,
+        from: Long,
+        toInclusive: Long?,
+        ifRange: String?,
+        /**
+         * Recibe la [Call] recién creada. Es una lambda y no la lista de llamadas porque quien la
+         * abre sabe además a qué TRAMO pertenece, y el watchdog necesita ese vínculo para cortar
+         * solo la conexión colgada en vez de las cuatro.
+         */
+        onCall: (Call) -> Unit
+    ): Response {
+        val builder = Request.Builder()
+            .url(url)
+            .header("Range", "bytes=$from-${toInclusive?.toString().orEmpty()}")
+        // `If-Range` convierte dos peticiones en una: si el archivo cambió, en vez de un error el
+        // servidor manda el contenido entero desde cero, que es exactamente el plan B.
+        if (ifRange != null) builder.header("If-Range", ifRange)
+        val call = okHttpClient.newCall(builder.build())
+        onCall(call)
+        return call.execute()
+    }
+
+    /** Tamaño total declarado en `Content-Range: bytes <ini>-<fin>/<total>`, o -1 si no lo dice. */
+    private fun parseContentRangeTotal(header: String?): Long =
+        header?.substringAfterLast('/', "")?.trim()?.toLongOrNull() ?: -1L
+
+    /** Primer byte que trae el cuerpo según `Content-Range`, o -1 si no se puede leer. */
+    private fun parseContentRangeStart(header: String?): Long =
+        header?.substringAfter("bytes ", "")?.substringBefore('-', "")?.trim()?.toLongOrNull() ?: -1L
 
     /**
      * Fase 2: analiza el archivo descargado, corrige extensión y actualiza la BD.
@@ -482,12 +913,16 @@ class MusicDownloader @Inject constructor(
      * histórica `.0` del bug de octet-stream. El contenido manda; la extensión la corrige
      * `finalizeDownload` al re-analizar. Permite al pipeline saltarse red y re-descarga
      * cuando los bytes ya están en disco.
+     *
+     * Los archivos de trabajo (`.tmp` histórico, `.part` y su sidecar) quedan fuera por
+     * definición: son descargas A MEDIAS, y darlas por buenas dejaría media canción en la
+     * biblioteca sin que nada volviera a intentarlo.
      */
     fun findExistingDownload(songId: String, expectedSize: Long = 0L): File? {
         val musicDir = File(context.filesDir, "music")
         val prefix = "$songId."
         val existing = musicDir.listFiles { f: File ->
-            f.name.startsWith(prefix) && !f.name.endsWith(".tmp") && f.length() > 0L
+            f.name.startsWith(prefix) && !isWorkFile(f.name) && f.length() > 0L
         }?.firstOrNull() ?: return null
         // Un resto truncado no cuenta como descarga: se borra para que el pipeline
         // vuelva a bajar los bytes en vez de darlo por bueno indefinidamente.
@@ -497,6 +932,46 @@ class MusicDownloader @Inject constructor(
             return null
         }
         return existing
+    }
+
+    private fun isWorkFile(name: String): Boolean =
+        name.endsWith(".tmp") || name.endsWith(PART_SUFFIX) || name.endsWith("$PART_SUFFIX$META_SUFFIX")
+
+    /**
+     * Borra las descargas a medias que ya no tienen dueño: las de canciones que desaparecieron de la
+     * biblioteca y las de canciones que entretanto quedaron descargadas por otra vía.
+     *
+     * **Hace falta desde que los parciales sobreviven a un fallo.** El `.tmp` de antes lo borraba el
+     * `catch` siempre, así que no podía acumularse nada; ahora se conserva a propósito, y un parcial
+     * de 600 MB cuyo dueño se borró de la biblioteca se quedaría en el dispositivo para siempre. Lo
+     * que NO se toca es el parcial de una canción que sigue pendiente: ESO es exactamente el trabajo
+     * que el próximo intento va a reanudar.
+     *
+     * [protectedIds] son las descargas en vuelo. Su parcial está siendo escrito ahora mismo y podría
+     * pertenecer a una canción que aún no consta como descargada.
+     *
+     * @return cuántos archivos se borraron.
+     */
+    fun prunePartialDownloads(knownIds: Set<String>, protectedIds: Set<String>): Int {
+        val musicDir = File(context.filesDir, "music")
+        val files = musicDir.listFiles() ?: return 0
+        // El archivo final ya en disco se busca por PREFIJO y no derivando el id del nombre: un id
+        // de proveedor es una cadena opaca y partirla por el último punto sería una suposición
+        // sobre su forma, justo la clase de atajo que ya rompió `covers/<songId>.jpg`.
+        fun alreadyFinished(songId: String): Boolean = files.any {
+            it.name.startsWith("$songId.") && !isWorkFile(it.name) && it.length() > 0L
+        }
+        var removed = 0
+        for (file in files) {
+            val name = file.name
+            if (!name.endsWith(PART_SUFFIX) && !name.endsWith("$PART_SUFFIX$META_SUFFIX")) continue
+            val songId = name.removeSuffix(META_SUFFIX).removeSuffix(PART_SUFFIX)
+            if (songId in protectedIds) continue
+            if (songId in knownIds && !alreadyFinished(songId)) continue
+            if (file.delete()) removed++
+        }
+        if (removed > 0) Log.i(TAG, "Descargas parciales sin dueño borradas: $removed archivos")
+        return removed
     }
 
     /**

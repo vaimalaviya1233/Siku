@@ -15,7 +15,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.IntOffset
@@ -30,7 +29,6 @@ import androidx.compose.ui.semantics.semantics
 import com.qhana.siku.data.coordinator.SyncStatus
 import com.qhana.siku.data.repository.FailedDownload
 import com.qhana.siku.ui.components.ComponentConfig
-import com.qhana.siku.ui.components.ConnectedChoiceGroup
 import com.qhana.siku.ui.components.DownloadStateBanner
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.SongItem
@@ -68,13 +66,23 @@ fun DownloadManagerScreen(
         stringResource(R.string.download_tab_failed, failedDownloads.size)
     )
 
+    // Resueltos AQUÍ y no en el sitio de uso: el `content` de `AppBarRow` es un
+    // `AppBarRowScope.() -> Unit` normal, no un `@Composable`, así que dentro no se puede llamar a
+    // `stringResource` (mismo trato que ya recibe `labelFor` en `ConnectedChoiceGroup`).
+    val pauseLabel = stringResource(R.string.download_pause)
+    val stopLabel = stringResource(R.string.download_stop)
+    val resumeLabel = stringResource(R.string.download_resume)
+
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
     Scaffold(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             // Sin subtitle: el progreso de la cola vive en la tarjeta de resumen (con su barra y
             // el consumo frente al tope). Repetirlo en la barra era el mismo dato dos veces.
-            TopAppBar(
+            // La variante FLEXIBLE es la de M3 Expressive (la clásica `TopAppBar` es la anterior):
+            // aporta el slot `subtitle` —aquí sin usar, por lo de arriba— y la alineación
+            // configurable del título, y su alto sale de `TopAppBarDefaults` en vez de ser fijo.
+            MediumFlexibleTopAppBar(
                 title = { Text(stringResource(R.string.download_title)) },
                 navigationIcon = {
                     IconButton(onClick = onBackClick) {
@@ -82,24 +90,38 @@ fun DownloadManagerScreen(
                     }
                 },
                 actions = {
-                    // Pausar/Reanudar según el estado; Detener solo cuando está activo.
-                    if (controlState == com.qhana.siku.data.model.DownloadControlState.ACTIVE) {
-                        val pauseDesc = stringResource(R.string.download_pause)
-                        IconButton(
-                            onClick = { viewModel.pauseDownloads() },
-                            modifier = Modifier.semantics { contentDescription = pauseDesc }
-                        ) { MaterialSymbol("pause") }
-                        val stopDesc = stringResource(R.string.download_stop)
-                        IconButton(
-                            onClick = { viewModel.stopDownloads() },
-                            modifier = Modifier.semantics { contentDescription = stopDesc }
-                        ) { MaterialSymbol("stop") }
-                    } else {
-                        val resumeDesc = stringResource(R.string.download_resume)
-                        IconButton(
-                            onClick = { viewModel.resumeDownloads() },
-                            modifier = Modifier.semantics { contentDescription = resumeDesc }
-                        ) { MaterialSymbol("play_arrow") }
+                    // `AppBarRow` en vez de los `IconButton` sueltos: es el contenedor de acciones
+                    // del spec, y lo que aporta es que el `label` de cada ítem hace DOS trabajos
+                    // —contentDescription del icono y texto del menú de overflow— en vez del
+                    // `Modifier.semantics { contentDescription = … }` a mano que había por acción.
+                    // Con dos iconos no habrá overflow hoy; lo habrá solo si crece la botonera o
+                    // con una escala de fuente alta, y entonces se resuelve solo.
+                    AppBarRow(
+                        overflowIndicator = { menuState ->
+                            IconButton(onClick = { menuState.show() }) {
+                                MaterialSymbol("more_vert")
+                            }
+                        }
+                    ) {
+                        // Pausar/Reanudar según el estado; Detener solo cuando está activo.
+                        if (controlState == com.qhana.siku.data.model.DownloadControlState.ACTIVE) {
+                            clickableItem(
+                                onClick = { viewModel.pauseDownloads() },
+                                icon = { MaterialSymbol("pause") },
+                                label = pauseLabel
+                            )
+                            clickableItem(
+                                onClick = { viewModel.stopDownloads() },
+                                icon = { MaterialSymbol("stop") },
+                                label = stopLabel
+                            )
+                        } else {
+                            clickableItem(
+                                onClick = { viewModel.resumeDownloads() },
+                                icon = { MaterialSymbol("play_arrow") },
+                                label = resumeLabel
+                            )
+                        }
                     }
                 },
                 scrollBehavior = scrollBehavior
@@ -123,21 +145,47 @@ fun DownloadManagerScreen(
                 )
             }
 
-            // Connected button group: el segmentado dejó de recomendarse en M3 Expressive. Los
-            // colores custom que llevaba aquí desaparecen a propósito — eran el tonal por defecto
-            // escrito a mano, que es justo lo que da `tonalToggleButtonColors()`.
-            ConnectedChoiceGroup(
-                options = tabs.indices.toList(),
-                selected = selectedTabIndex,
-                onSelect = { selectedTabIndex = it },
-                labelFor = { tabs[it] },
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
-            )
+            // PESTAÑAS REALES, no un connected button group. "Activas" y "Fallidas" no son dos
+            // valores de un ajuste: son dos regiones de contenido entre las que se NAVEGA, y para
+            // eso el componente es `PrimaryTabRow` — con él llegan la semántica de pestaña, el
+            // indicador que se desplaza y el ancho repartido, que un grupo de selección no da.
+            // Es el mismo cambio que ya se hizo en la biblioteca, donde un `ButtonGroup` estaba
+            // haciendo de navegación entre las cinco secciones.
+            //
+            // Fija y no scrollable, al revés que la de la biblioteca: aquí son dos pestañas con
+            // etiqueta de texto (nunca solo glifo), así que repartir el ancho a partes iguales es
+            // exactamente lo que se quiere.
+            PrimaryTabRow(
+                selectedTabIndex = selectedTabIndex,
+                // El divisor del default marca un borde a todo lo ancho bajo la fila; aquí debajo
+                // viene contenido que ya trae sus propias tarjetas y el corte sobraba.
+                divider = {}
+            ) {
+                tabs.forEachIndexed { index, label ->
+                    Tab(
+                        selected = index == selectedTabIndex,
+                        onClick = { selectedTabIndex = index },
+                        // EXPLÍCITOS los dos: el default de `Tab` es
+                        // `unselectedContentColor = selectedContentColor`, o sea que sin esto las
+                        // inactivas se pintan igual que la activa y la fila deja de decir dónde
+                        // estás. Mismo cuidado que en la fila de la biblioteca.
+                        selectedContentColor = MaterialTheme.colorScheme.primary,
+                        unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        text = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                    )
+                }
+            }
 
             Box(modifier = Modifier.weight(1f)) {
-                // Cambiar de pestaña reemplaza toda la región: transición (shared axis vertical),
-                // así que easing + duración del spec y no springs. Antes iba con los defaults de
+                // Cambiar de pestaña reemplaza toda la región: transición (shared axis), así que
+                // easing + duración del spec y no springs. Antes iba con los defaults de
                 // compose-animation, que no leen nada del tema.
+                //
+                // El eje es HORIZONTAL desde que la fila es un `PrimaryTabRow` real: las pestañas
+                // están una al lado de la otra y su indicador se desplaza en horizontal, así que el
+                // contenido tiene que acompañar ese movimiento. Era vertical cuando el control era
+                // un connected button group, que no sugiere dirección — con tabs, deslizar hacia
+                // arriba lo que el indicador acaba de mover hacia la derecha se lee al revés.
                 val tabSlide = tween<IntOffset>(SCREEN_ENTER_MS, easing = ScreenEnterEasing)
                 val tabFadeIn = tween<Float>(EXPRESSIVE_DEFAULT_EFFECTS_MS, easing = ExpressiveDefaultEffectsEasing)
                 val tabFadeOut = tween<Float>(EXPRESSIVE_FAST_EFFECTS_MS, easing = ExpressiveFastEffectsEasing)
@@ -145,11 +193,11 @@ fun DownloadManagerScreen(
                     targetState = selectedTabIndex,
                     transitionSpec = {
                         if (targetState > initialState) {
-                            (slideInVertically(tabSlide) { height -> height } + fadeIn(tabFadeIn)) togetherWith
-                                    (slideOutVertically(tabSlide) { height -> -height } + fadeOut(tabFadeOut))
+                            (slideInHorizontally(tabSlide) { width -> width } + fadeIn(tabFadeIn)) togetherWith
+                                    (slideOutHorizontally(tabSlide) { width -> -width } + fadeOut(tabFadeOut))
                         } else {
-                            (slideInVertically(tabSlide) { height -> -height } + fadeIn(tabFadeIn)) togetherWith
-                                    (slideOutVertically(tabSlide) { height -> height } + fadeOut(tabFadeOut))
+                            (slideInHorizontally(tabSlide) { width -> -width } + fadeIn(tabFadeIn)) togetherWith
+                                    (slideOutHorizontally(tabSlide) { width -> width } + fadeOut(tabFadeOut))
                         }
                     },
                     label = "TabTransition"
@@ -369,9 +417,8 @@ fun ActiveDownloadsTab(
                                                         useRingProgress = true, // aro de progreso alrededor de la carátula
                                                         trailingContent = {                            Text(
                                 "${(download.progress * 100).toInt()}%",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.Bold
+                                style = MaterialTheme.typography.labelSmallEmphasized,
+                                color = MaterialTheme.colorScheme.primary
                             )
                         }
                     )

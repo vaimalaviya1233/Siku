@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Icono del splash. Es un adaptive-icon A PROPÓSITO: a un drawable normal el sistema le aplica
+     `normalizeAndWrapToAdaptiveIcon`, que lo amplía y le encaja la MÁSCARA del dispositivo, y eso
+     recortaba la cabeza de la nota y el círculo del play por sus puntos más lejanos del centro
+     (medido: el arte necesita radio 39.5 del viewport al 66 %, y la máscara está en ~36).
+     Con un adaptive-icon explícito no hay normalización sorpresa y el encuadre lo decidimos acá.
+
+     Lo que arregla el borroso NO es esto sino la resolución del foreground: el del launcher son
+     432 px como mucho (xxxhdpi) y el splash lo pinta sobre 288dp (~790 px a densidad 2.75). El de
+     acá es un nodpi de 1152 px, que es el viewport de 108 a escala 1:1 para esa densidad. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- El background va OPACO y del color del splash, NUNCA transparente: el sistema toma este
+         color para el círculo de fondo del icono, y un 0x00000000 al que se le fuerza el alfa
+         acaba en NEGRO (probado en device). Con el mismo color que la ventana, ese círculo existe
+         pero no se ve, en claro y en oscuro — que es justo lo que hacía el #FFFFFF del icono del
+         launcher contra el #FFFBFE del splash. -->
+    <background android:drawable="@color/splash_background"/>
+    <foreground android:drawable="@drawable/ic_splash_foreground"/>
+</adaptive-icon>

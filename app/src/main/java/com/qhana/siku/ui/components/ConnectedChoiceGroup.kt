@@ -20,6 +20,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -40,10 +41,17 @@ import androidx.compose.ui.unit.sp
  * @param labelFor etiqueta de cada opción; se usa igual en el botón y en el menú de overflow.
  * @param iconFor símbolo opcional. Sin icono el grupo queda más compacto, que es lo que conviene
  *        cuando es un ajuste secundario dentro de una pantalla que ya tiene otro grupo.
- * @param fillWidth true reparte el ancho del padre entre las opciones; false las ciñe a su
- *        contenido. Es la palanca principal para que DOS grupos en la misma pantalla no se lean
- *        como el mismo control (ver el EQ: el conmutador de sección va a ancho completo y el
- *        selector de bandas, ceñido y bajo).
+ * @param fillWidth true reparte el ancho del padre entre las opciones **a partes IGUALES**; false
+ *        las ciñe a su contenido. Es la palanca principal para que DOS grupos en la misma pantalla
+ *        no se lean como el mismo control (ver el EQ: el conmutador de sección va a ancho completo
+ *        y el selector de bandas, ceñido y bajo).
+ *
+ *        **Con etiquetas de longitud DESIGUAL hay que ponerlo en false**: el reparto igual le da a
+ *        la más larga el mismo hueco que a la más corta, y la larga se recorta. Pasó con el
+ *        selector de ReplayGain ("Desactivado" contra "Por pista" y "Por álbum"): en 360dp cada
+ *        botón se quedaba en ~76dp de texto útil y la primera etiqueta necesitaba ~82. Con `false`
+ *        cada botón mide lo suyo y, si aun así no cupieran todos, entra el `overflowIndicator` que
+ *        el `ButtonGroup` ya trae — que es justo el mecanismo que el `weight` anula.
  * @param buttonHeight alto de cada botón; null = el del componente.
  * @param colors override para superficies que NO son del scheme. Lo necesita la pantalla de letras,
  *        que se pinta sobre el color del álbum y calcula el contenido por luminancia; en el resto
@@ -107,7 +115,12 @@ fun <T> ConnectedChoiceGroup(
                             MaterialSymbol(icon = icon, size = IconSize)
                             Spacer(Modifier.width(IconGap))
                         }
-                        Text(label, maxLines = 1)
+                        // `Ellipsis` como RED DE SEGURIDAD, no como solución: con `maxLines = 1` a
+                        // secas el texto se cortaba a hachazo —"Desactivado" salía "Desactivad"—,
+                        // que se lee como una errata y no como un truncamiento. Si una etiqueta
+                        // llega aquí recortada es que el grupo está mal dimensionado (ver
+                        // [fillWidth]); esto solo evita que el fallo parezca otra cosa.
+                        Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 },
                 menuContent = { state ->

@@ -100,20 +100,31 @@ class MusicPlayerApp : Application(), Configuration.Provider, SingletonImageLoad
         // la biblioteca sin acento. Con "batería no baja" el trabajo llega a correr y sigue sin
         // pelearse por CPU cuando el usuario la necesita: es un lote acotado y WorkManager ya lo
         // programa en un momento oportuno.
-        val constraints = Constraints.Builder()
-            .setRequiresBatteryNotLow(true)
-            .build()
+        //
+        // El ENCOLADO va FUERA del hilo principal, y no por prudencia genérica: el initializer automático de
+        // WorkManager está REMOVIDO en el manifest (inicialización on-demand para Hilt), así que
+        // esta es la PRIMERA llamada a `getInstance` del proceso — la que construye su base de
+        // datos Room, sus executors y reprograma el trabajo pendiente. Hecha aquí, ese arranque se
+        // pagaba entero en `Application.onCreate`, o sea antes del primer frame de un arranque en
+        // frío. En IO, cuando `provideWorkManager` la pida al crear los ViewModels de la primera
+        // composición, ya está lista. El trabajo en sí no corre antes ni después: lleva su propio
+        // retardo inicial de [ARTWORK_BACKFILL_DELAY_SECONDS].
+        appScope.launch {
+            val constraints = Constraints.Builder()
+                .setRequiresBatteryNotLow(true)
+                .build()
 
-        val request = OneTimeWorkRequestBuilder<ArtworkWorker>()
-            .setConstraints(constraints)
-            .setInitialDelay(ARTWORK_BACKFILL_DELAY_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
-            .build()
+            val request = OneTimeWorkRequestBuilder<ArtworkWorker>()
+                .setConstraints(constraints)
+                .setInitialDelay(ARTWORK_BACKFILL_DELAY_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+                .build()
 
-        WorkManager.getInstance(this).enqueueUniqueWork(
-            WorkerTags.ARTWORK_WORK_NAME,
-            ExistingWorkPolicy.KEEP,
-            request
-        )
+            WorkManager.getInstance(this@MusicPlayerApp).enqueueUniqueWork(
+                WorkerTags.ARTWORK_WORK_NAME,
+                ExistingWorkPolicy.KEEP,
+                request
+            )
+        }
     }
 
     // Los widgets hornean sus colores al traducirse a RemoteViews: sin este re-render,

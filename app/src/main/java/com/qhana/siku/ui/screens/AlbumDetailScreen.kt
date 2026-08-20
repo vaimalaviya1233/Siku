@@ -25,10 +25,10 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -44,6 +44,7 @@ import com.qhana.siku.ui.components.ComponentConfig
 import com.qhana.siku.ui.components.CreatePlaylistDialog
 import com.qhana.siku.ui.components.DetailPlayButtons
 import com.qhana.siku.ui.components.MaterialSymbol
+import com.qhana.siku.ui.components.entityImageSharedBounds
 import com.qhana.siku.ui.components.TonalChip
 import com.qhana.siku.ui.components.SongItem
 import com.qhana.siku.ui.components.SongRowContainer
@@ -54,7 +55,6 @@ import com.qhana.siku.ui.components.rememberListItemShape
 import com.qhana.siku.ui.viewmodel.BrowseViewModel
 
 import com.qhana.siku.ui.theme.appEffectsSpec
-import com.qhana.siku.ui.theme.AppBoundsTransform
 import com.qhana.siku.ui.theme.DetailContentTheme
 
 /**
@@ -167,7 +167,13 @@ fun AlbumDetailScreen(
     DetailContentTheme(albumSeed) {
     Scaffold(
         modifier = modifier,
-        contentWindowInsets = WindowInsets(0, 0, 0, 0)
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        // Fondo `surfaceContainer` (94), el nivel MEDIO de la escala: el contenido de la pantalla
+        // —filas y tarjetas— sube desde aquí a `surface` (98) y las barras bajan a
+        // `surfaceContainerHigh` (92). Mismo reparto que la biblioteca; el porqué, en `headerColor`
+        // de LibraryScreen. Si se cambia, hay que mover CON él el degradado del header inmersivo,
+        // que funde la imagen contra este color y dejaría costura.
+        containerColor = colorScheme.surfaceContainer
     ) { paddingValues ->
         if (songs.isEmpty()) {
             Box(
@@ -241,7 +247,7 @@ fun AlbumDetailScreen(
                     // La canción actual, esté sonando o en PAUSA: mismo criterio que la cola y la
                     // lista de canciones (el resaltado marca "cargada", no "reproduciendo ahora").
                     val isPlaying = currentSong?.id == song.id
-                    val rowBackground = songRowBackground(colorScheme.surfaceContainer, isPlaying)
+                    val rowBackground = songRowBackground(colorScheme.surface, isPlaying)
                     // Punta ORIGEN del container transform hacia el reproductor: la fila crece hasta
                     // ser el player. Fuera del envoltorio va lo que la coloca en la lista; dentro, la
                     // superficie que morfa (ver [SongRowContainer]).
@@ -253,7 +259,7 @@ fun AlbumDetailScreen(
                             .padding(horizontal = 16.dp, vertical = 1.dp)
                     ) {
                         Surface(
-                            color = colorScheme.surfaceContainer,
+                            color = colorScheme.surface,
                             // isActive: el ítem en reproducción usa la forma redondeada (16 dp), igual
                             // que en la cola y la lista de canciones, en vez de la esquina agrupada.
                             shape = rememberListItemShape(index, songs.size, isActive = isPlaying),
@@ -288,7 +294,7 @@ fun AlbumDetailScreen(
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
                     .then(overSharedElementsModifier(sharedTransitionScope, animatedVisibilityScope, headerImageSharedState))
-                    .background(colorScheme.surface.copy(alpha = topBarAlpha))
+                    .background(colorScheme.surfaceContainerHigh.copy(alpha = topBarAlpha))
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -299,8 +305,9 @@ fun AlbumDetailScreen(
                 ) {
                     FilledIconButton(
                         onClick = onBackClick,
+                        shapes = IconButtonDefaults.shapes(),
                         colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = colorScheme.surfaceContainer,
+                            containerColor = colorScheme.surface,
                             contentColor = colorScheme.onSurface
                         )
                     ) {
@@ -323,7 +330,7 @@ fun AlbumDetailScreen(
             // la transición de entrada y el título aparecía DE GOLPE al terminar.
             Text(
                 text = albumName.ifBlank { stringResource(R.string.common_unknown_album) },
-                style = MaterialTheme.typography.headlineLarge.copy(fontWeight = FontWeight.Bold),
+                style = MaterialTheme.typography.headlineLargeEmphasized,
                 color = colorScheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -401,18 +408,18 @@ private fun AlbumImmersiveHeader(
     headerImageSharedState: SharedTransitionScope.SharedContentState? = null,
     onTitlePositioned: (Offset, Int) -> Unit = { _, _ -> }
 ) {
-    // La carátula llega volando desde la celda de la pestaña Álbumes (sharedBounds,
-    // misma key que AlbumTileCard).
-    val sharedModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null && headerImageSharedState != null) {
-        with(sharedTransitionScope) {
-            Modifier.sharedBounds(
-                sharedContentState = headerImageSharedState,
-                animatedVisibilityScope = animatedVisibilityScope,
-                // Spring del tema en vez del default de la API (ver AppBoundsTransform).
-                boundsTransform = AppBoundsTransform
-            )
-        }
-    } else Modifier
+    // La carátula llega volando desde la celda de la pestaña Álbumes o del carrusel del inicio
+    // (misma key en las dos: ver AlbumTileCard y AlbumCarousel).
+    // El header es un rectángulo a sangre y así viaja: declararlo explícito ACOTA la punta a sus
+    // bounds animados (sin clip, el contenido escalado se sale del rect) y deja escrito que la forma
+    // de este extremo del morph es "ninguna". La celda de la que viene declara la suya, y el cruce de
+    // contenidos hace el paso de una a otra. Ver [entityImageSharedBounds].
+    val sharedModifier = entityImageSharedBounds(
+        state = headerImageSharedState,
+        shape = RectangleShape,
+        sharedTransitionScope = sharedTransitionScope,
+        animatedVisibilityScope = animatedVisibilityScope
+    )
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -449,9 +456,9 @@ private fun AlbumImmersiveHeader(
                 .background(
                     Brush.verticalGradient(
                         0.3f to Color.Transparent,
-                        0.7f to colorScheme.surface.copy(alpha = 0.5f),
-                        0.85f to colorScheme.surface,
-                        1f to colorScheme.surface
+                        0.7f to colorScheme.surfaceContainer.copy(alpha = 0.5f),
+                        0.85f to colorScheme.surfaceContainer,
+                        1f to colorScheme.surfaceContainer
                     )
                 )
         )
@@ -464,7 +471,7 @@ private fun AlbumImmersiveHeader(
         ) {
             Text(
                 text = albumName.ifBlank { stringResource(R.string.common_unknown_album) },
-                style = MaterialTheme.typography.headlineLarge.copy(fontWeight = FontWeight.Bold),
+                style = MaterialTheme.typography.headlineLargeEmphasized,
                 color = colorScheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -501,7 +508,6 @@ private fun AlbumImmersiveHeader(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = if (songCount == 1) "1 canción" else "$songCount canciones",
-                        style = MaterialTheme.typography.labelMedium,
                         color = colorScheme.onSecondaryContainer
                     )
                 }
@@ -512,7 +518,6 @@ private fun AlbumImmersiveHeader(
                     TonalChip {
                         Text(
                             text = year.toString(),
-                            style = MaterialTheme.typography.labelMedium,
                             color = colorScheme.onSecondaryContainer
                         )
                     }

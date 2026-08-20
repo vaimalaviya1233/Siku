@@ -163,7 +163,7 @@ class SyncManagerTest {
 
         syncManager.executeSync(force = false)
 
-        coVerify(exactly = 0) { musicDownloader.downloadFile(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { musicDownloader.downloadFile(any(), any(), any(), any(), any()) }
         val complete = syncManager.state.value as SyncStatus.Complete
         assertEquals(0, complete.downloaded)
         assertEquals(0, complete.failed)
@@ -184,7 +184,7 @@ class SyncManagerTest {
 
         syncManager.executeSync(force = false)
 
-        coVerify(exactly = 0) { musicDownloader.downloadFile(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { musicDownloader.downloadFile(any(), any(), any(), any(), any()) }
         coVerify(exactly = 0) { sourceRegistry.resolveDownloadUrl(any(), any()) }
         coVerify(exactly = 1) { musicDownloader.finalizeDownload(pending, existing) }
         val complete = syncManager.state.value as SyncStatus.Complete
@@ -196,14 +196,14 @@ class SyncManagerTest {
         val pending = song("p1", path = "https://dl/p1")
         coEvery { musicRepository.countSongsNeedingWork() } returns 1
         coEvery { musicRepository.getSongsNeedingMetadataOrDownload(any(), any()) } returns listOf(pending)
-        coEvery { musicDownloader.downloadFile(any(), any(), any(), any()) } returns
+        coEvery { musicDownloader.downloadFile(any(), any(), any(), any(), any()) } returns
             MusicDownloader.DownloadStage.Success(File("dummy.mp3"))
         coEvery { musicDownloader.finalizeDownload(any(), any()) } returns
             MusicDownloader.Result.Success(pending)
 
         syncManager.executeSync(force = false)
 
-        coVerify(exactly = 1) { musicDownloader.downloadFile(pending, "https://dl/p1", false, any()) }
+        coVerify(exactly = 1) { musicDownloader.downloadFile(pending, "https://dl/p1", false, any(), any()) }
         val complete = syncManager.state.value as SyncStatus.Complete
         assertEquals(1, complete.downloaded)
         assertEquals(0, complete.failed)
@@ -214,7 +214,7 @@ class SyncManagerTest {
         val pending = song("p1", path = "https://dl/p1")
         coEvery { musicRepository.countSongsNeedingWork() } returns 1
         coEvery { musicRepository.getSongsNeedingMetadataOrDownload(any(), any()) } returns listOf(pending)
-        coEvery { musicDownloader.downloadFile(any(), any(), any(), any()) } returns
+        coEvery { musicDownloader.downloadFile(any(), any(), any(), any(), any()) } returns
             MusicDownloader.DownloadStage.Error("fallo de red")
 
         syncManager.executeSync(force = false)
@@ -232,9 +232,9 @@ class SyncManagerTest {
         coEvery { musicRepository.getSongById("p1") } returns AppResult.Success(withRemote)
         coEvery { sourceRegistry.resolveDownloadUrl(any(), false) } returns "https://dl/vieja"
         coEvery { sourceRegistry.resolveDownloadUrl(any(), true) } returns "https://dl/fresca"
-        coEvery { musicDownloader.downloadFile(any(), "https://dl/vieja", any(), any()) } returns
+        coEvery { musicDownloader.downloadFile(any(), "https://dl/vieja", any(), any(), any()) } returns
             MusicDownloader.DownloadStage.Error("expired", httpCode = 401)
-        coEvery { musicDownloader.downloadFile(any(), "https://dl/fresca", any(), any()) } returns
+        coEvery { musicDownloader.downloadFile(any(), "https://dl/fresca", any(), any(), any()) } returns
             MusicDownloader.DownloadStage.Success(File("dummy.mp3"))
         coEvery { musicDownloader.finalizeDownload(any(), any()) } returns
             MusicDownloader.Result.Success(withRemote)
@@ -244,7 +244,7 @@ class SyncManagerTest {
         assertTrue(result is MusicDownloader.Result.Success)
         coVerify(exactly = 1) { sourceRegistry.resolveDownloadUrl(any(), false) }
         coVerify(exactly = 1) { sourceRegistry.resolveDownloadUrl(any(), true) }
-        coVerify(exactly = 1) { musicDownloader.downloadFile(any(), "https://dl/fresca", any(), any()) }
+        coVerify(exactly = 1) { musicDownloader.downloadFile(any(), "https://dl/fresca", any(), any(), any()) }
     }
 
     @Test
@@ -256,7 +256,7 @@ class SyncManagerTest {
         val result = syncManager.downloadSong("p1")
 
         assertTrue(result is MusicDownloader.Result.Error)
-        coVerify(exactly = 0) { musicDownloader.downloadFile(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { musicDownloader.downloadFile(any(), any(), any(), any(), any()) }
     }
 
     // ===== Robustez de la cola (fase 1) =====
@@ -266,7 +266,7 @@ class SyncManagerTest {
         val pending = song("p1", path = "https://dl/p1")
         coEvery { musicRepository.countSongsNeedingWork() } returns 1
         coEvery { musicRepository.getSongsNeedingMetadataOrDownload(any(), any()) } returns listOf(pending)
-        coEvery { musicDownloader.downloadFile(any(), any(), any(), any()) } returnsMany listOf(
+        coEvery { musicDownloader.downloadFile(any(), any(), any(), any(), any()) } returnsMany listOf(
             MusicDownloader.DownloadStage.Error("timeout", kind = MusicDownloader.ErrorKind.TRANSIENT),
             MusicDownloader.DownloadStage.Success(File("dummy.mp3"))
         )
@@ -276,7 +276,7 @@ class SyncManagerTest {
         val outcome = syncManager.executeSync(force = false)
 
         assertTrue(outcome is SyncOutcome.Completed)
-        coVerify(exactly = 2) { musicDownloader.downloadFile(any(), any(), any(), any()) }
+        coVerify(exactly = 2) { musicDownloader.downloadFile(any(), any(), any(), any(), any()) }
         val complete = syncManager.state.value as SyncStatus.Complete
         assertEquals(1, complete.downloaded)
         assertEquals(0, complete.failed)
@@ -287,12 +287,12 @@ class SyncManagerTest {
         val pending = song("p1", path = "https://dl/p1")
         coEvery { musicRepository.countSongsNeedingWork() } returns 1
         coEvery { musicRepository.getSongsNeedingMetadataOrDownload(any(), any()) } returns listOf(pending)
-        coEvery { musicDownloader.downloadFile(any(), any(), any(), any()) } returns
+        coEvery { musicDownloader.downloadFile(any(), any(), any(), any(), any()) } returns
             MusicDownloader.DownloadStage.Error("path traversal", kind = MusicDownloader.ErrorKind.PERMANENT)
 
         syncManager.executeSync(force = false)
 
-        coVerify(exactly = 1) { musicDownloader.downloadFile(any(), any(), any(), any()) }
+        coVerify(exactly = 1) { musicDownloader.downloadFile(any(), any(), any(), any(), any()) }
         assertEquals(1, (syncManager.state.value as SyncStatus.Complete).failed)
     }
 
@@ -301,7 +301,7 @@ class SyncManagerTest {
         val pending = song("p1", path = "https://dl/p1")
         coEvery { musicRepository.countSongsNeedingWork() } returns 1
         coEvery { musicRepository.getSongsNeedingMetadataOrDownload(any(), any()) } returns listOf(pending)
-        coEvery { musicDownloader.downloadFile(any(), any(), any(), any()) } returns
+        coEvery { musicDownloader.downloadFile(any(), any(), any(), any(), any()) } returns
             MusicDownloader.DownloadStage.SkippedLowBattery
 
         val outcome = syncManager.executeSync(force = false)
@@ -321,7 +321,7 @@ class SyncManagerTest {
 
         assertTrue(outcome is SyncOutcome.Incomplete)
         assertEquals(IncompleteReason.NO_WIFI, (outcome as SyncOutcome.Incomplete).reason)
-        coVerify(exactly = 0) { musicDownloader.downloadFile(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { musicDownloader.downloadFile(any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -335,7 +335,7 @@ class SyncManagerTest {
 
         assertTrue(outcome is SyncOutcome.Incomplete)
         assertEquals(IncompleteReason.NETWORK_LOST, (outcome as SyncOutcome.Incomplete).reason)
-        coVerify(exactly = 0) { musicDownloader.downloadFile(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { musicDownloader.downloadFile(any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -347,16 +347,16 @@ class SyncManagerTest {
         coEvery { musicRepository.getSongsNeedingMetadataOrDownload(50, 0) } returns failing
         coEvery { musicRepository.getSongsNeedingMetadataOrDownload(50, 50) } returns listOf(extra)
         coEvery { musicRepository.getSongsNeedingMetadataOrDownload(50, 100) } returns emptyList()
-        coEvery { musicDownloader.downloadFile(match { it.id != "zz-extra" }, any(), any(), any()) } returns
+        coEvery { musicDownloader.downloadFile(match { it.id != "zz-extra" }, any(), any(), any(), any()) } returns
             MusicDownloader.DownloadStage.Error("gone", httpCode = 404, kind = MusicDownloader.ErrorKind.PERMANENT)
-        coEvery { musicDownloader.downloadFile(match { it.id == "zz-extra" }, any(), any(), any()) } returns
+        coEvery { musicDownloader.downloadFile(match { it.id == "zz-extra" }, any(), any(), any(), any()) } returns
             MusicDownloader.DownloadStage.Success(File("dummy.mp3"))
         coEvery { musicDownloader.finalizeDownload(any(), any()) } returns
             MusicDownloader.Result.Success(extra)
 
         syncManager.executeSync(force = false)
 
-        coVerify(exactly = 1) { musicDownloader.downloadFile(match { it.id == "zz-extra" }, any(), any(), any()) }
+        coVerify(exactly = 1) { musicDownloader.downloadFile(match { it.id == "zz-extra" }, any(), any(), any(), any()) }
         val complete = syncManager.state.value as SyncStatus.Complete
         assertEquals(1, complete.downloaded)
         assertEquals(50, complete.failed)
@@ -377,7 +377,7 @@ class SyncManagerTest {
         val pending = song("p1", path = "https://dl/p1")
         coEvery { musicRepository.countSongsNeedingWork() } returns 1
         coEvery { musicRepository.getSongsNeedingMetadataOrDownload(any(), any()) } returns listOf(pending)
-        coEvery { musicDownloader.downloadFile(any(), any(), any(), any()) } returns
+        coEvery { musicDownloader.downloadFile(any(), any(), any(), any(), any()) } returns
             MusicDownloader.DownloadStage.Success(File("dummy.mp3"))
         coEvery { musicDownloader.finalizeDownload(any(), any()) } returns
             MusicDownloader.Result.Success(pending)

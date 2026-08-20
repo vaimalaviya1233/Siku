@@ -24,7 +24,9 @@ import javax.inject.Singleton
 
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 
 @Singleton
 class ArtworkRepository @Inject constructor(
@@ -52,6 +54,29 @@ class ArtworkRepository @Inject constructor(
      * sobre un bitmap de 256 px. Si algún día se nota, la columna es un cambio aditivo.
      */
     private val imageSeedCache = LruCache<String, Int>(IMAGE_SEED_CACHE_ENTRIES)
+
+    /**
+     * Tope de análisis de color SIMULTÁNEOS (decodificar la carátula a 256 px + cuantizarla).
+     *
+     * Es trabajo de FONDO que nadie está mirando —el backfill recorre la biblioteca entera— y sin
+     * tope se reparte por `Dispatchers.Default`, que trae un hilo por núcleo: con eso el backfill se
+     * queda con la máquina y la UI, el RenderThread y el hilo de audio pelean por lo que sobra.
+     * Medido en un trace de Perfetto (release, biblioteca recién escaneada): 349 decodificaciones de
+     * bitmap en 30 s, **305 de ellas a 256×256** —o sea de este análisis—, `DefaultDispatch` con
+     * 31 364 ms de CPU contra 7038 del hilo principal, y un GC cada 600-700 ms. Justo encima de eso
+     * caía el arranque de una canción y sus frames perdidos.
+     *
+     * NO se acota la decodificación de Coil en general, que es lo que alimenta las listas y los
+     * carruseles: ésa sí la está esperando alguien. Lo que se acota es lo invisible.
+     *
+     * Fracción de los núcleos y no un número fijo: en un teléfono de 8 núcleos deja 2 para el
+     * backfill y 6 para todo lo demás, y en uno de 4 no lo estrangula a 1. Con [Semaphore] y no
+     * `limitedParallelism` porque el trabajo ya cambia de dispatcher dos veces por llamada (IO para
+     * la imagen, Default para la cuantización) y lo que hay que limitar es la operación ENTERA.
+     */
+    private val analysisSemaphore = Semaphore(
+        (Runtime.getRuntime().availableProcessors() / COLOR_ANALYSIS_CORE_FRACTION).coerceAtLeast(1)
+    )
 
 
     /**
@@ -208,7 +233,7 @@ class ArtworkRepository @Inject constructor(
      * @return null si la extracción FALLÓ (imagen no cargable, error de procesamiento).
      *         Los callers no deben persistir el fallo: se reintenta cuando haya artwork.
      */
-    suspend fun extractColorsOptimized(id: String, uri: String): AlbumColors? {
+    suspend fun extractColorsOptimized(id: String, uri: String): AlbumColors? = analysisSemaphore.withPermit {
         // Paso 1: Carga de Imagen (I/O Bound)
         val bitmap = withContext(Dispatchers.IO) {
             try {
@@ -240,10 +265,10 @@ class ArtworkRepository @Inject constructor(
                 Log.e("ArtworkRepo", "Error loading image for $id", e)
                 null
             }
-        } ?: return null
+        } ?: return@withPermit null
 
         // Paso 2: Procesamiento de Color (CPU Bound)
-        return withContext(Dispatchers.Default) {
+        return@withPermit withContext(Dispatchers.Default) {
             try {
                 // El MISMO seed crudo en los dos slots: la extracción automática no distingue por
                 // tema (nunca lo hizo — guardaba un color con dos tonos). Los slots siguen siendo
@@ -663,6 +688,11 @@ class ArtworkRepository @Inject constructor(
          * cuadruplica; a este tamaño la población de cada color ya es representativa (son
          * ~65.000 muestras para 128 grupos) y subir no cambia el ganador.
          */
+        /**
+         * Porción de los núcleos que puede ocupar el análisis de color. Ver [analysisSemaphore].
+         * Un cuarto: bastante para que el backfill avance solo, poco para que se note.
+         */
+        private const val COLOR_ANALYSIS_CORE_FRACTION = 4
         private const val ANALYSIS_BITMAP_PX = 256
 
         // Colores que el quantizer produce antes de rankear. 128 es el valor que usa Android

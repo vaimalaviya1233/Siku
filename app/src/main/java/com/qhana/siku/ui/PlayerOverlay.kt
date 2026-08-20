@@ -5,7 +5,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterExitState
+import androidx.compose.animation.core.ExperimentalTransitionApi
 import androidx.compose.animation.core.Transition
+import androidx.compose.animation.core.createChildTransition
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.ExperimentalSharedTransitionApi
@@ -30,8 +33,10 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -40,6 +45,7 @@ import com.qhana.siku.data.model.PlaybackState
 import com.qhana.siku.data.util.JankProbe
 import com.qhana.siku.data.util.SnackbarManager
 import com.qhana.siku.ui.components.AddSongsToPlaylistSheet
+import com.qhana.siku.ui.components.CallerManagedVisibilityScope
 import com.qhana.siku.ui.components.ComponentConfig
 import com.qhana.siku.ui.components.MiniPlayer
 import com.qhana.siku.ui.components.SaveLyricsDialog
@@ -54,18 +60,24 @@ import com.qhana.siku.ui.viewmodel.PlaybackViewModel
  * Capa flotante sobre el NavHost: el **`AnimatedContent` píldora ↔ reproductor** más las
  * hojas/diálogos GLOBALES que sobreviven a la navegación.
  *
- * **El reproductor a pantalla completa VIVE aquí** (rama Expanded del `AnimatedContent`, contenido en
- * [NowPlayingLayer]). El motivo es el *container transform*: la barra crece hasta ser el player. Ese
- * morph exige que sus DOS puntas (píldora y player) vivan en el MISMO `AnimatedContentScope`; cuando
- * el player era una ruta del NavHost cada punta estaba en un dueño de transición distinto y el
- * `sharedBounds` no cruzaba (se leía como slide). El estado lo gobierna [MusicAppState.playerExpanded]
- * (booleano), no la ruta.
+ * **El reproductor a pantalla completa VIVE aquí** ([NowPlayingLayer]), pero **no como rama del
+ * `AnimatedContent`: como hermano PERSISTENTE suyo**, compuesto en cuanto hay canción y oculto
+ * —sin colocar— mientras está guardado. Montarlo y desmontarlo por apertura costaba 25-58 ms en el
+ * frame del tap y ~25 ms al cerrar (ver el bloque que lo compone, más abajo). El estado lo gobierna
+ * [MusicAppState.playerExpanded] (booleano), no la ruta.
  *
- * El `AnimatedContent` tiene TRES estados ([PlayerLayerState]): **Expanded** (player a pantalla
- * completa), **Collapsed** (píldora) y **Hidden** (nada, en rutas sin reproducción o sin canción).
- * Collapsed↔Expanded es el container transform (lo pinta el `sharedBounds` `PLAYER_CONTAINER_SHARED_KEY`
- * que declaran el Card de la píldora y la raíz del player); Hidden↔Collapsed es un fundido de la
- * píldora al cambiar de ruta.
+ * El `AnimatedContent` se queda con la PÍLDORA y sus TRES estados ([PlayerLayerState]): **Expanded**
+ * (retirada, el player la tapa), **Collapsed** (en pantalla) y **Hidden** (nada, en rutas sin
+ * reproducción o sin canción). Hidden↔Collapsed es su fundido al cambiar de ruta, y su transición es
+ * además de la que cuelgan `rememberPlayerMorphOrigin` y `rememberUnderlayColorScheme`.
+ *
+ * Collapsed↔Expanded sigue siendo el *container transform* (`sharedBounds` `PLAYER_CONTAINER_SHARED_KEY`
+ * que declaran el Card de la píldora y la raíz del player), y que cada punta cuelgue ahora de una
+ * `Transition` distinta no lo cambia: un shared element empareja por KEY, no por dueño de transición
+ * — es lo que ya hacía el morph desde una FILA de lista, donde la punta de origen es caller-managed y
+ * la del player era la del `AnimatedContent`. Aquí es el mismo par con los papeles cambiados. Lo que
+ * el player era una ruta del NavHost sí rompía el morph, pero por otra cosa: cada punta vivía en un
+ * `NavBackStackEntry` distinto y el `sharedBounds` ni llegaba a emparejar.
  *
  * También aquí, en un nivel estable:
  *  - Los **diálogos de guardar letra** + su `ActivityResultLauncher` (el permiso del sistema no puede
@@ -82,7 +94,7 @@ import com.qhana.siku.ui.viewmodel.PlaybackViewModel
  */
 private const val CONTAINER_TARGET_BRANCH_Z = 1f
 
-@OptIn(ExperimentalSharedTransitionApi::class)
+@OptIn(ExperimentalSharedTransitionApi::class, ExperimentalTransitionApi::class)
 @Composable
 fun BoxScope.PlayerOverlay(
     appState: MusicAppState,
@@ -116,8 +128,9 @@ fun BoxScope.PlayerOverlay(
     val playerGestures by playbackViewModel.playerGestures.collectAsStateWithLifecycle()
     val miniPlayerRoundedRect by playbackViewModel.miniPlayerRoundedRect.collectAsStateWithLifecycle()
     val lyricsSaveState by playbackViewModel.lyricsSaveState.collectAsStateWithLifecycle()
-    val libraryUiState by libraryViewModel.uiState.collectAsStateWithLifecycle()
-    val favorites = libraryUiState.favorites
+    // Vista de UN campo, no el `uiState` entero: esta capa es persistente y con la raíz recomponía
+    // en cada tecla de la búsqueda de la biblioteca. Ver el bloque de vistas en `LibraryViewModel`.
+    val favorites by libraryViewModel.favorites.collectAsStateWithLifecycle()
 
     val navBackStackEntry = appState.currentBackStackEntry
     val currentRoute = navBackStackEntry?.destination?.route
@@ -182,17 +195,16 @@ fun BoxScope.PlayerOverlay(
         )
     }
 
-    // --- La CAPA del reproductor: AnimatedContent píldora ↔ player -----------------------------
+    // --- La CAPA de la PÍLDORA -----------------------------------------------------------------
     //
-    // Un SOLO `AnimatedContent` con las dos puntas del container transform: eso es lo que las hace
-    // COEXISTIR en el mismo `AnimatedContentScope` y hace NATIVO el morph (ver el KDoc de la función).
-    // Collapsed↔Expanded lo pinta el `sharedBounds` de contenedor (Card de la píldora + raíz del
-    // player); la rama saliente vive lo que el bounds tarda en asentar (`KeepUntilTransitionsFinished`,
-    // ver el `transitionSpec`: sin ella la rama moriría en el acto y el shared element no tendría
-    // punta; con un fade a pantalla completa costaba un `saveLayer` por frame), y la píldora se funde
-    // en Hidden↔Collapsed con `appFadeEnter/Exit`. Las áreas VACÍAS de la capa no llevan `pointerInput`
-    // ni fondo, así que los toques pasan al NavHost de abajo (solo la píldora y el player expandido
-    // interceptan).
+    // `AnimatedContent` de tres estados que gobierna la barra: en Collapsed está en pantalla, en
+    // Expanded se retira (es la punta de ORIGEN del container transform y tiene que seguir compuesta
+    // mientras el morph corre: eso lo sostiene `KeepUntilTransitionsFinished`, ver el `transitionSpec`
+    // — sin ella la rama moriría en el acto y el shared element se quedaría sin punta; con un fade a
+    // pantalla completa costaba un `saveLayer` por frame), y en Hidden se funde con `appFadeEnter/Exit`
+    // al cambiar de ruta. La otra punta del morph es el reproductor persistente que se compone
+    // DESPUÉS de este bloque. Las áreas VACÍAS de la capa no llevan `pointerInput` ni fondo, así que
+    // los toques pasan al NavHost de abajo (solo la píldora y el player expandido interceptan).
     //
     // La `Transition` la POSEE `MusicPlayerScreen` (`updateTransition` sobre el estado de la capa) y
     // aquí solo se recorre: es la misma de la que se deriva el origen CONGELADO del morph, así que
@@ -222,7 +234,7 @@ fun BoxScope.PlayerOverlay(
             // `saveLayer` offscreen de la pantalla ENTERA en cada frame del morph (medido con atrace:
             // "alpha caused saveLayer 1080x2400" en cada frame del cierre) — el RenderThread pasaba de
             // 2-3 a 5-8 ms/frame y el scroll que arrancaba en esa cola perdía frames. Lo que SÍ se funde
-            // es el CONTENIDO de la superficie que morfa (`appContainerContentExit*`), que es lo que se
+            // es el CONTENIDO de la superficie que morfa (`appContainerContentExitFast` en la píldora, `appContainerSurfaceExitSpec` en el player), que es lo que se
             // ve. Ver el KDoc de la función sobre `targetContentZIndex`.
             JankProbe.note { "AnimatedContent spec: $initialState→$targetState morph=$containerMorph origen=${morphOrigin.kind}" }
             if (containerMorph) {
@@ -246,21 +258,14 @@ fun BoxScope.PlayerOverlay(
             }
         }
         when (state) {
-            PlayerLayerState.Expanded -> Box(Modifier.fillMaxSize()) {
-                // (Aquí hubo, del 16 al 17 ago, la punta player de un shared element solo-sombra con
-                // `RemeasureToBounds`. La sombra de la píldora ya no viaja — ver `pillShadow` en
-                // MiniPlayer.kt: al arrancar el cierre pintaba un blur de pantalla entera por frame.)
-                NowPlayingLayer(
-                    appState = appState,
-                    morphOrigin = morphOrigin,
-                    playbackViewModel = playbackViewModel,
-                    libraryViewModel = libraryViewModel,
-                    snackbarManager = snackbarManager,
-                    sharedTransitionScope = sharedTransitionScope,
-                    animatedVisibilityScope = layerScope,
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
+            // El reproductor NO vive en esta rama: es un hermano PERSISTENTE de este
+            // `AnimatedContent` (ver más abajo). Aquí queda un Box vacío porque el estado Expanded
+            // sigue haciendo falta para lo otro que gobierna la capa: que la píldora se retire.
+            //
+            // (Aquí hubo, del 16 al 17 ago, la punta player de un shared element solo-sombra con
+            // `RemeasureToBounds`. La sombra de la píldora ya no viaja — ver `pillShadow` en
+            // MiniPlayer.kt: al arrancar el cierre pintaba un blur de pantalla entera por frame.)
+            PlayerLayerState.Expanded -> Box(Modifier.fillMaxSize())
 
             // La píldora va bajo la paleta RETENIDA, igual que el NavHost: pertenece al mundo de
             // debajo del reproductor (ver el KDoc de `underlayScheme`).
@@ -314,6 +319,100 @@ fun BoxScope.PlayerOverlay(
             PlayerLayerState.Hidden -> Box(Modifier.fillMaxSize())
         }
     }
+
+    // --- El REPRODUCTOR: hermano PERSISTENTE de la capa, no una rama suya --------------------
+    //
+    // Se compone UNA vez —en cuanto hay canción— y se queda compuesto mientras la haya. Antes vivía
+    // en la rama Expanded del `AnimatedContent` de arriba, así que nacía y moría con cada apertura:
+    // medido con `JankProbe` el 17 ago, construir su árbol costaba **25-58 ms en el frame del tap**
+    // (el que arranca el morph, o sea el peor sitio posible: los specs de Compose avanzan por tiempo
+    // y el container transform daba su primer paso ya avanzado) y desmontarlo otros ~25 ms al
+    // asentar el cierre. Ninguno de los dos compra nada: el reproductor de una app de música se abre
+    // y se cierra decenas de veces por sesión y su árbol es el mismo siempre.
+    //
+    // Lo que hace posible sacarlo de ahí es que `sharedBounds` no necesita un `AnimatedVisibility`
+    // sino solo una `Transition<EnterExitState>` que le diga si esta punta es el destino y con qué
+    // enter/exit funde su contenido ([CallerManagedVisibilityScope]). Es EXACTAMENTE la técnica que
+    // ya usan las filas desde el 16 ago (`ContainerTransformOrigin`), aplicada a la otra punta: la
+    // vida del subárbol deja de depender de la animación.
+    //
+    // La píldora se queda donde estaba (en el `AnimatedContent`), y la visibilidad del reproductor es
+    // una **transición HIJA de la de la capa** en vez de una suelta sobre `playerExpanded`. Los dos
+    // valores son el mismo booleano (`playerLayer == Expanded` ⟺ `playerExpanded`, por construcción en
+    // `MusicPlayerScreen`), así que no es por conveniencia: **es lo que mantiene el morph dentro de UNA
+    // sola `Transition`**. Un `updateTransition` independiente dejaría la animación de bounds del
+    // reproductor fuera del árbol de la capa, y de ese árbol dependen tres cosas ya calibradas:
+    // `rememberPlayerMorphOrigin` (congela el origen mientras `isRunning`), `rememberUnderlayColorScheme`
+    // (retiene la paleta hasta que asienta) y el `KeepUntilTransitionsFinished` de la píldora, que la
+    // sostiene como punta de origen exactamente lo que el bounds tarda. Sueltas, la capa asentaría con
+    // el fundido de contenido (300 ms) y soltaría la píldora ~30 ms antes de que la superficie
+    // aterrizara — o sea quitarle la pareja al shared element en el último tramo.
+    val playerVisibility = layerTransition.createChildTransition(label = "playerVisibility") {
+        if (it == PlayerLayerState.Expanded) EnterExitState.Visible else EnterExitState.PostExit
+    }
+    val playerScope = remember(playerVisibility) { CallerManagedVisibilityScope(playerVisibility) }
+
+    // "EN PANTALLA" = la capa **está en `Expanded`, va hacia él o viene de él**. Y se pregunta por el
+    // ESTADO, nunca por "¿hay una transición corriendo?" — ése fue el bug que se vio al reinstalar
+    // (17 ago 12:02): la capa transiciona también en `Hidden↔Collapsed`, que es solo la píldora
+    // fundiéndose al arrancar la app o al entrar y salir de Ajustes. Con la condición puesta en
+    // `isRunning`, esos 500 ms colocaban el reproductor a pantalla completa; y como en ese momento el
+    // origen del morph es `NONE`, no hay `sharedBounds` ni `surfaceFactor` que lo atenúen, así que
+    // salía OPACO y encima de todo. Síntoma: la app arranca enseñando el NowPlaying, como si se
+    // hubiera dejado abierto.
+    //
+    // `currentState` cubre el cierre entero por construcción: una `Transition` no adopta su
+    // `targetState` hasta que TODAS sus animaciones y las de sus hijas terminan —el bounds de la
+    // píldora incluido, que es la que lo corre al cerrar—, así que sigue valiendo `Expanded` hasta que
+    // la superficie aterriza. Por eso basta con la transición de la capa y no hace falta mirar
+    // además la del reproductor, que asienta unos ms antes con su fundido de contenido.
+    val playerOnScreen = layerTransition.targetState == PlayerLayerState.Expanded ||
+        layerTransition.currentState == PlayerLayerState.Expanded
+
+    // Guardado = **no se COLOCA**, que es lo que de verdad lo saca de la pantalla: un nodo sin
+    // colocar no se dibuja y no entra en el hit test, así que ni cuesta un `saveLayer` de pantalla
+    // completa por frame ni se traga los toques que van a la píldora de debajo (un `alpha = 0f` no
+    // hace ninguna de las dos cosas: en Compose la opacidad no afecta al reparto de punteros). Lo
+    // que SÍ se conserva es la composición y la MEDIDA, que es justo lo que se quería ahorrar.
+    //
+    // Se lee DIFERIDO, dentro del bloque de colocación: así abrir y cerrar invalidan el layout de
+    // este subárbol y nada más — leerlo en composición volvería a construir el modifier (y a
+    // re-medir el reproductor entero) en cada recomposición de esta capa, que son muchas.
+    //
+    // **Lo que la permanencia SÍ cuesta**: la carátula grande del reproductor (800 px) se pide en
+    // cuanto el nodo se MIDE, que ocurra o no la colocación, así que ahora se decodifica en cada
+    // cambio de canción aunque nadie lo abra. Es el precio de tenerla ya lista en el frame del tap —
+    // que es medio motivo de este refactor— y se paga en el hilo de Coil, no en el de UI. Se anota
+    // porque es el punto por el que empezar si algún día hay que revisar la memoria de imágenes.
+    val onScreenState = rememberUpdatedState(playerOnScreen)
+    val placementGate = remember(onScreenState) {
+        Modifier.layout { measurable, constraints ->
+            val placeable = measurable.measure(constraints)
+            layout(placeable.width, placeable.height) {
+                if (onScreenState.value) placeable.place(0, 0)
+            }
+        }
+    }
+
+    // Se compone SIEMPRE, también sin canción, y eso no es descuido: sin canción [NowPlayingLayer]
+    // sale por su rama corta (unos colectores y un Box liso — `NowPlayingScreen`, que es lo caro, ni
+    // se toca) y es justo esa rama la que se encarga de CERRAR el reproductor cuando la cola se vacía
+    // (`closePlayerIfEmpty`). Condicionarlo a `currentSong != null` lo dejaría atascado: al vaciar la
+    // cola con el reproductor abierto, la capa desaparecería con `playerExpanded` todavía en `true`,
+    // o sea sin reproductor, sin píldora y sin nadie que apagara la bandera.
+    NowPlayingLayer(
+        appState = appState,
+        onScreen = playerOnScreen,
+        morphOrigin = morphOrigin,
+        playbackViewModel = playbackViewModel,
+        libraryViewModel = libraryViewModel,
+        snackbarManager = snackbarManager,
+        sharedTransitionScope = sharedTransitionScope,
+        animatedVisibilityScope = playerScope,
+        modifier = Modifier
+            .fillMaxSize()
+            .then(placementGate)
+    )
 
     // --- Hoja "añadir canciones" (estado en MusicAppState) ------------------------------------
     // Vive aquí, y no en la pantalla que la abre, porque su estado tiene que sobrevivir a la

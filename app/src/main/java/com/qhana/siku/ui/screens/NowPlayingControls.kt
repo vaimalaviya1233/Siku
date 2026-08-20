@@ -52,6 +52,7 @@ import com.qhana.siku.data.model.PlaybackState
 import com.qhana.siku.data.model.PlayerToolbarAction
 import com.qhana.siku.data.model.RepeatMode
 import com.qhana.siku.data.model.ToolbarActionState
+import com.qhana.siku.ui.LocalPlayerOnScreen
 import com.qhana.siku.ui.components.*
 
 import com.qhana.siku.ui.theme.appSpatialSpec
@@ -60,6 +61,8 @@ import com.qhana.siku.ui.theme.appEffectsSpec
 import com.qhana.siku.ui.theme.appShrinkWidthFadeOut
 import com.qhana.siku.ui.theme.appExpandWidthFadeIn
 import com.qhana.siku.ui.theme.AppRevealSpec
+import com.qhana.siku.ui.components.pixelPacedClock
+import com.qhana.siku.ui.components.stepMillisFor
 
 /*
  * TRANSPORTE y BARRA DE ACCIONES del NowPlaying: el grupo prev/play/next con sus formas
@@ -241,6 +244,27 @@ private const val COOKIE_SPIN_PERIOD_MS = 18_000
 /** Una vuelta completa, en grados. */
 private const val FULL_TURN_DEGREES = 360f
 
+/**
+ * ¿Toca la coreografía de **"cambió la canción bajo tus ojos"** (el reveal del acento del transporte y
+ * el de la carátula)? Solo con el reproductor **abierto, quieto y a la vista**, que son tres
+ * condiciones y no una:
+ *
+ *  - **Quieto** (`currentState == targetState`): durante el morph la pantalla entera ya se está
+ *    moviendo, y encadenar encima un reveal —que compone su bloque DOS veces, con todos sus
+ *    componentes Expressive— es lo que apilaba dos animaciones caras y se leía como tartamudeo.
+ *  - **A la vista** ([com.qhana.siku.ui.LocalPlayerOnScreen]): desde que el reproductor es persistente,
+ *    "quieto" también es cierto con él GUARDADO, así que sin esta parte cada "siguiente" desde la
+ *    píldora o la notificación correría los dos reveals enteros donde no los ve nadie.
+ *  - **Abriendo desde una lista** nunca viste la carátula anterior en grande: no hay nada que revelar.
+ *
+ * Sin scope compartido (el modo ambiental, una vista previa) no hay morph del que protegerse y el
+ * reveal va como siempre.
+ */
+@Composable
+internal fun playerRevealEnabled(animatedVisibilityScope: AnimatedVisibilityScope?): Boolean =
+    LocalPlayerOnScreen.current &&
+        (animatedVisibilityScope?.transition?.let { it.currentState == it.targetState } ?: true)
+
 @Composable
 internal fun rememberPlayButtonSpin(isPlayingOrBuffering: Boolean): PlayButtonSpinState {
     // Morph continuo píldora (pausa) ↔ Cookie9Sided (reproduciendo); mismo token que las dimensiones
@@ -253,12 +277,18 @@ internal fun rememberPlayButtonSpin(isPlayingOrBuffering: Boolean): PlayButtonSp
         animationSpec = appSpatialSpec(),
         label = "playShapeMorph"
     )
-    // La transición infinita solo existe mientras el botón no es píldora pura en reposo.
+    // La transición infinita solo existe mientras el botón no es píldora pura en reposo **y el
+    // reproductor se ve**. Lo segundo hace falta desde que el subárbol del player es PERSISTENTE (ver
+    // [com.qhana.siku.ui.LocalPlayerOnScreen]): girar detrás de la biblioteca es exactamente el
+    // productor continuo de frames que la regla del 17 ago prohíbe, y encima invisible. El ángulo se
+    // repone a 0 al parar, así que reabrir no enseña un salto.
+    //
     // derivedStateOf: el caller (layout) no recompone por frame durante el morph, solo
     // cuando el booleano realmente cambia.
     val playing = rememberUpdatedState(isPlayingOrBuffering)
+    val onScreen = rememberUpdatedState(LocalPlayerOnScreen.current)
     val spinning by remember {
-        derivedStateOf { playing.value || morphProgress.value > 0f }
+        derivedStateOf { onScreen.value && (playing.value || morphProgress.value > 0f) }
     }
     // El giro NO es un `rememberInfiniteTransition`, y el motivo está MEDIDO (Perfetto, 17 ago):
     // una animación infinita invalida el dibujo en CADA vsync, así que con el reproductor abierto
@@ -268,16 +298,20 @@ internal fun rememberPlayButtonSpin(isPlayingOrBuffering: Boolean): PlayButtonSp
     // apertura), la app queda un buffer por delante de SurfaceFlinger, y mientras no deje de producir
     // la cola no drena; ese estado sobrevivía al cierre y se comía el primer scroll de la lista
     // (frames presentados tarde y tirados hasta la primera pausa). La regla que sale de ahí:
-    // **no dibujar lo que no mueve ni un píxel**. El reloj sigue siendo continuo (`withFrameNanos`,
-    // que NO produce frames si nadie invalida) pero el ángulo publicado solo cambia cuando el borde
-    // de la cookie se ha desplazado al menos un píxel — así entre actualizaciones hay vsyncs vacíos,
-    // la cola drena sola y el giro se ve exactamente igual.
+    // **no dibujar lo que no mueve ni un píxel**. El ángulo publicado solo cambia cuando el borde de
+    // la cookie se ha desplazado al menos uno.
+    //
+    // Y desde el 20 ago 2026 **tampoco se DESPIERTA de más**: el reloj era `withFrameNanos` con el
+    // argumento de que "no produce frames si nadie invalida", y eso resultó ser media verdad —no
+    // invalida, pero mantiene un frame callback pendiente y con él el Choreographer pidiendo vsyncs.
+    // Medido: 45 ms de cada segundo en el hilo principal sin dibujar nada. Ahora el ritmo lo pone
+    // [pixelPacedClock].
     val density = LocalDensity.current
     // Paso angular mínimo = un píxel en el borde de la cookie: atan(1 px / radio en px). Derivado
     // del tamaño real del botón y de la densidad, no un número elegido.
     val stepDegrees = remember(density) {
         with(density) {
-            Math.toDegrees(kotlin.math.atan(1.0 / (PlayButtonPlayingSize.toPx() / 2.0))).toFloat()
+            Math.toDegrees(kotlin.math.atan(1.0 / (PlayButtonHeight.toPx() / 2.0))).toFloat()
         }
     }
     val angleState = remember { mutableFloatStateOf(0f) }
@@ -286,19 +320,26 @@ internal fun rememberPlayButtonSpin(isPlayingOrBuffering: Boolean): PlayButtonSp
             angleState.floatValue = 0f
             return@LaunchedEffect
         }
-        val startNanos = withFrameNanos { it }
+        var startNanos = 0L
         var published = 0f
         angleState.floatValue = 0f
-        while (true) {
-            withFrameNanos { now ->
-                val turns = (now - startNanos) / (COOKIE_SPIN_PERIOD_MS * 1_000_000.0)
-                val continuous = (turns * FULL_TURN_DEGREES).toFloat()
-                if (continuous - published >= stepDegrees) {
-                    published = continuous
-                    // Módulo una vuelta: la rotación es periódica y así el Float no pierde precisión
-                    // tras horas de reproducción.
-                    angleState.floatValue = continuous % FULL_TURN_DEGREES
-                }
+        // El borde recorre un píxel cada `stepDegrees`, y la cookie gira
+        // `360 / COOKIE_SPIN_PERIOD_MS` grados por segundo: de ahí sale a qué ritmo hay algo que
+        // enseñar —unas 38 veces por segundo con el botón a 80dp— y, desde el 20 ago 2026, también
+        // a qué ritmo se DESPIERTA. Ver [pixelPacedClock]: el bucle iba con `withFrameNanos`, o sea
+        // 120 despertares por segundo, la mayoría sin nada que publicar.
+        val degreesPerSecond = FULL_TURN_DEGREES / (COOKIE_SPIN_PERIOD_MS / 1000f)
+        pixelPacedClock(stepMillisFor(degreesPerSecond / stepDegrees)) { now ->
+            if (startNanos == 0L) startNanos = now
+            val turns = (now - startNanos) / (COOKIE_SPIN_PERIOD_MS * 1_000_000.0)
+            val continuous = (turns * FULL_TURN_DEGREES).toFloat()
+            // La regla del píxel se queda como RED: el intervalo ya la garantiza, pero `delay` no
+            // promete cadencia y un tick temprano no debe publicar de más.
+            if (continuous - published >= stepDegrees) {
+                published = continuous
+                // Módulo una vuelta: la rotación es periódica y así el Float no pierde precisión
+                // tras horas de reproducción.
+                angleState.floatValue = continuous % FULL_TURN_DEGREES
             }
         }
     }
@@ -574,27 +615,27 @@ internal fun PlaybackControls(
         // transporte jamás debe esconderse). Los menuContent quedan como red de seguridad
         // funcional por si un cambio futuro rompe esa invariante.
 
-        // REPRODUCIENDO: el play es una COOKIE de 9 lados (88×88, morph desde la píldora
-        // vía PlayButtonMorphShape) y los laterales círculos de 64.dp. EN PAUSA: los
-        // laterales se estiran a cápsulas verticales (56×80) y el play vuelve a píldora
-        // (132×80, solo icono). Forma y dimensiones animan con el mismo spring.
-        // UN solo spec para las cuatro dimensiones y para el morph de la forma
+        // En los dos botones lo único que cambia con el estado es el ANCHO —lo único que el spec
+        // mueve entre variantes—; los ALTOS son fijos (80 el play, 56 los laterales, ver
+        // [PlayButtonHeight] y [SideButtonHeight]).
+        // REPRODUCIENDO: el play es una COOKIE de 9 lados (80×80, morph desde la píldora vía
+        // PlayButtonMorphShape) y los laterales círculos (56×56 = Medium uniform).
+        // EN PAUSA: el play crece a píldora (120×80, medidas propias — ver [PlayButtonHeight]) y
+        // los laterales se estrechan (48×56 = Medium narrow). Forma y ancho animan con el mismo
+        // spring.
+        // UN solo spec para los dos anchos animados y para el morph de la forma
         // ([rememberPlayButtonSpin] usa el mismo token): es lo que hace que el grupo se mueva como
-        // una pieza en vez de como cuatro animaciones que casualmente duran parecido.
+        // una pieza en vez de como animaciones que casualmente duran parecido. Los altos ya no se
+        // animan —son constantes—, así que hay dos `animateDpAsState` menos por frame de morph.
         val transportSpec = appSpatialSpec<Dp>()
         // Cruce del glifo play/pause/buffering. Izados porque `transitionSpec` de `AnimatedContent`
         // no es un lambda composable. El que entra con el token *default*, el que sale con *fast*.
         val glyphEnterScale = appSpatialSpec<Float>()
         val glyphExitScale = appFastSpatialSpec<Float>()
         val playWidth by animateDpAsState(
-            targetValue = if (isPlayingOrBuffering) PlayButtonPlayingSize else PlayButtonPausedWidth,
+            targetValue = if (isPlayingOrBuffering) PlayButtonPlayingWidth else PlayButtonPausedWidth,
             animationSpec = transportSpec,
             label = "playButtonWidth"
-        )
-        val playHeight by animateDpAsState(
-            targetValue = if (isPlayingOrBuffering) PlayButtonPlayingSize else PlayButtonPausedHeight,
-            animationSpec = transportSpec,
-            label = "playButtonHeight"
         )
         // Giro continuo de la cookie mientras suena. La rotación se aplica en un
         // graphicsLayer con lambda (solo invalida el draw, cero recomposición por
@@ -605,18 +646,17 @@ internal fun PlaybackControls(
         val playMorphProgress by spin.morphProgress
         val cookieAngle = spin.angle
         val sideWidth by animateDpAsState(
-            targetValue = if (isPlayingOrBuffering) 64.dp else 56.dp,
+            targetValue = if (isPlayingOrBuffering) SideButtonUniformWidth else SideButtonNarrowWidth,
             animationSpec = transportSpec,
             label = "sideButtonWidth"
         )
-        val sideHeight by animateDpAsState(
-            targetValue = if (isPlayingOrBuffering) 64.dp else 80.dp,
-            animationSpec = transportSpec,
-            label = "sideButtonHeight"
-        )
+        // Formas del spec para un icon button Medium: `ContainerShapeRound` = CornerFull en reposo y
+        // `PressedContainerShape` = CornerMedium al pulsar, que es `MaterialTheme.shapes.medium` —
+        // se toma del tema y no de un dp escrito a mano, que es lo que había (16dp, el corner de un
+        // botón Large).
         val sideShapes = IconButtonShapes(
             shape = RoundedCornerShape(percent = 50),
-            pressedShape = RoundedCornerShape(NowPlayingConfig.GroupInnerCorner)
+            pressedShape = MaterialTheme.shapes.medium
         )
         val prevShapes = sideShapes
         val nextShapes = sideShapes
@@ -637,6 +677,7 @@ internal fun PlaybackControls(
                 val moreControlsDesc = stringResource(R.string.np_more_controls)
                 FilledIconButton(
                     onClick = { menuState.show() },
+                    shapes = IconButtonDefaults.shapes(),
                     colors = IconButtonDefaults.filledIconButtonColors(
                         containerColor = sideButtonContainer,
                         contentColor = sideButtonContent
@@ -675,10 +716,10 @@ internal fun PlaybackControls(
                         modifier = Modifier
                             .weight(sideWidth.value)
                             .animateWidth(prevInteraction)
-                            .height(sideHeight)
+                            .height(SideButtonHeight)
                             .semantics { contentDescription = prevDesc }
                     ) {
-                        MaterialSymbol("skip_previous", size = 32.sp, fill = true)
+                        MaterialSymbol("skip_previous", size = SideButtonIconSize, fill = true)
                     }
                 },
                 menuContent = { state ->
@@ -721,7 +762,7 @@ internal fun PlaybackControls(
                         modifier = Modifier
                             .weight(playWidth.value)
                             .animateWidth(playInteraction)
-                            .height(playHeight)
+                            .height(PlayButtonHeight)
                             .graphicsLayer {
                                 rotationZ = cookieSpinDegrees(cookieAngle.value, playMorphProgress)
                             }
@@ -753,9 +794,9 @@ internal fun PlaybackControls(
                                         LoadingIndicator(color = playButtonContentColor, modifier = Modifier.size(44.dp))
                                     }
                                     PlaybackState.PLAYING ->
-                                        MaterialSymbol("pause", size = 32.sp, color = playButtonContentColor, fill = true)
+                                        MaterialSymbol("pause", size = PlayButtonIconSize, color = playButtonContentColor, fill = true)
                                     else ->
-                                        MaterialSymbol("play_arrow", size = 32.sp, color = playButtonContentColor, fill = true)
+                                        MaterialSymbol("play_arrow", size = PlayButtonIconSize, color = playButtonContentColor, fill = true)
                                 }
                             }
                         }
@@ -792,10 +833,10 @@ internal fun PlaybackControls(
                         modifier = Modifier
                             .weight(sideWidth.value)
                             .animateWidth(nextInteraction)
-                            .height(sideHeight)
+                            .height(SideButtonHeight)
                             .semantics { contentDescription = nextDesc }
                     ) {
-                        MaterialSymbol("skip_next", size = 32.sp, fill = true)
+                        MaterialSymbol("skip_next", size = SideButtonIconSize, fill = true)
                     }
                 },
                 menuContent = { state ->
@@ -1152,7 +1193,7 @@ internal fun BottomActionBar(
                     )
                     // Menú SEGMENTADO (popup + grupo), no el `DropdownMenu` clásico: ver la nota
                     // en SortChip.
-                    DropdownMenuPopup(
+                    AppMenuPopup(
                         expanded = showMenu,
                         onDismissRequest = { showMenu = false }
                     ) {
@@ -1354,19 +1395,56 @@ private fun keepsGlyph(discTone: Double, glyphTone: Double): Boolean {
 }
 
 /**
- * Las dos formas del botón de play, que MORFA entre ellas según el estado: cuadrado cuando suena
- * (con las esquinas redondeadas del shape animado, o sea un círculo) y píldora ancha en pausa.
+ * Medidas del botón de play. **Las tres son PROPIAS, no de la escala de icon button**, y se
+ * calibraron mirando la pantalla: el contenedor Large son 96 de alto y el `Wide` 128 de ancho, y esa
+ * combinación deja la píldora de pausa rechoncha (1,33:1) además de comerse la carátula, que es
+ * `weight(1f)` y vive de lo que sobra en la columna.
  *
- * Los tres números van juntos porque describen UNA pieza en sus dos estados, y estaban escritos
- * inline dentro de los `animateDpAsState`. Lo que importa es la relación: en pausa el botón se
- * ENSANCHA y se achata —invitando a pulsarlo, que es cuando el usuario quiere reanudar— y al sonar
- * se contrae al cuadrado.
+ * Lo que cambia con el estado es solo el ANCHO, como en los laterales: **80×80** cuando suena
+ * (cuadrado ⇒ la cookie de 9 lados que gira) y **120×80** en pausa (píldora, 1,5:1). El ALTO es fijo
+ * — el mismo que el diseño original — y por eso el botón ya no se achata al pausar.
  *
- * **Ojo con las coincidencias**: 88 y 132 aparecen también en el destello del doble toque y en el
- * fundido de las letras, y no tienen ninguna relación con esto. Compartir el dígito no es compartir
- * el concepto.
+ * Lo único del spec que sobrevive aquí es el ICONO: los 32 del Large, que sobre 80 de contenedor dan
+ * un 40 %, la proporción "llena" del Medium. No cambia entre estados — hacerlo haría parpadear el
+ * glifo en cada play/pausa.
+ *
+ * **Ojo con las coincidencias**: 80 y 120 aparecen en otros sitios (destello del doble toque,
+ * fundido de las letras) sin ninguna relación con esto. Compartir el dígito no es compartir el
+ * concepto.
  */
-private val PlayButtonPlayingSize = 88.dp
-private val PlayButtonPausedWidth = 132.dp
-private val PlayButtonPausedHeight = 80.dp
+private val PlayButtonHeight = 80.dp
+
+private val PlayButtonPlayingWidth = 80.dp
+
+private val PlayButtonPausedWidth = 120.dp
+
+/**
+ * Prev/next = icon button **Medium** del spec, leído de `MediumIconButtonTokens`: contenedor 56dp de
+ * alto, icono 24 y tres anchos según la variante — `Narrow` 48 (24 + 12 + 12), `Uniform` 56
+ * (24 + 16 + 16) y `Wide` 72 (24 + 24 + 24).
+ *
+ * **El alto NO cambia con el estado**, igual que en el play: es el del contenedor, y el spec solo
+ * mueve el eje horizontal entre variantes. Sonando son círculos **Uniform** (56×56, cuadrado ⇒
+ * círculo con `CornerFull`) y en pausa se estrechan a **Narrow** (48×56), acompañando al play que se
+ * ensancha. Hubo un estado intermedio donde en pausa se estiraban a lo alto hasta igualar al play
+ * (48×96): esa cápsula vertical no tiene token —el spec no tabula altos por variante— y se
+ * descartó.
+ */
+private val SideButtonHeight = 56.dp
+
+private val SideButtonUniformWidth = 56.dp
+
+private val SideButtonNarrowWidth = 48.dp
+
+/**
+ * Glifos del transporte: `LargeIconButtonTokens.IconSize` (32) para el play y
+ * `MediumIconButtonTokens.IconSize` (24) para prev/next. Los dos estaban en 32, o sea el del Large
+ * aplicado también a los laterales.
+ *
+ * En **sp** y no en dp porque un `MaterialSymbol` es tipografía (fuente variable), así que escala
+ * con el ajuste de tamaño de texto del sistema — a escala 1 coincide exactamente con el token.
+ */
+private val PlayButtonIconSize = 32.sp
+
+private val SideButtonIconSize = 24.sp
 

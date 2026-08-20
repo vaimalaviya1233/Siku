@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LoadingIndicator
@@ -44,7 +45,6 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -116,11 +116,19 @@ fun SourceCard(
                         Spacer(modifier = Modifier.width(8.dp))
                     }
                     if (isConfigured) {
-                        OutlinedButton(onClick = onPrimaryAction, enabled = primaryActionEnabled) {
+                        OutlinedButton(
+                            onClick = onPrimaryAction,
+                            enabled = primaryActionEnabled,
+                            shapes = ButtonDefaults.shapes()
+                        ) {
                             Text(primaryActionLabel)
                         }
                     } else {
-                        Button(onClick = onPrimaryAction, enabled = primaryActionEnabled) {
+                        Button(
+                            onClick = onPrimaryAction,
+                            enabled = primaryActionEnabled,
+                            shapes = ButtonDefaults.shapes()
+                        ) {
                             Text(primaryActionLabel)
                         }
                     }
@@ -371,11 +379,11 @@ fun LocalFoldersSourceCard(
                 horizontalArrangement = Arrangement.End
             ) {
                 if (folderUris.isEmpty()) {
-                    Button(onClick = { folderPicker.launch(null) }) {
+                    Button(onClick = { folderPicker.launch(null) }, shapes = ButtonDefaults.shapes()) {
                         Text(stringResource(R.string.settings_local_pick))
                     }
                 } else {
-                    OutlinedButton(onClick = { folderPicker.launch(null) }) {
+                    OutlinedButton(onClick = { folderPicker.launch(null) }, shapes = ButtonDefaults.shapes()) {
                         Text(stringResource(R.string.settings_local_add))
                     }
                 }
@@ -694,8 +702,7 @@ fun StorageLimitCard(
             Text(
                 text = if (gb <= 0) stringResource(R.string.download_storage_limit_unlimited)
                 else stringResource(R.string.download_storage_limit_value, gb.toString()),
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.headlineSmallEmphasized,
                 color = if (enabled) MaterialTheme.colorScheme.primary
                 else MaterialTheme.colorScheme.primary.copy(alpha = DISABLED_CONTENT_ALPHA)
             )

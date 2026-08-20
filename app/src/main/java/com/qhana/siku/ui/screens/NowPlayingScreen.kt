@@ -3,6 +3,7 @@ package com.qhana.siku.ui.screens
 import androidx.compose.animation.*
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.snap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
@@ -12,6 +13,7 @@ import com.qhana.siku.R
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -34,16 +36,16 @@ import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.model.SourceType
 import com.qhana.siku.data.model.ToolbarActionState
 import com.qhana.siku.ui.components.*
+import com.qhana.siku.ui.LocalPlayerOnScreen
 import com.qhana.siku.ui.model.toUiModel
 import com.qhana.siku.ui.util.shareSong
 import com.qhana.siku.ui.state.NowPlayingUiState
 import com.qhana.siku.ui.theme.AppContainerBoundsTransform
 import com.qhana.siku.ui.theme.EXPRESSIVE_DEFAULT_EFFECTS_MS
+import com.qhana.siku.ui.theme.EXPRESSIVE_SLOW_EFFECTS_MS
 import com.qhana.siku.ui.theme.ExpressiveDefaultEffectsEasing
 import com.qhana.siku.ui.theme.appContainerContentEnter
-import com.qhana.siku.ui.theme.appContainerContentExit
-import com.qhana.siku.ui.theme.appSheetEnter
-import com.qhana.siku.ui.theme.appSheetExit
+import com.qhana.siku.ui.theme.appContainerSurfaceExitSpec
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
@@ -56,9 +58,37 @@ internal object NowPlayingConfig {
     // Expressive: separación visible entre miembros y esquinas interiores generosas que se
     // encogen al presionar. La barra de acciones es un STANDARD button group (formas
     // individuales, separación 12.dp de spec) — sus corners viven en GlassActionButton.
+    /**
+     * **Escala de separación vertical del reproductor.** Los tres niveles se llaman por la RELACIÓN
+     * que expresan, no por su valor: qué tan juntas están dos cosas es lo que dice si son la misma
+     * pieza, dos bloques vecinos o dos regiones distintas de la pantalla.
+     *
+     * Antes eran literales sueltos repartidos por los dos layouts —16, 24, 32 y un 6 huérfano—, sin
+     * que nada dijera qué nivel representaba cada uno: info→barra iban 24 y barra→transporte 32, sin
+     * criterio que explicara la diferencia. Mismo patrón que `SettingsTokens.GroupGap`/`SectionGap`
+     * en Ajustes.
+     */
+    val ItemGap = 8.dp
+
+    /** Bloques vecinos de la misma región: barra superior ↔ carátula ↔ título. */
+    val BlockGap = 16.dp
+
+    /**
+     * Regiones funcionales: info+barra ↔ transporte ↔ toolbar. **Vale para portrait y landscape.**
+     *
+     * El valor se calibró en device bajando desde 32: en esta columna todo lo que crece se lo quita
+     * a la CARÁTULA (es `weight(1f)` y cuadrada, o sea que 4dp aquí son 8 de lado por cada uno de
+     * los tres saltos), así que el número sale de mirar las dos cosas a la vez — que las regiones se
+     * lean separadas y que la portada no se encoja. De paso hace innecesaria la variante compacta
+     * que el landscape tenía aparte: los dos layouts usan ahora la misma escala entera.
+     */
+    val SectionGap = 28.dp
+
     val GroupSpacing = 8.dp
-    val GroupInnerCorner = 16.dp
-    val GroupInnerCornerPressed = 8.dp
+    // Las esquinas del grupo YA NO viven aquí: las de prev/next salen de las formas del icon button
+    // Medium del spec (`CornerFull` en reposo, `MaterialTheme.shapes.medium` al pulsar) y las del
+    // play, de su morph. Estaban en 16/8 dp escritos a mano — 16 es el corner de un botón Large, o
+    // sea el tamaño equivocado, y el de 8 no lo leía nadie.
     // Hueco MÍNIMO garantizado entre el grupo de transporte y los toggles laterales
     // (aleatorio/repetir): el play se ensancha en pausa y sin este colchón se tocaban.
     val TransportSideGap = 12.dp
@@ -136,6 +166,8 @@ fun NowPlayingScreen(
     wavyProgress: Boolean,
     /** Ajustes -> Apariencia: grosor de la barra de progreso (vale para los dos modos). */
     progressThickness: Dp,
+    /** Ajustes → Apariencia: palo del handle permanente; false = solo mientras se arrastra. */
+    progressHandle: Boolean,
     /** Chip de formato con ficha técnica; se conmuta desde Ajustes O tocando el propio chip. */
     detailedFormat: Boolean,
     onToggleDetailedFormat: () -> Unit,
@@ -164,12 +196,33 @@ fun NowPlayingScreen(
      * es la misma y esta pantalla solo necesita saber a qué key engancharse.
      */
     containerSharedKey: Any? = null,
-    animatedVisibilityScope: AnimatedVisibilityScope? = null
+    animatedVisibilityScope: AnimatedVisibilityScope? = null,
+    /**
+     * Una superficie opaca a pantalla completa tapa el reproductor AHORA MISMO. Hoy solo la hoja del
+     * ecualizador, que se monta un nivel más arriba ([com.qhana.siku.ui.NowPlayingRoute]); las de esta
+     * pantalla (letras, cola) lo dicen por su cuenta.
+     *
+     * Es lo que apaga los relojes de dentro mientras no se ven — ver el `CompositionLocalProvider` del
+     * layout. NO es lo mismo que `LocalPlayerOnScreen`: aquél significa "el reproductor está abierto"
+     * y gobierna además el `keepScreenOn` y el reseteo del estado al guardarse, que con una hoja
+     * encima tienen que seguir valiendo.
+     */
+    obscured: Boolean = false
 ) {
     // Sonda (solo debug): cada recomposición del scope de esta pantalla (es la función grande).
     SideEffect { com.qhana.siku.data.util.JankProbe.mark { "NowPlayingScreen recompuesta" } }
+    // ¿El reproductor se ve? Es persistente (ver `PlayerOverlay`), así que este árbol sigue vivo con
+    // el reproductor guardado y todo lo que arrastre estado hasta la próxima apertura hay que
+    // reponerlo a mano. Ver [LocalPlayerOnScreen].
+    val onScreen = LocalPlayerOnScreen.current
     var showQueueSheet by remember { mutableStateOf(false) }
     var showLyrics by remember { mutableStateOf(false) }
+    // ¿Alguna de las hojas de ESTA pantalla tapa el reproductor del todo? Lo publica [SheetOverlay]
+    // cuando su animación ha ASENTADO en abierto, así que vale `false` durante toda la subida y desde
+    // el primer frame de la bajada — o sea, siempre que el reproductor pueda verse. Ver el uso más
+    // abajo, en el `CompositionLocalProvider` que envuelve el layout.
+    var queueCovering by remember { mutableStateOf(false) }
+    var lyricsCovering by remember { mutableStateOf(false) }
     var showAmbientModeDialog by remember { mutableStateOf(false) }
     var showAddToPlaylist by remember { mutableStateOf(false) }
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
@@ -187,11 +240,13 @@ fun NowPlayingScreen(
         else if (showQueueSheet) showQueueSheet = false
     }
 
-    val isPlayingOrBuffering by remember(playbackState) {
-        derivedStateOf {
-            playbackState == PlaybackState.PLAYING || playbackState == PlaybackState.BUFFERING
-        }
-    }
+    // Un `val` y no un `derivedStateOf`: `playbackState` es un PARÁMETRO plano (un enum), no un
+    // `State`, así que el derivado no observaba nada y no podía filtrar ninguna emisión. Lo único
+    // que aportaba era un `DerivedSnapshotState` que se reconstruía en cada cambio de estado, más
+    // una indirección de snapshot en cada una de sus dos lecturas. `derivedStateOf` sirve cuando se
+    // LEE estado observable y se quiere emitir menos que él; comparar dos enums no es ese caso.
+    val isPlayingOrBuffering =
+        playbackState == PlaybackState.PLAYING || playbackState == PlaybackState.BUFFERING
 
     // Auto-fetch lyrics (force = false) cuando se abre el overlay.
     // Claves mínimas: sólo el par (showLyrics, song.id). Los campos de estado de loading
@@ -202,11 +257,15 @@ fun NowPlayingScreen(
         }
     }
 
-    // Keep screen on while lyrics are visible
+    // Mantener la pantalla encendida mientras se ven las letras. **Gateado por [onScreen]**: este
+    // efecto ya no se desmonta al cerrar el reproductor, así que sin el gate la preferencia
+    // `keepScreenOn` —que se ofrece DENTRO del player— dejaría la pantalla encendida en la biblioteca
+    // y en Ajustes, que es justo el alcance que se acotó por batería (ver `screenOnActive` en
+    // `MusicPlayerScreen`, que hace lo propio sobre la ventana).
     val view = androidx.compose.ui.platform.LocalView.current
-    DisposableEffect(showLyrics, keepScreenOn) {
-        view.keepScreenOn = showLyrics || keepScreenOn
-        onDispose { view.keepScreenOn = keepScreenOn }
+    DisposableEffect(onScreen, showLyrics, keepScreenOn) {
+        view.keepScreenOn = onScreen && (showLyrics || keepScreenOn)
+        onDispose { view.keepScreenOn = false }
     }
 
     val song = uiState.song
@@ -298,33 +357,69 @@ fun NowPlayingScreen(
     val dismissState = rememberPlayerDismissState { navigationActions.onBackClick() }
     val activeDismiss = dismissState.takeIf { gesturesEnabled }
 
+    // Al GUARDARSE, el reproductor vuelve a su estado de reposo. Antes lo hacía la descomposición;
+    // ahora que sobrevive hay que reponerlo, o reabrirlo mostraría lo último que quedó abierto —una
+    // hoja, un diálogo— y, peor, el desplazamiento del gesto de cierre: el arrastre no vuelve a cero
+    // al soltar (ver [PlayerDismissState]), así que el reproductor reaparecería caído y translúcido.
+    //
+    // Se dispara con `!onScreen`, o sea con el morph YA terminado: cerrar las hojas al empezar el
+    // cierre se vería en el propio morph.
+    LaunchedEffect(onScreen) {
+        if (onScreen) return@LaunchedEffect
+        showLyrics = false
+        showQueueSheet = false
+        showAmbientModeDialog = false
+        showAddToPlaylist = false
+        showCreatePlaylistDialog = false
+        showSleepTimerSheet = false
+        dismissState.reset()
+    }
+
     // CONTAINER TRANSFORM: la superficie de origen y esta pantalla son LA MISMA cambiando de tamaño
     // (ver [PLAYER_CONTAINER_SHARED_KEY]). Envuelve la pantalla ENTERA —fondo y contenido—, porque en
     // este patrón lo que se ve encoger y crecer es el contenedor CON lo que lleva dentro.
     //
     // El origen es la PÍLDORA o la FILA tocada según cómo se abriera el player, y esa diferencia no
-    // llega hasta aquí: las dos puntas se configuran igual (misma `key` por parámetro, mismo resize,
-    // mismo bounds spec) porque son la misma coreografía. (La sombra de la píldora no participa: se
-    // dibuja en su sitio bajo el overlay y solo se funde — ver `pillShadow` en MiniPlayer.kt.)
+    // llega hasta aquí: las dos puntas comparten `key`, bounds spec y alineación. (La sombra de la
+    // píldora no participa: se dibuja en su sitio bajo el overlay y solo se funde — ver `pillShadow`
+    // en MiniPlayer.kt.)
     //
-    // **`ContentScale.Fit` es la pieza que costó tres intentos encontrar, y el culpable de los tres
-    // fallos anteriores fue siempre el CONTENT SCALE, no el `resizeMode`:**
+    // ## El CONTENT SCALE **no es el mismo en las dos puntas, y no puede serlo** (17 ago 2026)
     //
-    //  - `Crop` (v1) → un factor de escala de **1**, porque `Crop` toma el MAYOR de los dos ratios y
-    //    las dos superficies comparten ancho (ratio 1) mientras el de alto es ~0.03. O sea el player
-    //    se dibujaba a tamaño real trasladándose una pantalla entera: el "slide up". Y al cerrar se
-    //    quedaba a tamaño COMPLETO desvaneciéndose sobre el home, que es lo que se veía como restos.
-    //    (El comentario que justificaba `Crop` razonaba sobre la punta de la PÍLDORA, donde sí cambia
-    //    algo, y trasladaba la conclusión a ésta, donde `Crop` y `FillWidth` dan exactamente lo mismo.)
-    //  - `RemeasureToBounds` (v2) → re-medir el layout cada frame, y como la carátula es el único
-    //    `weight(1f)` de la columna absorbía TODA la holgura: cero durante los primeros dos tercios del
-    //    recorrido y luego disparada. La "doble animación" del 16 ago.
-    //  - `Fit` toma el MENOR de los ratios (~0.03), así que el contenido **se achica hasta la nada**
-    //    con la superficie al cerrar y crece desde ella al abrir. Sin re-medir nada: la carátula
-    //    conserva su tamaño de layout y solo se escala, que es lo que evita el fallo de la v2.
+    // La regla verdadera es una sola: **el contenido de cada punta se dibuja a su tamaño NATURAL
+    // durante todo el morph, y lo que revela u oculta es el RECORTE del contenedor.** Lo que cambia es
+    // qué `ContentScale` consigue eso a cada lado, porque `scaleToBounds` mapea el contenido dentro
+    // del rect animado y los dos contenidos tienen tamaños opuestos:
     //
-    // `Alignment.Center` y no `TopCenter`: el contenido escalado se ancla al centro del rect, o sea
-    // crece desde el centro de la píldora en vez de colgar de su borde superior.
+    //  - **Origen** (fila o píldora, contenido CHICO) → `Fit`. El menor de los ratios lo deja en 1
+    //    mientras el rect es el suyo y no lo agranda cuando el rect crece a pantalla completa. Con
+    //    `Crop` ahí el contenido de la barra se ampliaba 34× — el "14 Occasions gigante" del 16 ago.
+    //  - **Destino** (este player, contenido de PANTALLA COMPLETA) → `FillWidth`. El ratio de ANCHO
+    //    vale ~0.96 desde el primer frame (fila y píldora ocupan casi todo el ancho), así que el
+    //    contenido nace ya a tamaño natural y el rect lo va destapando. El sobrante vertical lo
+    //    recorta `clipInOverlayDuringTransition`, que es de dónde sale la lectura de *contenedor que
+    //    crece*.
+    //
+    // **`Fit` en ESTA punta era el bug que el usuario reportó el 17 ago** ("todo el NowPlaying sale
+    // desde el fondo y no es un container transform"): el menor de los dos ratios es el de ALTO
+    // (~0.03), así que el reproductor entero se dibujaba al 3 % —una maqueta en miniatura con sus
+    // controles y su barra de progreso diminutos— y hacía zoom hasta la pantalla. Eso no es un
+    // container transform: es un objeto acercándose desde lejos. En la referencia de Material el
+    // contenido de destino aparece SIEMPRE a su tamaño final y lo único que se mueve es el borde del
+    // contenedor.
+    //
+    // Hasta hoy este bloque afirmaba que las dos puntas debían configurarse IGUAL, y de ahí salía
+    // `Fit` aquí. Esa regla generalizaba de más un fallo real —el del 16 ago, donde la asimetría fue
+    // un descuido y no una decisión— y es lo que mantuvo la miniatura durante un mes.
+    //
+    // `RemeasureToBounds` sigue DESCARTADO: re-mide el layout cada frame y la carátula, único
+    // `weight(1f)` de la columna, absorbía toda la holgura — cero durante los primeros dos tercios del
+    // recorrido y luego disparada (la "doble animación" del 16 ago). `scaleToBounds` no re-mide nada.
+    //
+    // `Alignment.Center` y no `TopCenter`: el contenido se ancla al CENTRO del rect. Abriendo desde
+    // una fila eso es casi un no-movimiento (el centro de la fila ya está cerca del centro de la
+    // pantalla), que es exactamente la quietud que se busca; anclarlo arriba lo haría subir media
+    // pantalla por debajo del recorte.
     //
     // La PORTADA es la excepción y no viaja escalada con esto: tiene su propio shared element
     // ([PLAYER_ART_SHARED_KEY]) y se eleva al overlay, así que se dibuja UNA sola vez, en sus propios
@@ -343,10 +438,19 @@ fun NowPlayingScreen(
                     sharedContentState = rememberSharedContentState(key = containerSharedKey),
                     animatedVisibilityScope = animatedVisibilityScope,
                     boundsTransform = AppContainerBoundsTransform,
+                    // **Ni enter ni exit aquí, y no es que no haya fundido: lo aplica [surfaceFactor]
+                    // unas líneas más abajo.** La visibilidad de esta punta la gobierna quien la
+                    // compone (el reproductor es persistente, ver `PlayerOverlay`), y en ese modo el
+                    // estado de reposo es `PostExit`: con un `exit` con fade el alfa de reposo sería 0
+                    // y la vuelta `PostExit → Visible` la animaría la librería con su spring por
+                    // defecto —no hay parámetro para eso—, o sea el reproductor CRECIENDO translúcido,
+                    // que es exactamente lo que este patrón no hace. Ver [appContainerSurfaceExitSpec].
                     enter = appContainerContentEnter(),
-                    exit = appContainerContentExit(),
+                    exit = ExitTransition.None,
+                    // FillWidth y NO Fit — ver el bloque de arriba: `Fit` dibujaba este árbol al 3 %
+                    // y lo hacía crecer, que es un zoom y no un container transform.
                     resizeMode = SharedTransitionScope.ResizeMode.scaleToBounds(
-                        ContentScale.Fit,
+                        ContentScale.FillWidth,
                         Alignment.Center
                     ),
                     zIndexInOverlay =
@@ -361,8 +465,37 @@ fun NowPlayingScreen(
             }
         } else Modifier
 
+    // Fundido de SALIDA de la superficie ENTERA (fondo incluido) al CERRAR: el player se disuelve
+    // encima de la píldora que llega, mientras encoge con ella. Es el mismo fundido que hasta ahora
+    // ponía el `exit` del `sharedBounds` —por eso comparte spec, [appContainerSurfaceExitSpec]—,
+    // traído aquí porque la punta ya no puede usar `exit` (ver el comentario del `sharedBounds`).
+    //
+    // **Solo se APLICA cerrando, y eso hay que decirlo en el sitio del dibujo, no solo en el spec.**
+    // Abriendo, la superficie tiene que estar SÓLIDA desde el primer frame o crecer se leería como un
+    // revelado — y un `animateFloat` no puede garantizarlo por sí solo: nace con el valor del estado
+    // ACTUAL, que en el frame del tap todavía es `PostExit`, o sea 0, y el `snap` no lo corrige hasta
+    // el tick siguiente. Un frame entero de reproductor transparente justo al arrancar el morph. Por
+    // eso el `graphicsLayer` mira la DIRECCIÓN (`targetState`) y solo consulta este valor cuando el
+    // reproductor va de salida; el `snap` de la otra dirección sigue haciendo falta para que una
+    // apertura interrumpida a mitad se cierre desde 1 y no desde donde fuera. Lo que sí aparece
+    // gradualmente al abrir es el CONTENIDO, y de eso se encarga [contentFactor], que actúa sobre otra
+    // capa (el Scaffold) y no sobre el fondo.
+    //
+    // `State` y lectura diferida por el mismo motivo que [contentFactor]; se multiplica con el alfa
+    // del gesto de cierre en UN solo `graphicsLayer` para no apilar dos capas offscreen.
+    val surfaceFactor: State<Float>? =
+        if (containerSharedKey != null && sharedTransitionScope != null && animatedVisibilityScope != null) {
+            animatedVisibilityScope.transition.animateFloat(
+                transitionSpec = {
+                    if (targetState == EnterExitState.Visible) snap<Float>()
+                    else appContainerSurfaceExitSpec()
+                },
+                label = "playerSurfaceFactor"
+            ) { if (it == EnterExitState.Visible) 1f else 0f }
+        } else null
+
     // Fade-in del CONTENIDO al ABRIR, gobernado por el PROGRESO del morph (mismo patrón que
-    // `shadowFactor` en MiniPlayer): la superficie entra SÓLIDA (`enter = None`, o crecería
+    // `shadowFactor` en MiniPlayer): la superficie entra SÓLIDA (ver [surfaceFactor], o crecería
     // translúcida) y el contenido aparece encima mientras ella crece — el *"content is swapped"* del
     // spec. Existe con cualquier origen que tenga superficie (píldora o fila); sin origen el contenido
     // va opaco desde el primer frame.
@@ -375,12 +508,18 @@ fun NowPlayingScreen(
     // 200 el contenido está opaco antes de que la superficie termine de crecer, y la capa cara dura
     // menos de la mitad del morph.
     //
-    // **Solo la ENTRADA**: `PostExit` vale 1, no 0. Al cerrar, el contenido va DENTRO del
-    // `sharedBounds` y ya se apaga con su `exit` ([appContainerContentExit], 300 ms) a la vez que
-    // ENCOGE con la superficie; sumarle acá un segundo fade multiplicaría los dos alphas y lo apagaría
-    // antes que a su propia superficie. Cuando el contenido estuvo FUERA del contenedor sí hubo que
-    // bajarlo a mano, igualando la duración para no dejar restos del player sobre la píldora ya puesta
-    // — ese apaño se fue con el contenido de vuelta adentro.
+    // **Solo la ENTRADA se anima**: al cerrar, el contenido se apaga con SU superficie ([surfaceFactor],
+    // 300 ms) mientras ENCOGE con ella; sumarle acá un segundo fade multiplicaría los dos alphas y lo
+    // apagaría antes que a la superficie que lo lleva. Cuando el contenido estuvo FUERA del contenedor
+    // sí hubo que bajarlo a mano, igualando la duración para no dejar restos del player sobre la
+    // píldora ya puesta — ese apaño se fue con el contenido de vuelta adentro.
+    //
+    // De ahí el `snap` RETRASADO del sentido de cierre, que es lo único raro de esta declaración: la
+    // transición del reproductor persistente solo tiene dos estados (`Visible` / `PostExit`, ver
+    // `PlayerOverlay`) y no el `PreEnter` que traía un `AnimatedVisibility`, así que "en reposo,
+    // apagado" y "cerrando" son EL MISMO estado. Se resuelve por tiempo en vez de por estado: se queda
+    // en 1 exactamente lo que dura el fundido de la superficie —de ahí que comparta su token— y recién
+    // entonces cae a 0, que es donde tiene que estar para la PRÓXIMA apertura.
     //
     // Es un `State` y NO un valor con `by` A PROPÓSITO: se lee DIFERIDO dentro del `graphicsLayer` del
     // Scaffold — cambia en cada frame del morph y leerlo en composición recompondría la pantalla entera
@@ -388,20 +527,71 @@ fun NowPlayingScreen(
     val contentFactor: State<Float>? =
         if (containerSharedKey != null && sharedTransitionScope != null && animatedVisibilityScope != null) {
             animatedVisibilityScope.transition.animateFloat(
-                transitionSpec = { tween(EXPRESSIVE_DEFAULT_EFFECTS_MS, easing = ExpressiveDefaultEffectsEasing) },
+                transitionSpec = {
+                    if (targetState == EnterExitState.Visible) {
+                        tween(EXPRESSIVE_DEFAULT_EFFECTS_MS, easing = ExpressiveDefaultEffectsEasing)
+                    } else {
+                        snap<Float>(delayMillis = EXPRESSIVE_SLOW_EFFECTS_MS)
+                    }
+                },
                 label = "playerContentFactor"
-            ) { if (it == EnterExitState.PreEnter) 0f else 1f }
+            ) { if (it == EnterExitState.Visible) 1f else 0f }
         } else null
 
+    // ¿Hay una hoja a pantalla completa TAPANDO el reproductor ahora mismo? (Las de esta pantalla o
+    // la del ecualizador, que llega por parámetro.) Mientras la hay, el reproductor no se ve, y eso
+    // gobierna las dos cosas de abajo.
+    val covered = queueCovering || lyricsCovering || obscured
+    val coveredState = rememberUpdatedState(covered)
+    // **No se COLOCA mientras está tapado**, el mismo gate con el que `PlayerOverlay` guarda el
+    // reproductor entero: un nodo sin colocar no se dibuja, así que dejan de repintarse por frame el
+    // degradado del álbum, la carátula de 800 px y la barra de progreso debajo de una superficie
+    // opaca. Se conserva la composición y la medida, que es lo que hace que reaparezca sin coste al
+    // cerrar la hoja. Lectura DIFERIDA, dentro del bloque de colocación, para que tapar y destapar
+    // invaliden el layout de este subárbol y nada más.
+    //
+    // La condición lleva además el morph: **mientras la capa del reproductor transiciona se coloca
+    // igual, tapado o no**. Es un blindaje, no un caso que se dé hoy —con una hoja encima no hay
+    // forma de colapsar el reproductor: el "atrás" lo intercepta la hoja y el resto de salidas quedan
+    // debajo de ella—, pero si alguna vez la hubiera, la punta del `sharedBounds` que envuelve a este
+    // mismo Box entraría en el morph sin haberse colocado nunca, y una punta sin bounds no empareja:
+    // el reproductor aparecería quieto en su sitio en vez de encoger (el "never got placed" del
+    // 30 jul). Que valga la pena por una línea es justo lo que lo hace un blindaje y no una defensa.
+    val morphTransition = animatedVisibilityScope?.transition
+    val placementGate = remember(coveredState, morphTransition) {
+        Modifier.layout { measurable, constraints ->
+            val placeable = measurable.measure(constraints)
+            layout(placeable.width, placeable.height) {
+                if (!coveredState.value || morphTransition?.isRunning == true) placeable.place(0, 0)
+            }
+        }
+    }
+    // Y los relojes de dentro —el giro de la cookie del play, la fase de la onda, el marquee del
+    // título— se apagan por la misma razón por la que se apagan con el reproductor guardado: animar
+    // lo que nadie ve gasta batería y, sobre todo, produce un frame en cada vsync, que es lo que
+    // impide a la cola de SurfaceFlinger drenar el atasco que deja la propia apertura de la hoja (ver
+    // "CERO productores continuos" en CLAUDE.md).
+    //
+    // Se REPUBLICA aquí y no arriba a propósito: envuelve solo el LAYOUT del reproductor, no los
+    // efectos de la pantalla ni las hojas. `keepScreenOn` (que con las letras abiertas tiene que
+    // seguir encendido), el reseteo del estado al guardarse y `rememberAudioFormat` leen el valor de
+    // fuera, que sigue significando "el reproductor está abierto".
+    CompositionLocalProvider(LocalPlayerOnScreen provides (onScreen && !covered)) {
     Box(
         modifier = modifier
             .fillMaxSize()
+            .then(placementGate)
             .then(containerSharedModifier)
             // Se traslada y atenúa TODO el reproductor —fondo incluido— con el dedo. Mover solo
             // el contenido dejaría el degradado quieto detrás y se vería el hueco por abajo.
             .graphicsLayer {
                 translationY = dismissState.offsetY
-                alpha = 1f - (1f - PlayerGestureConfig.DismissMinAlpha) * dismissState.progress
+                // Ver [surfaceFactor]: solo se consulta yendo de salida.
+                val closing = animatedVisibilityScope != null &&
+                    animatedVisibilityScope.transition.targetState != EnterExitState.Visible
+                val surfaceAlpha = if (closing) surfaceFactor?.value ?: 1f else 1f
+                alpha = (1f - (1f - PlayerGestureConfig.DismissMinAlpha) * dismissState.progress) *
+                    surfaceAlpha
             }
     ) {
         // Por la CONFIGURACIÓN de la ventana y no por los constraints medidos: `BoxWithConstraints`
@@ -479,6 +669,7 @@ fun NowPlayingScreen(
                         onToggleDetailedFormat = onToggleDetailedFormat,
                         wavyProgress = wavyProgress,
                         progressThickness = progressThickness,
+                        progressHandle = progressHandle,
                         playerActions = playerActions,
                         onBackClick = navigationActions.onBackClick,
                         onArtistClick = navigationActions.onArtistClick,
@@ -523,6 +714,7 @@ fun NowPlayingScreen(
                         onToggleDetailedFormat = onToggleDetailedFormat,
                         wavyProgress = wavyProgress,
                         progressThickness = progressThickness,
+                        progressHandle = progressHandle,
                         playerActions = playerActions,
                         onArtistClick = navigationActions.onArtistClick,
                         onAlbumClick = navigationActions.onAlbumClick,
@@ -543,6 +735,7 @@ fun NowPlayingScreen(
             }
         }
     }
+    } // CompositionLocalProvider(LocalPlayerOnScreen) — solo el layout del reproductor
 
     // Polling removed: ProgressSlider observes currentPositionFlow directly.
 
@@ -563,12 +756,13 @@ fun NowPlayingScreen(
         )
     }
 
-    AnimatedVisibility(
+    // Mismo componente que las otras dos hojas a pantalla completa (letras, ecualizador): la
+    // coreografía es una sola y el frame de preparación que la mantiene fluida también. Ver
+    // [SheetOverlay].
+    SheetOverlay(
         visible = showQueueSheet,
-        // Mismos helpers que las otras hojas a pantalla completa (ecualizador, MiniPlayer): tres
-        // sitios con la misma coreografía y, hasta ahora, con tres pares de duraciones distintos.
-        enter = appSheetEnter(),
-        exit = appSheetExit()
+        label = "cola",
+        onCoveringChange = { queueCovering = it }
             ) {
             // La cola y el índice se colectan AQUÍ, dentro de la hoja: solo esta rama depende de
             // ellos, así que un cambio de canción no recompone la pantalla entera (ver el KDoc de
@@ -601,10 +795,10 @@ fun NowPlayingScreen(
         }
 
         // --- Full Screen Lyrics Overlay ---
-        AnimatedVisibility(
+        SheetOverlay(
             visible = showLyrics,
-            enter = appSheetEnter(),
-            exit = appSheetExit()
+            label = "letras",
+            onCoveringChange = { lyricsCovering = it }
         ) {
             // `song` ya es no-null acá (early-return arriba si uiState.song == null).
             LyricsScreen(
@@ -706,10 +900,45 @@ internal data class AudioFormatInfo(
     val hasDetails: Boolean get() = bitrateKbps != null || sampleRateHz != null || bitsPerSample != null
 }
 
+/**
+ * Abre el archivo para leer contenedor, bitrate y profundidad. **Solo con el reproductor a la vista**
+ * ([LocalPlayerOnScreen]): desde que su árbol es persistente, esto correría en CADA cambio de canción
+ * aunque nadie tenga el reproductor abierto — un `MediaMetadataRetriever` por pista, en disco, para un
+ * chip que no se ve.
+ *
+ * **Lo leído se CACHEA por ruta** ([audioFormatCache]) y por eso "guardado" ya no significa "olvidar".
+ * El motivo de olvidarlo era real —la canción pudo cambiar mientras el reproductor estaba guardado, y
+ * enseñar el bitrate de la anterior es peor que no enseñar nada—, pero se resolvía tirando el dato
+ * cuando en realidad bastaba con guardarlo BAJO SU CLAVE: con la ruta delante, lo que se recupera al
+ * abrir es siempre lo de la canción que suena, y lo de otra canción no puede colarse. Lo que se
+ * ahorra es una relectura del archivo POR APERTURA (el reproductor se abre y se cierra decenas de
+ * veces por sesión) y, con ella, la recomposición que ese valor tardío provocaba a mitad del morph:
+ * cacheado llega en la primera composición, no unos frames después.
+ *
+ * El formato de un archivo no cambia mientras su ruta sea la misma; una descarga que convierte un
+ * `https://` en `file://` cambia la ruta, así que se vuelve a leer sola.
+ */
 @Composable
 private fun rememberAudioFormat(path: String, title: String): AudioFormatInfo {
     val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
-    val format by produceState(initialValue = AudioFormatInfo(UNKNOWN_FORMAT), key1 = path, key2 = title) {
+    val onScreen = LocalPlayerOnScreen.current
+    val format by produceState(
+        initialValue = audioFormatCache[path] ?: AudioFormatInfo(UNKNOWN_FORMAT),
+        key1 = path,
+        key2 = title,
+        key3 = onScreen
+    ) {
+        // El `initialValue` solo se aplica en la PRIMERA composición del `produceState`: al cambiar
+        // de canción con el reproductor abierto hay que releer el caché aquí, o el chip se quedaría
+        // con el formato anterior hasta que terminara la lectura.
+        audioFormatCache[path]?.let {
+            value = it
+            return@produceState
+        }
+        if (!onScreen) {
+            value = AudioFormatInfo(UNKNOWN_FORMAT)
+            return@produceState
+        }
         value = withContext(Dispatchers.IO) {
             try {
                 // 0. Fuente LOCAL (SAF): el content:// no tiene extensión, hay que leer el MIME
@@ -752,10 +981,24 @@ private fun rememberAudioFormat(path: String, title: String): AudioFormatInfo {
             } catch (_: Exception) {
                 AudioFormatInfo(UNKNOWN_FORMAT)
             }
-        }
+            // Solo se cachea un resultado CONCLUYENTE: un archivo que todavía no estaba en el
+            // dispositivo (o un retriever que falló) devuelve el genérico, y sellarlo dejaría el
+            // chip en "AUDIO" para siempre. Mismo criterio que `songs.artworkAttemptedAt`: se
+            // recuerda lo que se sabe de cierto, no lo que se intentó.
+        }.also { if (it.format != UNKNOWN_FORMAT) audioFormatCache.put(path, it) }
     }
     return format
 }
+
+/**
+ * Ficha técnica ya leída, por RUTA del archivo (ver [rememberAudioFormat]).
+ *
+ * Acotado porque no hay ningún momento en que convenga vaciarlo: vive lo que el proceso, y una
+ * biblioteca grande lo llenaría entrada a entrada con solo escuchar. [AUDIO_FORMAT_CACHE_ENTRIES]
+ * cubre de sobra una sesión de escucha —lo que se reabre es la canción en curso y sus vecinas de
+ * cola— y cada entrada son cuatro campos, así que el techo es despreciable frente a lo que ahorra.
+ */
+private val audioFormatCache = android.util.LruCache<String, AudioFormatInfo>(AUDIO_FORMAT_CACHE_ENTRIES)
 
 /**
  * Lee contenedor + ficha técnica de un retriever YA posicionado sobre el recurso. Las claves de
@@ -784,6 +1027,9 @@ private fun MediaMetadataRetriever.readFormatInfo(): AudioFormatInfo {
 
 /** Etiqueta cuando no se pudo determinar el contenedor. */
 private const val UNKNOWN_FORMAT = "AUDIO"
+
+/** Entradas del caché de fichas técnicas. Ver [audioFormatCache]. */
+private const val AUDIO_FORMAT_CACHE_ENTRIES = 64
 
 private const val BPS_PER_KBPS = 1000
 

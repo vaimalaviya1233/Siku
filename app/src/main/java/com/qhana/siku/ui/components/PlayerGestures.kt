@@ -82,9 +82,11 @@ object PlayerGestureConfig {
  * consumen dos sitios a la vez: el `pointerInput` que lo alimenta (fondo del reproductor y
  * carátula) y el `graphicsLayer` que traslada y atenúa la pantalla mientras el dedo baja.
  *
- * Al superar el umbral el offset NO se resetea: el slide de salida del `AnimatedContent` del
- * `PlayerOverlay` arranca desde donde quedó el dedo, sin el salto de un snap a cero. Reabrir el
- * reproductor lo recompone desde cero, así que el `Animatable` nace en su sitio.
+ * Al superar el umbral el offset NO se resetea: el cierre arranca desde donde quedó el dedo, sin el
+ * salto de un snap a cero. Volver a cero es cosa de [reset], que llama el reproductor cuando ya está
+ * guardado del todo — antes bastaba con que se descompusiera al cerrarse, pero desde que el subárbol
+ * es PERSISTENTE (ver `PlayerOverlay`) este `Animatable` sobrevive, y sin reponerlo el reproductor
+ * reaparecería desplazado y atenuado en la posición en que lo soltó el dedo.
  */
 @Stable
 class PlayerDismissState internal constructor(
@@ -106,6 +108,16 @@ class PlayerDismissState internal constructor(
     internal fun onDrag(deltaY: Float) {
         if (dismissing) return
         scope.launch { offset.snapTo((offset.value + deltaY).coerceAtLeast(0f)) }
+    }
+
+    /**
+     * Vuelve al reposo. Lo llama el reproductor cuando termina de guardarse, nunca durante el cierre:
+     * el gesto tiene que seguir mandando en la posición mientras la superficie encoge.
+     */
+    internal fun reset() {
+        if (offset.value == 0f && !dismissing) return
+        dismissing = false
+        scope.launch { offset.snapTo(0f) }
     }
 
     internal fun onRelease() {

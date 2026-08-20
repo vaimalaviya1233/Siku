@@ -244,10 +244,10 @@ class SongRepository @Inject constructor(
         else songDao.getSongCountRawFlow(SongDao.buildCountQuery(sourceFilters))
 
     override fun hasLocalSongsFlow(): Flow<Boolean> =
-        songDao.hasSongsOfSourceFlow(SourceType.LOCAL.name)
+        songDao.hasSongsMatchingFlow(SongDao.buildExistsQuery(setOf(SongSourceFilter.LOCAL)))
 
-    override fun hasCloudSongsFlow(): Flow<Boolean> =
-        songDao.hasSongsNotOfSourceFlow(SourceType.LOCAL.name)
+    override fun hasSourceSplitFlow(): Flow<Boolean> =
+        songDao.hasSongsMatchingFlow(SongDao.buildSourceSplitQuery())
 
     override suspend fun upsertSongs(songs: List<Song>): AppResult<Int> = withContext(Dispatchers.IO) {
         runCatchingAsAppResult {

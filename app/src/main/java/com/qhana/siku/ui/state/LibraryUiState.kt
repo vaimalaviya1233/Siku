@@ -49,6 +49,8 @@ data class PlaybackSettingsState(
     val nowPlayingWavyProgress: Boolean = false,
     /** Grosor de la barra de progreso del NowPlaying, en dp (vale para los dos modos). */
     val nowPlayingProgressThickness: Int = MusicPreferences.DEFAULT_PROGRESS_THICKNESS_DP,
+    /** Palo del handle permanente en la barra del NowPlaying; false = solo al arrastrar. */
+    val nowPlayingProgressHandle: Boolean = MusicPreferences.DEFAULT_PROGRESS_HANDLE,
     /** MiniPlayer como rectángulo redondeado en vez de píldora (false = píldora, el diseño actual). */
     val miniPlayerRoundedRect: Boolean = false,
     /** Chip de formato del NowPlaying con la ficha técnica (bitrate/bits + frecuencia). */
@@ -88,6 +90,7 @@ data class LibraryUiState(
     val nowPlayingSolidBackground: Boolean get() = playbackSettings.nowPlayingSolidBackground
     val nowPlayingWavyProgress: Boolean get() = playbackSettings.nowPlayingWavyProgress
     val nowPlayingProgressThickness: Int get() = playbackSettings.nowPlayingProgressThickness
+    val nowPlayingProgressHandle: Boolean get() = playbackSettings.nowPlayingProgressHandle
     val miniPlayerRoundedRect: Boolean get() = playbackSettings.miniPlayerRoundedRect
     val nowPlayingDetailedFormat: Boolean get() = playbackSettings.nowPlayingDetailedFormat
     val playerGestures: Boolean get() = playbackSettings.playerGestures

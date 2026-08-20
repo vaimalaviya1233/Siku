@@ -7,7 +7,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.qhana.siku.R
 import com.qhana.siku.player.MusicController
@@ -82,7 +81,7 @@ fun SleepTimerSheet(
                         } else {
                             Text(
                                 text = formatTime(remainingMs),
-                                style = MaterialTheme.typography.displaySmall.copy(fontWeight = FontWeight.Medium),
+                                style = MaterialTheme.typography.displaySmallEmphasized,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer
                             )
                             Text(

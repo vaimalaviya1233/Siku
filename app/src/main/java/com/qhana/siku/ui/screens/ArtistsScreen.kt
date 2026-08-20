@@ -16,7 +16,6 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MaterialTheme.colorScheme
 import androidx.compose.material3.Surface
@@ -33,7 +32,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -49,6 +47,8 @@ import com.qhana.siku.ui.components.ACCENT_SECONDARY_ALPHA
 import com.qhana.siku.ui.components.ComponentConfig
 import com.qhana.siku.ui.components.FilteredEmptyHint
 import com.qhana.siku.ui.components.GroupedListRow
+import com.qhana.siku.ui.components.HeptagonShape
+import com.qhana.siku.ui.components.entityImageSharedBounds
 import com.qhana.siku.ui.components.SortChip
 import com.qhana.siku.ui.components.SourceFilterChips
 import com.qhana.siku.ui.components.MaterialSymbol
@@ -56,17 +56,17 @@ import com.qhana.siku.ui.components.QueueOverflowButton
 import com.qhana.siku.ui.components.RoundedPolygonMaskTransformation
 import com.qhana.siku.ui.components.TonalChip
 import com.qhana.siku.ui.components.onContainerColor
-import com.qhana.siku.ui.components.rememberListItemShape
 import com.qhana.siku.ui.components.rememberRowActionColors
-import com.qhana.siku.ui.theme.AppBoundsTransform
 
 /**
- * Máscara cookie de 6 lados COMPARTIDA por todas las filas: una sola instancia (el path
- * unitario se calcula una vez) y un solo cacheKey para el memory cache de Coil.
+ * Máscara heptagonal COMPARTIDA por todas las filas: una sola instancia (el path unitario se
+ * calcula una vez) y un solo cacheKey para el memory cache de Coil.
+ *
+ * El `cacheKey` identifica la TRANSFORMACIÓN dentro de la clave del memory cache de Coil: si algún
+ * día la forma cambia, tiene que cambiar con ella o dos recortes distintos compartirían entrada.
  */
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
-private val CookieMask by lazy {
-    RoundedPolygonMaskTransformation(MaterialShapes.Cookie6Sided, cacheKey = "cookie6")
+private val ArtistPhotoMask by lazy {
+    RoundedPolygonMaskTransformation(HeptagonShape, cacheKey = "heptagon")
 }
 
 /**
@@ -138,7 +138,6 @@ fun ArtistsScreen(
                 TonalChip {
                     Text(
                         text = pluralStringResource(R.plurals.artist_count, artists.size, artists.size),
-                        style = MaterialTheme.typography.labelLarge,
                         color = colorScheme.onSecondaryContainer
                     )
                 }
@@ -177,8 +176,10 @@ fun ArtistsScreen(
                 artist = artist,
                 modifier = Modifier.animateItem(),
                 // Mismo agrupado que la lista de "Todas": primera/última fila con
-                // esquinas pronunciadas, intermedias casi rectas.
-                shape = rememberListItemShape(index = index, count = artists.size),
+                // esquinas pronunciadas, intermedias casi rectas. El reparto lo hace el
+                // `SegmentedListItem` de dentro (`ListItemDefaults.segmentedShapes`).
+                index = index,
+                count = artists.size,
                 onClick = { onArtistClick(artist.name) },
                 onPlayClick = { onPlayArtist(artist.name) },
                 onAddToQueue = { onAddArtistToQueue(artist.name) },
@@ -203,7 +204,8 @@ internal fun artistPhotoCacheKey(name: String): String = "artist_photo_$name"
 @Composable
 private fun ArtistRow(
     artist: ArtistSummary,
-    shape: androidx.compose.ui.graphics.Shape,
+    index: Int,
+    count: Int,
     onClick: () -> Unit,
     onPlayClick: () -> Unit,
     onAddToQueue: () -> Unit,
@@ -214,21 +216,25 @@ private fun ArtistRow(
     // La foto es shared element hacia el header del detalle del artista (misma familia
     // de morph que carátula MiniPlayer→NowPlaying). sharedBounds (no sharedElement):
     // el contenido difiere (thumb chico vs foto grande) y así cross-fadea.
-    val sharedModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
-        with(sharedTransitionScope) {
-            Modifier.sharedBounds(
-                sharedContentState = rememberSharedContentState(key = "artist_image_${artist.name}"),
-                animatedVisibilityScope = animatedVisibilityScope,
-                // Spring del tema en vez del default de la API (ver AppBoundsTransform).
-                boundsTransform = AppBoundsTransform
-            )
-        }
-    } else Modifier
-    // Fila agrupada COMPARTIDA (GroupedListRow envuelve el ListItem real de M3): padding, anatomía
-    // y gap salen del spec, los mismos que Todas/Cola/Listas — ya no es un Row copiado a mano. La
-    // foto va en el slot leading con forma M3 Expressive en vez de círculo.
+    // La silueta heptagonal se declara para el vuelo aunque el bitmap ya la traiga HORNEADA (ver
+    // [ArtistPhotoMask]): el placeholder no la lleva, y el overlay del `SharedTransitionScope` se
+    // salta los recortes de los padres, así que sin esto la punta despega como un cuadrado.
+    // Sin `remember` alrededor: `RoundedPolygon.toShape()` es `@Composable` (no una función normal)
+    // y ya cachea por dentro con `remember(this, startAngle)`, así que envolverlo era a la vez
+    // ilegal —invocar un composable desde la lambda de `remember`— y redundante.
+    val photoShape = HeptagonShape.toShape()
+    val sharedModifier = entityImageSharedBounds(
+        key = "artist_image_${artist.name}",
+        shape = photoShape,
+        sharedTransitionScope = sharedTransitionScope,
+        animatedVisibilityScope = animatedVisibilityScope
+    )
+    // Fila agrupada COMPARTIDA (GroupedListRow es el `SegmentedListItem` de M3): padding, anatomía,
+    // gap y morph al presionar salen del spec, los mismos que Listas — ya no es un Row copiado a
+    // mano. La foto va en el slot leading con forma M3 Expressive en vez de círculo.
     GroupedListRow(
-        shape = shape,
+        index = index,
+        count = count,
         onClick = onClick,
         modifier = modifier,
         leadingContent = {
@@ -255,7 +261,7 @@ private fun ArtistRow(
                             // Thumbnail fijo (patrón de AlbumArt): decode chico y hit de caché
                             // determinista, en vez de decodificar los 250px de Deezer.
                             .size(ComponentConfig.ThumbnailSize)
-                            .transformations(CookieMask)
+                            .transformations(ArtistPhotoMask)
                             // Key estable por artista: el header del detalle la reusa como
                             // placeholder, así al abrir muestra al instante ESTE thumb ya decodificado
                             // en vez de parpadear bajando la foto grande. Ver [artistPhotoCacheKey].
@@ -273,7 +279,7 @@ private fun ArtistRow(
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(colorScheme.surfaceContainerHighest, MaterialShapes.Cookie6Sided.toShape()),
+                            .background(colorScheme.surfaceContainerHighest, HeptagonShape.toShape()),
                         contentAlignment = Alignment.Center
                     ) {
                         MaterialSymbol("artist", color = colorScheme.onSurfaceVariant)
@@ -333,7 +339,7 @@ private fun ArtistRow(
                 // encolar es una acción de segundo orden frente a "reproducir".
                 QueueOverflowButton(
                     onAddToQueue = onAddToQueue,
-                    colors = rememberRowActionColors(colorScheme.surfaceContainerHigh),
+                    colors = rememberRowActionColors(colorScheme.surface),
                     contentDescription = stringResource(R.string.common_artist_options),
                     menuLabel = stringResource(R.string.detail_add_all_to_queue)
                 )
@@ -382,7 +388,7 @@ private fun ArtistPhotosMeteredBanner(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     stringResource(R.string.artist_photos_metered_title),
-                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
+                    style = MaterialTheme.typography.titleSmallEmphasized
                 )
                 Text(
                     stringResource(R.string.artist_photos_metered_desc),
@@ -403,6 +409,7 @@ private fun ArtistPhotosMeteredBanner(
                     Spacer(Modifier.width(4.dp))
                     Button(
                         onClick = onDownload,
+                        shapes = ButtonDefaults.shapes(),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = accent,
                             contentColor = onContainerColor(accent)

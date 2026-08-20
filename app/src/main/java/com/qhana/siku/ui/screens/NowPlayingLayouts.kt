@@ -55,6 +55,8 @@ internal fun NowPlayingPortrait(
     wavyProgress: Boolean,
     /** Grosor de la barra de progreso (Ajustes -> Apariencia); vale para los dos modos. */
     progressThickness: Dp,
+    /** Palo del handle permanente (Ajustes → Apariencia); false = solo mientras se arrastra. */
+    progressHandle: Boolean,
     playerActions: PlayerActions,
     onArtistClick: (String) -> Unit,
     onAlbumClick: (String) -> Unit,
@@ -93,11 +95,26 @@ internal fun NowPlayingPortrait(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                // La carátula es cuadrada dentro de este hueco, así que normalmente el ALTO es
-                // el que manda: cada dp de padding vertical la encoge por los cuatro lados.
-                // 16/8 es el punto medio calibrado a ojo (24/8 la dejaba chica, 8/0 la llevaba
-                // a tocar los márgenes de la pantalla).
-                .padding(vertical = 16.dp, horizontal = 8.dp)
+                // La carátula es cuadrada dentro de este hueco y `weight(1f)`, o sea que vive de lo
+                // que sobra: cada dp que se lleve cualquier otro bloque la encoge por los CUATRO
+                // lados, así que su padding es lo primero que se mira cuando pierde protagonismo.
+                //
+                // **Es ASIMÉTRICO a propósito, y con eso los dos lados quedan en el mismo aire
+                // EFECTIVO de [NowPlayingConfig.BlockGap]**: arriba la barra superior ya aporta 8dp
+                // propios (el `vertical` de su Row), así que 8 aquí suman 16; abajo no hay nada que
+                // aporte —el título arranca pegado— y hace falta el BlockGap entero. Con 8/8 el
+                // hueco de arriba medía el doble que el de abajo y la info se leía apelmazada contra
+                // la portada.
+                //
+                // El horizontal se queda a ojo en 8 sobre los 16 de la columna (24/8 la dejaba
+                // chica, 8/0 la llevaba a tocar los márgenes) y hoy no manda: con la pantalla en
+                // vertical el límite es el ALTO.
+                .padding(
+                    top = NowPlayingConfig.ItemGap,
+                    bottom = NowPlayingConfig.BlockGap,
+                    start = 8.dp,
+                    end = 8.dp
+                )
         )
 
         SongInfoSection(
@@ -111,7 +128,10 @@ internal fun NowPlayingPortrait(
             onAlbumClick = onAlbumClick
         )
 
-        Spacer(modifier = Modifier.height(24.dp))
+        // Info → barra: cambio de REGIÓN (lo de arriba identifica la canción, lo de abajo la
+        // controla), así que va el salto grande — el mismo que usan las otras dos fronteras de
+        // región, que es lo que antes no pasaba (aquí 24 y allá 32, sin criterio para la diferencia).
+        Spacer(modifier = Modifier.height(NowPlayingConfig.SectionGap))
 
         ProgressSlider(
             currentPositionFlow = currentPositionFlow,
@@ -127,10 +147,11 @@ internal fun NowPlayingPortrait(
             onToggleDetailedFormat = onToggleDetailedFormat,
             wavy = wavyProgress,
             trackHeight = progressThickness,
+            showHandle = progressHandle,
             isPlaying = isPlayingOrBuffering
         )
 
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(NowPlayingConfig.SectionGap))
 
         // Controles + action bar comparten UN solo shape reveal de acento al cambiar de
         // canción (misma coreografía cookie que la carátula). El estado del giro del play
@@ -140,11 +161,8 @@ internal fun NowPlayingPortrait(
             songId = song.id,
             accent = revealAccent,
             accentContent = playButtonContentColor,
-            // Sin reveal mientras el player sube desde la píldora: la transición ya está moviendo
-            // toda la pantalla y encadenar encima el barrido de acento se lee como un tirón.
-            revealEnabled = animatedVisibilityScope?.transition?.let {
-                it.currentState == it.targetState
-            } ?: true,
+            // Abierto, quieto y a la vista: ver [playerRevealEnabled].
+            revealEnabled = playerRevealEnabled(animatedVisibilityScope),
             modifier = Modifier.fillMaxWidth()
         ) { accent, accentContent ->
             Column(
@@ -163,7 +181,7 @@ internal fun NowPlayingPortrait(
                     spin = playSpin
                 )
 
-                Spacer(modifier = Modifier.height(32.dp))
+                Spacer(modifier = Modifier.height(NowPlayingConfig.SectionGap))
 
                 BottomActionBar(
                     showLyrics = showLyrics,
@@ -235,6 +253,8 @@ internal fun NowPlayingLandscape(
     wavyProgress: Boolean,
     /** Grosor de la barra de progreso (Ajustes -> Apariencia); vale para los dos modos. */
     progressThickness: Dp,
+    /** Palo del handle permanente (Ajustes → Apariencia); false = solo mientras se arrastra. */
+    progressHandle: Boolean,
     playerActions: PlayerActions,
     onArtistClick: (String) -> Unit,
     onAlbumClick: (String) -> Unit,
@@ -327,7 +347,7 @@ internal fun NowPlayingLandscape(
                 )
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(NowPlayingConfig.ItemGap))
 
             // Toolbar de acciones. Usa playButtonColor directo (sin el reveal cookie, que queda
             // con los controles de la derecha): igual sigue el acento del álbum vía el theme.
@@ -374,7 +394,7 @@ internal fun NowPlayingLandscape(
                 onAlbumClick = onAlbumClick
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(NowPlayingConfig.BlockGap))
 
             ProgressSlider(
                 currentPositionFlow = currentPositionFlow,
@@ -390,10 +410,11 @@ internal fun NowPlayingLandscape(
                 onToggleDetailedFormat = onToggleDetailedFormat,
                 wavy = wavyProgress,
                 trackHeight = progressThickness,
+                showHandle = progressHandle,
                 isPlaying = isPlayingOrBuffering
             )
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(NowPlayingConfig.SectionGap))
 
             // Transporte con su shape reveal de acento al cambiar de canción. El estado del giro
             // del play va HOISTED (ver PlayButtonSpinState).
@@ -402,11 +423,8 @@ internal fun NowPlayingLandscape(
                 songId = song.id,
                 accent = revealAccent,
                 accentContent = playButtonContentColor,
-                // Sin reveal mientras el player sube desde la píldora: la transición ya está moviendo
-            // toda la pantalla y encadenar encima el barrido de acento se lee como un tirón.
-                revealEnabled = animatedVisibilityScope?.transition?.let {
-                    it.currentState == it.targetState
-                } ?: true,
+                // Abierto, quieto y a la vista: ver [playerRevealEnabled].
+                revealEnabled = playerRevealEnabled(animatedVisibilityScope),
                 modifier = Modifier.fillMaxWidth()
             ) { accent, accentContent ->
                 PlaybackControls(

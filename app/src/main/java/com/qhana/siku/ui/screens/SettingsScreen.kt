@@ -28,7 +28,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
@@ -44,6 +44,7 @@ import com.qhana.siku.data.model.PlayerToolbarAction
 import com.qhana.siku.data.model.PlayerToolbarConfig
 import com.qhana.siku.data.model.ReplayGainMode
 import com.qhana.siku.data.model.ToolbarActionState
+import com.qhana.siku.ui.components.AppMenuPopup
 import com.qhana.siku.ui.components.DISABLED_CONTENT_ALPHA
 import com.qhana.siku.ui.components.ComponentConfig
 import com.qhana.siku.ui.components.ConnectedChoiceGroup
@@ -55,10 +56,10 @@ import com.qhana.siku.ui.components.rememberDeviceScanActivator
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.MenuItemIcon
 import com.qhana.siku.ui.components.PlayerGestureConfig
+import com.qhana.siku.ui.components.progressTrackHeightMax
 import com.qhana.siku.ui.components.OneDriveSourceCard
 import com.qhana.siku.ui.components.rememberOneDriveFolderChanger
 import com.qhana.siku.ui.components.StorageLimitCard
-import com.qhana.siku.ui.components.rememberListItemShape
 import com.qhana.siku.ui.navigation.Screen
 import com.qhana.siku.ui.viewmodel.BackupViewModel
 import com.qhana.siku.ui.viewmodel.BrowseViewModel
@@ -66,6 +67,33 @@ import com.qhana.siku.ui.viewmodel.LibraryViewModel
 import com.qhana.siku.ui.viewmodel.SourcesViewModel
 import kotlin.math.roundToInt
 import com.qhana.siku.ui.viewmodel.SyncViewModel
+
+/*
+ * NINGUNA pantalla de este archivo declara `= hiltViewModel()` para un ViewModel COMPARTIDO, y eso
+ * no es estilo: cada una es un `composable(...)` del NavHost, así que el default resuelve al
+ * ViewModelStore del `NavBackStackEntry` y nace una instancia NUEVA por pantalla (convención 9).
+ *
+ * Con `LibraryViewModel` eso costaba caro y en silencio. Su `init` arranca el `getFavoritesSongs()`
+ * —el JOIN sobre `songs` que sus propios comentarios llaman el más caro de re-ejecutar—, el combine
+ * de playlists+favoritos, el saneo de filtros y el colector del banner de sync: tres suscripciones
+ * a una tabla que Room invalida ENTERA en cada escritura. Eran siete pantallas creando cada una la
+ * suya, y con el back stack normal (Ajustes → Apariencia → Barra de progreso) había tres vivas a la
+ * vez además de la de la Activity.
+ *
+ * Ya había mordido tres veces por el lado funcional, y cada vez se parcheó el síntoma en lugar de
+ * la causa: los dos colectores del `init` de `LibraryViewModel` que "OBSERVAN en vez de cargar" el
+ * formato detallado y el modo de guardado de letras existen porque los conmuta otra instancia, y el
+ * `SnackbarManager` singleton nació del mismo choque. Esos tres siguen siendo correctos y se quedan;
+ * lo que cambia es que ya no hay una segunda instancia que los haga falta.
+ *
+ * Quitar el default es la parte load-bearing: convierte el fallo —silencioso, de runtime, visible
+ * solo como estado desincronizado— en un error de COMPILACIÓN si alguien añade una pantalla y no
+ * pasa el ViewModel. Es la misma técnica que `LibraryScreen` ya aplicaba desde antes (ver el KDoc de
+ * su parámetro `libraryViewModel`, que explica el caso original); aquí solo se extiende a Ajustes.
+ *
+ * `BackupViewModel` SÍ conserva su `hiltViewModel()`: lo usa una sola pantalla y nada más, así que
+ * atarlo al ciclo de vida de esa ruta es lo correcto — no hay segunda instancia posible.
+ */
 
 /** Modos de ReplayGain, en el orden en que se ofrecen. */
 private val REPLAY_GAIN_MODES = listOf(
@@ -81,30 +109,37 @@ private val REPLAY_GAIN_MODES = listOf(
  * con otra forma.
  */
 private object SettingsTokens {
-    /** Esquina de un bloque SUELTO (los agrupados la reciben de [rememberListItemShape]). */
+    /** Esquina de un bloque SUELTO (los agrupados la reciben de `ListItemDefaults.segmentedShapes`). */
     val BlockCorner = 12.dp
-    /** Separación DENTRO de un grupo: mínima, para que se lea como un bloque continuo. */
+    /**
+     * Separación DENTRO de un grupo: la del spec (`ListItemDefaults.SegmentedGap`), para que se
+     * lea como un bloque continuo. Se declara aquí en vez de leerse allí porque también separa
+     * bloques que NO son list items (el selector de estilo de paleta, la tarjeta de tope de
+     * descargas), y el valor tiene que ser el mismo o la columna se lee irregular.
+     */
     val GroupGap = 2.dp
     /** Separación ENTRE grupos o bloques independientes. */
     val SectionGap = 8.dp
-    /** Padding interno de una fila. */
-    val TilePadding = 16.dp
 }
 
 /**
  * Grupo de ajustes con el patrón de LISTA AGRUPADA de M3 Expressive: los ítems forman un bloque
  * continuo — esquinas pronunciadas arriba del primero y abajo del último, pequeñas en los del
- * medio — separados por [SettingsTokens.GroupGap]. Es el mismo lenguaje que ya usa el hub de
- * categorías, que hasta ahora era el único sitio de Ajustes que lo aplicaba.
+ * medio — separados por [SettingsTokens.GroupGap].
  *
- * Recibe la LISTA de ítems y no un slot `content` porque el reparto de esquinas necesita saber
- * cuántos hay, y en Compose no se pueden contar los hijos de un slot antes de componerlos. Cada
- * ítem recibe la forma que le toca y debe aplicarla a su propia superficie.
+ * El reparto de esquinas lo hace `ListItemDefaults.segmentedShapes`, o sea la librería, y lo que
+ * viaja a cada ítem es un `ListItemShapes` ENTERO y no un `Shape` suelto: ahí van también la forma
+ * al presionar y la de seleccionado, que son las que dan el morph de las listas Expressive. Con un
+ * único `Shape` no había dónde ponerlas y estas filas eran lo último de Ajustes que no acusaba el
+ * dedo.
+ *
+ * Recibe la LISTA de ítems y no un slot `content` porque el reparto necesita saber cuántos hay, y
+ * en Compose no se pueden contar los hijos de un slot antes de componerlos.
  */
 @Composable
-private fun SettingsGroup(items: List<@Composable (Shape) -> Unit>) {
+private fun SettingsGroup(items: List<@Composable (ListItemShapes) -> Unit>) {
     items.forEachIndexed { index, item ->
-        item(rememberListItemShape(index, items.size))
+        item(ListItemDefaults.segmentedShapes(index = index, count = items.size))
         if (index < items.lastIndex) Spacer(modifier = Modifier.height(SettingsTokens.GroupGap))
     }
 }
@@ -123,43 +158,57 @@ private fun SettingsSwitchTile(
     title: String,
     description: String,
     checked: Boolean,
-    shape: Shape,
+    shapes: ListItemShapes,
     onCheckedChange: (Boolean) -> Unit
 ) {
-    Surface(
-        shape = shape,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    // `SegmentedListItem` en su sobrecarga TOGGLEABLE: es el componente real de M3 para una fila de
+    // lista que conmuta. Antes esto era un `Surface` + `Row` + `Modifier.toggleable` que reponía a
+    // mano la anatomía del `ListItem` (padding, alto, alineación) y la semántica de switch; lo
+    // único que no podía reponer era el morph de la forma al presionar, que llega gratis con el
+    // componente. El `role = Switch` que se ponía a mano lo pone él, y la fila entera sigue siendo
+    // el blanco táctil —que era el motivo de haberlo montado así— porque `onCheckedChange` vive en
+    // el ítem, no en el `Switch`.
+    SegmentedListItem(
+        checked = checked,
+        onCheckedChange = onCheckedChange,
+        shapes = shapes,
+        colors = ListItemDefaults.segmentedColors(
+            // El token del componente es `surface`; estas listas se apilan SOBRE `surface`, así que
+            // la fila tiene que subir un escalón tonal o desaparece contra el fondo. Mismo criterio
+            // (y mismo valor) que `GroupedListRow`.
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+        ),
+        leadingContent = { MaterialSymbol(icon, size = 24.sp) },
+        supportingContent = {
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        },
+        // Display-only: quien maneja el gesto es la fila. Con su propio `onCheckedChange` el tap se
+        // atendería dos veces.
+        trailingContent = { Switch(checked = checked, onCheckedChange = null) },
+        content = { Text(text = title, style = MaterialTheme.typography.bodyLarge) },
         modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                // Toda la fila alterna el switch, como en Ajustes de Android: apuntar solo al pulgar
-                // del Switch es un blanco pequeño para una acción que ocupa la fila entera. El Switch
-                // pasa a display-only (onCheckedChange = null) para que el tap no se maneje dos veces,
-                // y `role = Switch` deja que el lector de pantalla lo anuncie como interruptor.
-                .toggleable(
-                    value = checked,
-                    onValueChange = onCheckedChange,
-                    role = Role.Switch
-                )
-                .padding(SettingsTokens.TilePadding),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            MaterialSymbol(icon, size = 24.sp)
-            Spacer(modifier = Modifier.width(16.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(text = title, style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    text = description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Spacer(modifier = Modifier.width(16.dp))
-            Switch(checked = checked, onCheckedChange = null)
-        }
-    }
+    )
+}
+
+/**
+ * Resumen de UNA línea de qué fuentes hay configuradas, como el estado bajo cada entrada de
+ * Ajustes de Android.
+ *
+ * Vive en una sola función porque lo consumen DOS sitios con el mismo significado: la fila del
+ * hub y el subtítulo de la app bar de la propia pantalla de Fuentes. Escrito dos veces, nada
+ * obligaría a que coincidieran y la barra podría contradecir a la fila desde la que se entró.
+ */
+@Composable
+private fun sourcesSummary(isLoggedIn: Boolean, hasLocalSource: Boolean): String = when {
+    isLoggedIn && hasLocalSource ->
+        stringResource(R.string.settings_source_onedrive) + " · " + stringResource(R.string.settings_source_local)
+    isLoggedIn -> stringResource(R.string.settings_source_onedrive)
+    hasLocalSource -> stringResource(R.string.settings_source_local)
+    else -> stringResource(R.string.settings_cat_sources_empty)
 }
 
 /**
@@ -173,18 +222,12 @@ fun SettingsScreen(
     onBackClick: () -> Unit,
     isLoggedIn: Boolean,
     onNavigate: (String) -> Unit,
-    sourcesViewModel: SourcesViewModel = hiltViewModel()
+    sourcesViewModel: SourcesViewModel
 ) {
     val hasLocalSource by sourcesViewModel.hasLocalSource.collectAsStateWithLifecycle()
 
     // Subtítulo dinámico de Fuentes, como el resumen de estado de Ajustes de Android.
-    val sourcesSubtitle = when {
-        isLoggedIn && hasLocalSource ->
-            stringResource(R.string.settings_source_onedrive) + " · " + stringResource(R.string.settings_source_local)
-        isLoggedIn -> stringResource(R.string.settings_source_onedrive)
-        hasLocalSource -> stringResource(R.string.settings_source_local)
-        else -> stringResource(R.string.settings_cat_sources_empty)
-    }
+    val sourcesSubtitle = sourcesSummary(isLoggedIn = isLoggedIn, hasLocalSource = hasLocalSource)
 
     // Cada categoría lleva una forma orgánica de MaterialShapes (sello M3 Expressive) y su
     // propio color de acento FIJO (no el scheme seedeado del álbum, que en Ajustes queda gris
@@ -252,18 +295,16 @@ fun SettingsScreen(
         onBackClick = onBackClick
     ) {
         categories.forEachIndexed { index, category ->
-            Surface(
-                shape = rememberListItemShape(index, categories.size),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            // `SegmentedListItem` como el resto de Ajustes: el hub era la lista que ESTRENÓ el
+            // patrón agrupado en esta pantalla y la última en montarlo a mano. El badge de forma
+            // orgánica va en el slot leading, que es donde le corresponde.
+            SegmentedListItem(
                 onClick = { onNavigate(category.route) },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                shapes = ListItemDefaults.segmentedShapes(index = index, count = categories.size),
+                colors = ListItemDefaults.segmentedColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                ),
+                leadingContent = {
                     val (badgeContainer, badgeContent) = rememberBadgeColors(category.seed)
                     Surface(
                         shape = category.iconShape,
@@ -279,26 +320,29 @@ fun SettingsScreen(
                             )
                         }
                     }
-                    Spacer(modifier = Modifier.width(16.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = category.title,
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Text(
-                            text = category.subtitle,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                },
+                supportingContent = {
+                    Text(
+                        text = category.subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                },
+                trailingContent = {
                     MaterialSymbol(
                         "chevron_right",
                         size = 24.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                }
-            }
+                },
+                content = {
+                    Text(
+                        text = category.title,
+                        style = MaterialTheme.typography.bodyLargeEmphasized
+                    )
+                },
+                modifier = Modifier.fillMaxWidth()
+            )
             if (index < categories.lastIndex) {
                 Spacer(modifier = Modifier.height(SettingsTokens.GroupGap))
             }
@@ -345,7 +389,7 @@ fun SettingsSourcesScreen(
     authLoading: Boolean,
     onConnectOneDrive: (android.app.Activity) -> Unit,
     onDisconnectOneDrive: () -> Unit,
-    sourcesViewModel: SourcesViewModel = hiltViewModel()
+    sourcesViewModel: SourcesViewModel
 ) {
     val context = LocalContext.current
     val activity = context as? android.app.Activity
@@ -377,6 +421,9 @@ fun SettingsSourcesScreen(
 
     SettingsScaffold(
         title = stringResource(R.string.sources_header),
+        // El MISMO resumen que enseña la fila del hub desde la que se llega aquí (ver
+        // [sourcesSummary]): la línea de estado ya no se pierde al entrar.
+        subtitle = sourcesSummary(isLoggedIn = isLoggedIn, hasLocalSource = hasLocalSource),
         onBackClick = onBackClick
     ) {
         // Local primero (la app es local-first) y la nube después, mismo orden que el onboarding.
@@ -466,24 +513,47 @@ fun SettingsBackupScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = 12.dp)
                 )
+                // Los dos botones REPARTEN el ancho por `weight`, y sus etiquetas son el VERBO a
+                // secas ("Exportar" / "Restaurar") en vez de repetir "playlists" en los dos.
+                // Antes el `Row` no repartía nada: el primero tomaba su ancho intrínseco (~186dp
+                // con icono y etiqueta larga) y al segundo le quedaban 134 — 48 de padding y 86
+                // para un texto que pedía ~120, así que "Restaurar playlists" caía a dos líneas y
+                // los dos botones quedaban de distinto alto. QUÉ se exporta ya lo dice la
+                // descripción de encima ("Guarda tus playlists y favoritos…"), que es su sitio.
+                val backupButtonHeight = ButtonDefaults.MinHeight
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (backupBusy) {
                         LoadingIndicator(modifier = Modifier.size(24.dp))
                     } else {
                         Button(
                             onClick = { backupViewModel.exportPlaylists() },
-                            enabled = isLoggedIn
+                            shapes = ButtonDefaults.shapes(),
+                            enabled = isLoggedIn,
+                            modifier = Modifier.weight(1f)
                         ) {
-                            MaterialSymbol("cloud_upload", size = 20.sp)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(stringResource(R.string.backup_export))
+                            MaterialSymbol(
+                                "cloud_upload",
+                                size = ButtonDefaults.iconSizeFor(backupButtonHeight).value.sp
+                            )
+                            Spacer(modifier = Modifier.width(ButtonDefaults.iconSpacingFor(backupButtonHeight)))
+                            Text(
+                                text = stringResource(R.string.backup_export),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                         Spacer(modifier = Modifier.width(8.dp))
                         OutlinedButton(
                             onClick = { backupViewModel.importPlaylists() },
-                            enabled = isLoggedIn
+                            shapes = ButtonDefaults.shapes(),
+                            enabled = isLoggedIn,
+                            modifier = Modifier.weight(1f)
                         ) {
-                            Text(stringResource(R.string.backup_import))
+                            Text(
+                                text = stringResource(R.string.backup_import),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     }
                 }
@@ -498,7 +568,7 @@ fun SettingsBackupScreen(
 fun SettingsPlaybackScreen(
     onBackClick: () -> Unit,
     onNavigate: (String) -> Unit,
-    viewModel: LibraryViewModel = hiltViewModel()
+    viewModel: LibraryViewModel
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val replayGainMode = uiState.replayGainMode
@@ -531,10 +601,17 @@ fun SettingsPlaybackScreen(
                 // Selector de modo OFF / TRACK / ALBUM. Connected button group, no segmentado:
                 // el spec de M3 Expressive retiró `SegmentedButton` de las recomendaciones y este
                 // es su reemplazo directo.
+                //
+                // `fillWidth = false` porque las tres etiquetas son de longitud MUY desigual:
+                // "Desactivado" contra "Por pista" y "Por álbum". Repartiendo el ancho a partes
+                // iguales, la primera se quedaba sin sitio y salía cortada ("Desactivad"). Ceñidos
+                // al contenido los tres ocupan casi el mismo ancho total que antes —el grupo llena
+                // la tarjeta igual— y ninguno recorta.
                 ConnectedChoiceGroup(
                     options = REPLAY_GAIN_MODES,
                     selected = replayGainMode,
                     onSelect = { viewModel.setReplayGainMode(it) },
+                    fillWidth = false,
                     labelFor = {
                         when (it) {
                             ReplayGainMode.OFF -> stringResource(R.string.settings_rg_off)
@@ -647,7 +724,7 @@ fun SettingsPlaybackScreen(
 @Composable
 fun SettingsEqPresetsScreen(
     onBackClick: () -> Unit,
-    viewModel: LibraryViewModel = hiltViewModel()
+    viewModel: LibraryViewModel
 ) {
     val hidden by viewModel.eqPresets.hidden.collectAsStateWithLifecycle()
     // Los mismos dos grupos que el selector del EQ, y por el mismo motivo: un preset aplica solo la
@@ -761,7 +838,7 @@ private fun PresetVisibilityRow(
 @Composable
 fun SettingsGesturesScreen(
     onBackClick: () -> Unit,
-    viewModel: LibraryViewModel = hiltViewModel()
+    viewModel: LibraryViewModel
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
@@ -1032,8 +1109,8 @@ private fun PlayerBarCustomizer(
 @Composable
 fun SettingsDownloadsScreen(
     onBackClick: () -> Unit,
-    viewModel: SyncViewModel = hiltViewModel(),
-    sourcesViewModel: SourcesViewModel = hiltViewModel()
+    viewModel: SyncViewModel,
+    sourcesViewModel: SourcesViewModel
 ) {
     val storageLimitGb by viewModel.storageLimitGb.collectAsStateWithLifecycle()
 
@@ -1063,6 +1140,12 @@ fun SettingsDownloadsScreen(
         // El estado reactivo sale de un BrowseViewModel propio de esta pantalla; las acciones
         // van al repo singleton, así que el banner de la pestaña Artistas (otra instancia de
         // VM) reacciona igual.
+        //
+        // Esta instancia es barata desde que el backfill dejó de vivir en el `init` del ViewModel
+        // (ver [BrowseViewModel.startArtistPhotoMaintenance]): antes, abrir esta pantalla —que solo
+        // quiere leer tres preferencias— lanzaba una pasada completa de fotos y dejaba un colector
+        // de red registrado. El resto de sus flujos son `WhileUiSubscribed` y no arrancan si nadie
+        // los colecta, así que aquí solo corren estos tres.
         val browseViewModel: BrowseViewModel = hiltViewModel()
         val photosOnMetered by browseViewModel.artistPhotosOnMetered.collectAsStateWithLifecycle()
         val photosBannerEnabled by browseViewModel.artistPhotosBannerEnabled.collectAsStateWithLifecycle()
@@ -1109,7 +1192,7 @@ fun SettingsAppearanceScreen(
     onBackClick: () -> Unit,
     /** Navega a las sub-pantallas de personalización (pestañas, barra del reproductor). */
     onNavigate: (String) -> Unit,
-    viewModel: LibraryViewModel = hiltViewModel()
+    viewModel: LibraryViewModel
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val isRegenerating = uiState.isRegeneratingColors
@@ -1163,41 +1246,41 @@ fun SettingsAppearanceScreen(
         // separados entre sí por el estilo de paleta, así que tres ajustes del mismo sitio se
         // leían como tres cosas sin relación.
         SettingsGroup(
-            listOf<@Composable (Shape) -> Unit>(
+            listOf<@Composable (ListItemShapes) -> Unit>(
                 // Fondo del reproductor: color sólido tonal vs degradado según la carátula.
-                { shape ->
+                { shapes ->
                     SettingsSwitchTile(
                         icon = "gradient",
                         title = stringResource(R.string.settings_solid_bg),
                         description = stringResource(R.string.settings_solid_bg_desc),
                         checked = nowPlayingSolidBackground,
-                        shape = shape,
+                        shapes = shapes,
                         onCheckedChange = { viewModel.setNowPlayingSolidBackground(it) }
                     )
                 },
                 // Forma de la barra flotante: píldora (diseño original) o rectángulo redondeado.
                 // Solo afecta al contenedor; la carátula del mini sigue siendo circular porque es
                 // el extremo del shared element hacia el reproductor.
-                { shape ->
+                { shapes ->
                     SettingsSwitchTile(
                         icon = "rounded_corner",
                         title = stringResource(R.string.settings_mini_player_rect),
                         description = stringResource(R.string.settings_mini_player_rect_desc),
                         checked = miniPlayerRoundedRect,
-                        shape = shape,
+                        shapes = shapes,
                         onCheckedChange = { viewModel.setMiniPlayerRoundedRect(it) }
                     )
                 },
                 // Chip de formato: solo el contenedor (FLAC) o la ficha técnica
                 // (FLAC · 16 bit · 44.1 kHz). El mismo ajuste se conmuta tocando el chip en el
                 // reproductor; ambos escriben la misma preferencia.
-                { shape ->
+                { shapes ->
                     SettingsSwitchTile(
                         icon = "graphic_eq",
                         title = stringResource(R.string.settings_detailed_format),
                         description = stringResource(R.string.settings_detailed_format_desc),
                         checked = nowPlayingDetailedFormat,
-                        shape = shape,
+                        shapes = shapes,
                         onCheckedChange = { viewModel.setNowPlayingDetailedFormat(it) }
                     )
                 }
@@ -1220,12 +1303,12 @@ fun SettingsAppearanceScreen(
         // Las personalizaciones que necesitan más de una fila viven en su propia pantalla: metidas
         // aquí ocupaban Apariencia entera y enterraban el resto de ajustes.
         SettingsGroup(
-            listOf<@Composable (Shape) -> Unit>(
+            listOf<@Composable (ListItemShapes) -> Unit>(
                 // Barra de progreso: modo (plana/ondulada) y grosor, con vista previa en vivo. Los
                 // dos ajustes se eligen MIRANDO la barra, así que van donde se la puede enseñar —
                 // el switch suelto en esta lista obligaba a salir al reproductor para ver el
                 // efecto, y el grosor no se juzga leyendo "12 dp".
-                { shape ->
+                { shapes ->
                     SettingsActionRow(
                         icon = "linear_scale",
                         title = stringResource(R.string.settings_progress_bar_header),
@@ -1233,10 +1316,10 @@ fun SettingsAppearanceScreen(
                         enabled = true,
                         onClick = { onNavigate(Screen.SettingsProgressBar.route) },
                         navigates = true,
-                        shape = shape
+                        shapes = shapes
                     )
                 },
-                { shape ->
+                { shapes ->
                     SettingsActionRow(
                         icon = "tab",
                         title = stringResource(R.string.settings_tabs_header),
@@ -1244,10 +1327,10 @@ fun SettingsAppearanceScreen(
                         enabled = true,
                         onClick = { onNavigate(Screen.SettingsTabs.route) },
                         navigates = true,
-                        shape = shape
+                        shapes = shapes
                     )
                 },
-                { shape ->
+                { shapes ->
                     SettingsActionRow(
                         icon = "bottom_navigation",
                         title = stringResource(R.string.settings_player_bar_header),
@@ -1255,7 +1338,7 @@ fun SettingsAppearanceScreen(
                         enabled = true,
                         onClick = { onNavigate(Screen.SettingsPlayerBar.route) },
                         navigates = true,
-                        shape = shape
+                        shapes = shapes
                     )
                 }
             )
@@ -1281,11 +1364,12 @@ fun SettingsAppearanceScreen(
 @Composable
 fun SettingsProgressBarScreen(
     onBackClick: () -> Unit,
-    viewModel: LibraryViewModel = hiltViewModel()
+    viewModel: LibraryViewModel
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val wavy = uiState.nowPlayingWavyProgress
     val thickness = uiState.nowPlayingProgressThickness
+    val handle = uiState.nowPlayingProgressHandle
 
     SettingsScaffold(
         title = stringResource(R.string.settings_progress_bar_header),
@@ -1308,6 +1392,7 @@ fun SettingsProgressBarScreen(
                 ProgressBarPreview(
                     wavy = wavy,
                     trackHeight = thickness.dp,
+                    showHandle = handle,
                     activeColor = MaterialTheme.colorScheme.primary,
                     inactiveColor = MaterialTheme.colorScheme.primary.copy(alpha = PREVIEW_RAIL_ALPHA)
                 )
@@ -1317,15 +1402,37 @@ fun SettingsProgressBarScreen(
         Spacer(modifier = Modifier.height(SettingsTokens.SectionGap))
 
         SettingsGroup(
-            listOf<@Composable (Shape) -> Unit>(
-                { shape ->
+            listOf<@Composable (ListItemShapes) -> Unit>(
+                { shapes ->
                     SettingsSwitchTile(
                         icon = "waves",
                         title = stringResource(R.string.settings_wavy_progress),
                         description = stringResource(R.string.settings_wavy_progress_desc),
                         checked = wavy,
-                        shape = shape,
-                        onCheckedChange = { viewModel.setNowPlayingWavyProgress(it) }
+                        shapes = shapes,
+                        onCheckedChange = { checked ->
+                            viewModel.setNowPlayingWavyProgress(checked)
+                            // El tope del grosor depende del modo (la onda admite menos que la
+                            // píldora, ver `progressTrackHeightMax`), así que al encender la onda
+                            // con un grosor que ella no admite se BAJA el valor guardado. El dibujo
+                            // ya lo acota de todos modos; lo que esto evita es que el slider de
+                            // abajo y la previa de arriba enseñen 24 mientras en disco hay 44 —y que
+                            // apagar la onda devolviera un grosor que el usuario no volvió a elegir.
+                            val max = progressTrackHeightMax(checked).value.toInt()
+                            if (thickness > max) viewModel.setNowPlayingProgressThickness(max)
+                        }
+                    )
+                },
+                { shapes ->
+                    // Va en el MISMO bloque que el modo: los dos dicen cómo se DIBUJA la barra que
+                    // está arriba, mientras el grosor tiene su propio bloque porque es un slider.
+                    SettingsSwitchTile(
+                        icon = "tune",
+                        title = stringResource(R.string.settings_progress_handle),
+                        description = stringResource(R.string.settings_progress_handle_desc),
+                        checked = handle,
+                        shapes = shapes,
+                        onCheckedChange = { viewModel.setNowPlayingProgressHandle(it) }
                     )
                 }
             )
@@ -1335,6 +1442,7 @@ fun SettingsProgressBarScreen(
 
         ProgressThicknessSetting(
             thicknessDp = thickness,
+            wavy = wavy,
             onChange = { viewModel.setNowPlayingProgressThickness(it) }
         )
     }
@@ -1352,7 +1460,7 @@ private const val PREVIEW_RAIL_ALPHA = 0.25f
 @Composable
 fun SettingsTabsScreen(
     onBackClick: () -> Unit,
-    viewModel: LibraryViewModel = hiltViewModel()
+    viewModel: LibraryViewModel
 ) {
     val tabs by viewModel.libraryTabs.collectAsStateWithLifecycle()
 
@@ -1385,7 +1493,7 @@ fun SettingsTabsScreen(
 @Composable
 fun SettingsPlayerBarScreen(
     onBackClick: () -> Unit,
-    viewModel: LibraryViewModel = hiltViewModel()
+    viewModel: LibraryViewModel
 ) {
     val toolbarConfig by viewModel.toolbarConfig.collectAsStateWithLifecycle()
 
@@ -1548,10 +1656,12 @@ private val PaletteStyleOptions = listOf(
 @Composable
 private fun ProgressThicknessSetting(
     thicknessDp: Int,
+    /** Modo activo: la onda admite menos grosor que la píldora (ver `progressTrackHeightMax`). */
+    wavy: Boolean,
     onChange: (Int) -> Unit
 ) {
     val min = ComponentConfig.ProgressTrackHeightMin
-    val max = ComponentConfig.ProgressTrackHeightMax
+    val max = progressTrackHeightMax(wavy)
     val step = ComponentConfig.ProgressTrackHeightStep
     // Paradas INTERMEDIAS (el Slider no cuenta los extremos), de ahí el −1.
     val steps = ((max - min) / step).toInt() - 1
@@ -1647,7 +1757,7 @@ private fun ThemePaletteStyleSetting(
                 // `supportingText` del propio item y no en una `Column` metida dentro de `text`
                 // —el componente ya sabe maquetar título + apoyo, con su tipografía y su color— y
                 // el check pasa a `selectedLeadingIcon`, que además lo anima al entrar.
-                DropdownMenuPopup(expanded = expanded, onDismissRequest = { expanded = false }) {
+                AppMenuPopup(expanded = expanded, onDismissRequest = { expanded = false }) {
                     DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
                         PaletteStyleOptions.forEachIndexed { index, (name, labels) ->
                             DropdownMenuItem(
@@ -1675,22 +1785,35 @@ private fun ThemePaletteStyleSetting(
 // ==================== Piezas compartidas ====================
 
 /**
- * Andamiaje común de Ajustes: LargeTopAppBar colapsable + columna scrolleable con los
+ * Andamiaje común de Ajustes: app bar grande colapsable + columna scrolleable con los
  * márgenes estándar. Lo usan el hub y todas las sub-pantallas.
+ *
+ * La barra es `LargeFlexibleTopAppBar`, la variante de M3 Expressive, y no la `LargeTopAppBar`
+ * clásica —que es la generación anterior del componente—. Lo que se gana es el slot [subtitle]:
+ * el hub ya enseña una línea de estado bajo cada categoría (estilo Ajustes de Android) y hasta
+ * ahora esa información se PERDÍA al entrar en la pantalla, que es justo donde se está actuando
+ * sobre ella. El alto lo decide `TopAppBarDefaults` según haya subtítulo o no, así que ninguna
+ * pantalla fija una altura.
+ *
+ * @param subtitle línea de estado bajo el título. Solo tiene sentido cuando resume algo que la
+ *        pantalla ya sabe y el usuario querría comprobar de un vistazo; null en las que son una
+ *        lista de ajustes independientes, donde un resumen sería inventado.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsScaffold(
     title: String,
     onBackClick: () -> Unit,
+    subtitle: String? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     Scaffold(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
-            LargeTopAppBar(
+            LargeFlexibleTopAppBar(
                 title = { Text(title) },
+                subtitle = subtitle?.let { { Text(it, maxLines = 1, overflow = TextOverflow.Ellipsis) } },
                 navigationIcon = {
                     IconButton(onClick = onBackClick) {
                         MaterialSymbol("arrow_back")
@@ -1780,49 +1903,58 @@ private fun SettingsActionRow(
      * colores), donde un chevron mentiría prometiendo una pantalla que no hay.
      */
     navigates: Boolean = false,
-    /** La pasa [SettingsGroup] cuando la fila va dentro de un grupo; suelta, es un bloque. */
-    shape: Shape = RoundedCornerShape(SettingsTokens.BlockCorner)
+    /**
+     * Las pasa [SettingsGroup] cuando la fila va dentro de un grupo; suelta, es un bloque con la
+     * esquina de bloque en todos sus estados salvo el presionado, que sigue siendo el del spec.
+     */
+    shapes: ListItemShapes = ListItemDefaults.shapes(
+        shape = RoundedCornerShape(SettingsTokens.BlockCorner)
+    )
 ) {
-    Surface(
-        shape = shape,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        enabled = enabled,
-        onClick = onClick,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(SettingsTokens.TilePadding),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            if (loading) {
-                LoadingIndicator(modifier = Modifier.size(24.dp))
-            } else if (icon != null) {
-                MaterialSymbol(icon, size = 24.sp)
-            }
-            Spacer(modifier = Modifier.width(16.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.bodyLarge
-                )
-                Text(
-                    text = description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            if (navigates) {
-                Spacer(modifier = Modifier.width(12.dp))
-                MaterialSymbol(
-                    "chevron_right",
-                    size = 24.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
+    // Mismo cambio que [SettingsSwitchTile]: `SegmentedListItem` real en vez de `Surface` + `Row`
+    // replicando la anatomía del list item, para ganar el morph al presionar.
+    //
+    // El slot leading se arma en un `val` tipado y no en un `when` de lambdas dentro de la llamada:
+    // ahí las llaves de la rama y las de la lambda se confunden a la vista, y el tipo esperado
+    // tendría que propagarse a través del `when` para que el plugin de Compose marque el lambda.
+    val leading: (@Composable () -> Unit)? = if (loading) {
+        { LoadingIndicator(modifier = Modifier.size(24.dp)) }
+    } else if (icon != null) {
+        { MaterialSymbol(icon, size = 24.sp) }
+    } else {
+        null
     }
+    val trailing: (@Composable () -> Unit)? = if (navigates) {
+        {
+            MaterialSymbol(
+                "chevron_right",
+                size = 24.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    } else {
+        null
+    }
+
+    SegmentedListItem(
+        onClick = onClick,
+        enabled = enabled,
+        shapes = shapes,
+        colors = ListItemDefaults.segmentedColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+        ),
+        leadingContent = leading,
+        supportingContent = {
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        },
+        trailingContent = trailing,
+        content = { Text(text = title, style = MaterialTheme.typography.bodyLarge) },
+        modifier = Modifier.fillMaxWidth()
+    )
 }
 
 @Composable
@@ -1837,8 +1969,7 @@ private fun TunableSlider(
     Column {
         Text(
             text = title,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Bold
+            style = MaterialTheme.typography.bodyMediumEmphasized
         )
         Text(
             text = description,

@@ -1,8 +1,9 @@
 # Project exclude paths
 /.gradle/
-/app/build/
-/build/
-/core/build/
+# Cualquier directorio `build`, a CUALQUIER nivel. Antes iban listados módulo por módulo
+# (/build/, /app/build/, /core/build/) y eso obliga a acordarse al añadir uno: `:baselineprofile`
+# entró el 9 ago 2026 y su carpeta de build quedó sin ignorar, apareciendo como cambio pendiente.
+build/
 /.kotlin/
 *.logcat
 /.claude
@@ -20,3 +21,6 @@ captura.jpeg
 keystore.properties
 signing.properties
 local.properties
+
+# Capturas del profiler (Perfetto). Pesan cientos de MB y son de una sesión concreta.
+/performance/

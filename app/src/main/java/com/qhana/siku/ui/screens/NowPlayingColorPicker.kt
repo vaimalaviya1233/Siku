@@ -19,7 +19,6 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
@@ -111,7 +110,7 @@ private fun AppliedAccentHeader(savedAccent: Int) {
         Column {
             Text(
                 text = stringResource(R.string.color_picker_applied, hexOf(applied.toArgb())),
-                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+                style = MaterialTheme.typography.bodyMediumEmphasized
             )
             Text(
                 text = stringResource(R.string.color_picker_seed, hexOf(savedAccent)),
@@ -179,7 +178,7 @@ private fun CandidateRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = hex,
-                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+                style = MaterialTheme.typography.bodyMediumEmphasized
             )
             if (note != null) {
                 Text(

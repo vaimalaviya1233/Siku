@@ -13,7 +13,6 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.FiniteAnimationSpec
@@ -22,14 +21,15 @@ import androidx.compose.animation.core.SpringSpec
 import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MotionScheme
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.runtime.remember
 import androidx.navigation.NavBackStackEntry
 
 /**
@@ -57,11 +57,15 @@ import androidx.navigation.NavBackStackEntry
  *    forma que hace falta cuando un spring no sirve.
  *
  * No es una formalidad, y la diferencia es de mecánica, no de gusto: una transición necesita
- * **duración nominal** por dos motivos. El **predictive back** la recorre con el dedo
- * (`SeekableTransitionState`), y hay piezas que solo pueden sincronizarse contra un número — la
+ * **duración nominal** porque hay piezas que solo pueden sincronizarse contra un número — la
  * píldora del reproductor espera exactamente lo que dura el slide antes de desmontarse
  * (`snap(delayMillis = …)`), y un shared element tiene que aterrizar a la vez que la pantalla que
  * lo lleva. Un spring no ofrece ninguna de las dos cosas.
+ *
+ * Había un segundo motivo —el **predictive back** recorría la transición con el dedo
+ * (`SeekableTransitionState`), y una duración nominal es más predecible de recorrer que la duración
+ * calculada de un spring— que dejó de aplicar el 18 ago 2026, cuando el gesto se desactivó (ver el
+ * manifest). El primero basta por sí solo, así que aquí no cambia nada.
  *
  * OJO con el sobrepaso al llevar un token spatial a pantalla completa: es ~1,4 % del recorrido, o
  * sea ~2 px en un botón (donde ES el efecto) y ~34 px en un slide de 2400 px, donde asoma una
@@ -154,6 +158,31 @@ fun <T> appFastEffectsSpec(): FiniteAnimationSpec<T> = MaterialTheme.motionSchem
 @Composable
 @ReadOnlyComposable
 fun <T> appSlowEffectsSpec(): FiniteAnimationSpec<T> = MaterialTheme.motionScheme.slowEffectsSpec()
+
+/**
+ * El spec de POSICIÓN para `Modifier.animateItem`: el spatial del tema **más el umbral de un
+ * píxel** (`IntOffset.VisibilityThreshold`).
+ *
+ * El umbral no es un adorno, y es el mismo motivo que ya está escrito para
+ * [AppContainerBoundsTransform]: el `SpringSpec` que devuelve el `MotionScheme` no trae ninguno, y
+ * sin él la animación no termina hasta que cada componente baja de 0.01
+ * (`Spring.DefaultDisplacementThreshold`) — sobre un desplazamiento de varios cientos de píxeles
+ * eso es una cola larga que no mueve NADA visible pero mantiene el item invalidando frames. El
+ * default de `animateItem` sí lo trae, así que sustituirlo por el spec del tema a secas sería
+ * cambiar el motion **y** perder eso por el camino.
+ *
+ * Los valores (damping/stiffness) NO se copian: se leen del spec del scheme y solo se le añade el
+ * umbral. Si el scheme dejara de devolver un `SpringSpec`, se usa tal cual.
+ */
+@Composable
+fun appItemPlacementSpec(): FiniteAnimationSpec<IntOffset> {
+    val spec = appSpatialSpec<IntOffset>()
+    return remember(spec) {
+        (spec as? SpringSpec<*>)
+            ?.let { spring<IntOffset>(it.dampingRatio, it.stiffness, IntOffset.VisibilityThreshold) }
+            ?: spec
+    }
+}
 
 // ============================== TRANSICIONES DE PANTALLA ==============================
 
@@ -373,7 +402,7 @@ val AppBoundsTransform = BoundsTransform { _, _ ->
  * Lo usan las tres puntas de cada morph —contenedor, sombra y carátula anidada— para que aterricen
  * JUNTAS: es la lección de [AppBoundsTransform] (un shared element asienta a la vez que lo que lo
  * transporta) aplicada dentro del container transform. Los fades del CONTENIDO
- * ([appContainerContentExit], 300 / [appContainerContentExitFast], 150) sí son más cortos que el
+ * ([appContainerSurfaceExitSpec], 300 / [appContainerContentExitFast], 150) sí son más cortos que el
  * asentado del bounds a propósito: la superficie se disuelve antes de llegar y no deja residuo.
  *
  * Mismo criterio que [com.qhana.siku.ui.components.AppModalSheet], que ya usa `MotionScheme.standard()`
@@ -451,6 +480,52 @@ fun appShrinkFadeOut(): ExitTransition =
         fadeOut(AppMotionScheme.fastEffectsSpec())
 
 /**
+ * Entrada del BANNER de la biblioteca (sincronización, descargas, error): como [appExpandFadeIn] pero
+ * con el token **slow** de effects.
+ *
+ * No es "lo mismo más lento por gusto". El banner es lo único de la app que aparece **sin que el
+ * usuario haya pedido nada** y que además **empuja la lista entera hacia abajo**: con el token
+ * *default* el bloque se plantaba de golpe y el contenido daba un salto que se lee como un fallo de
+ * layout, no como algo que llega. Un elemento que interrumpe y desplaza necesita más recorrido que
+ * uno que el usuario acaba de invocar.
+ *
+ * **Crecer y aparecer van A LA VEZ, y aquí sí tiene que ser así** — al revés que en [appBannerExit],
+ * que encadena las dos fases. Si el hueco se abriera primero y la tarjeta se revelara después, habría
+ * un par de décimas de agujero VACÍO creciendo bajo las pestañas; al entrar, el bloque tiene que
+ * traerse su superficie desde el primer frame. La asimetría entre entrada y salida es deliberada.
+ */
+fun appBannerEnter(): EnterTransition =
+    expandVertically(AppMotionScheme.slowEffectsSpec()) +
+        fadeIn(AppMotionScheme.slowEffectsSpec())
+
+/**
+ * Salida del banner: **primero se apaga, DESPUÉS se cierra el hueco**. Dos fases encadenadas por el
+ * `delayMillis` del segundo tween, no dos animaciones a la vez.
+ *
+ * Es lo que arregla el "no queda al desaparecer". Con las dos cosas simultáneas —que es lo que hace
+ * [appShrinkFadeOut] y lo que hacía este banner— la tarjeta se ENCOGE MIENTRAS TODAVÍA SE VE: durante
+ * ~150 ms hay un banner de media altura con el texto y la onda recortados a la mitad, y la lista
+ * entera subiendo detrás. Se lee como un glitch de layout, no como algo que se retira. Apagándolo
+ * primero, el movimiento del contenido de abajo ocurre cuando ya no hay nada que mirar ahí.
+ *
+ * **La entrada NO es simétrica y no debe serlo** (ver [appBannerEnter]): invertir el orden al entrar
+ * —abrir el hueco y luego revelar— dejaría 200 ms de agujero vacío creciendo bajo las pestañas, que
+ * es peor que el recorte. Al aparecer, el bloque tiene que traer su superficie desde el primer frame.
+ *
+ * Tweens y no los springs del scheme por una razón mecánica: un spring no admite `delayMillis`, y el
+ * encadenado es justo lo que se busca. Las duraciones y curvas son los tokens de effects.
+ */
+fun appBannerExit(): ExitTransition =
+    fadeOut(tween(EXPRESSIVE_FAST_EFFECTS_MS, easing = ExpressiveFastEffectsEasing)) +
+        shrinkVertically(
+            tween(
+                EXPRESSIVE_DEFAULT_EFFECTS_MS,
+                delayMillis = EXPRESSIVE_FAST_EFFECTS_MS,
+                easing = ExpressiveDefaultEffectsEasing
+            )
+        )
+
+/**
  * Versión horizontal de [appExpandFadeIn], para lo que aparece DENTRO de una fila y desplaza a sus
  * vecinos (el anillo de descarga del toolbar).
  *
@@ -468,34 +543,23 @@ fun appShrinkWidthFadeOut(): ExitTransition =
 
 // ============================== HOJAS A PANTALLA COMPLETA ==============================
 
-/**
- * Entrada de las hojas propias que ocupan la pantalla y suben desde abajo (ecualizador, letras,
- * cola). No son `ModalBottomSheet` —esos van por `AppModalSheet`, que les da el mismo patrón sin
- * rebote a través del tema— sino capas montadas con
- * `AnimatedVisibility` por encima del player, y por eso necesitan su spec explícito.
+/*
+ * Las hojas propias que ocupan la pantalla y suben desde abajo (ecualizador, letras, cola) NO tienen
+ * aquí un par enter/exit: las monta [com.qhana.siku.ui.components.SheetOverlay], que gobierna su
+ * deslizamiento con un `graphicsLayer` y usa [SCREEN_ENTER_MS]/[SCREEN_EXIT_MS] con
+ * [ScreenEnterEasing]/[ScreenExitEasing] — los mismos valores que tenía el par `appSheetEnter/Exit`
+ * que vivió aquí hasta el 19 ago 2026.
  *
- * Es el patrón **enter and exit** del spec: introducir un COMPONENTE sobre la UI principal (modal o
- * no), que es distinto de navegar entre pantallas — y por eso el spec advierte de no usarlo para
- * jerarquía, donde deslizar el alto completo sobra y deja la relación entre pantallas sin explicar.
- * Aquí sí aplica: una hoja no es un nivel del grafo, es una superficie que se pone encima.
+ * Se fueron por las dos cosas que ese par no podía dar y que están explicadas en el KDoc de
+ * `SheetOverlay`: un `AnimatedVisibility` compone su contenido en el mismo frame en que arranca la
+ * animación —y una animación por TIEMPO se salta lo que ese frame tarde—, y el `fadeIn`/`fadeOut`
+ * que llevaban costaba un `saveLayer` de pantalla completa por frame. Sigue siendo el patrón
+ * **enter and exit** del spec (una superficie que se pone ENCIMA de la UI, no un nivel del grafo) y
+ * sigue yendo por easing + duración y nunca por springs; lo que cambió es quién lo aplica.
  *
- * Transición, no componente: easing + duración, **nunca springs**. Y del par *enter/exit* y no del
- * *transform*, porque la hoja no deja nada suyo en pantalla al cerrarse — a diferencia del
- * reproductor, cuya carátula persiste en la píldora.
- *
- * El movimiento va por un token **spatial** y la opacidad por uno de **effects**, cada uno con SU
- * duración: es lo que hace el spec y no un descuido. La hoja se hace opaca en 200 ms mientras
- * todavía termina de subir, así que se lee como material que llega, no como un rectángulo que se
- * desvanece.
+ * Las hojas `ModalBottomSheet` son otra cosa y siguen yendo por
+ * [com.qhana.siku.ui.components.AppModalSheet], que les quita el rebote a través del tema.
  */
-fun appSheetEnter(): EnterTransition =
-    slideInVertically(tween(SCREEN_ENTER_MS, easing = ScreenEnterEasing)) { it } +
-        fadeIn(tween(EXPRESSIVE_DEFAULT_EFFECTS_MS, easing = ExpressiveDefaultEffectsEasing))
-
-/** Contrario de [appSheetEnter]. */
-fun appSheetExit(): ExitTransition =
-    slideOutVertically(tween(SCREEN_EXIT_MS, easing = ScreenExitEasing)) { it } +
-        fadeOut(tween(EXPRESSIVE_FAST_EFFECTS_MS, easing = ExpressiveFastEffectsEasing))
 
 /**
  * Enter/exit de una superficie que HOSPEDA UNA PUNTA DE SHARED ELEMENT (hoy: la píldora, que morfa
@@ -509,9 +573,9 @@ fun appSheetExit(): ExitTransition =
  * `AnimatedVisibilityScope`: **cuando esa transición termina, la punta deja de participar**. Con el
  * fundido en la duración de *effects* (200/150 ms) contra los 500 del morph, el shared element perdía
  * una de sus dos puntas a un tercio del camino — la píldora ya se había asentado (o descompuesto)
- * mientras la portada seguía viajando. Ese desajuste llevaba ahí desde siempre (`appSheetEnter/Exit`
- * son 350/300) y es la razón de fondo de que el morph "no se viera": no es que estuviera mal
- * configurado, es que se le cortaba el suelo.
+ * mientras la portada seguía viajando. Ese desajuste llevaba ahí desde siempre (la píldora se fundía
+ * con las duraciones de las hojas, 350/300) y es la razón de fondo de que el morph "no se viera": no
+ * es que estuviera mal configurado, es que se le cortaba el suelo.
  *
  * O sea que estas duraciones NO son de effects aunque lo único que se anime sea una opacidad: quien
  * manda aquí es el morph al que acompañan. Si cambia [SCREEN_TRANSFORM_MS], cambian con él.
@@ -535,7 +599,7 @@ fun appFadeExit(): ExitTransition =
  * re-medirlo, así que al agrandarse se pixela:
  *  - **Píldora** (superficie chica) → [appContainerContentExitFast]: al ABRIR es la saliente y su rect
  *    crece, así que se desvanece en el primer tramo, antes de que el mosaico se note.
- *  - **Player** (superficie grande) → [appContainerContentExit] con el token *slow* de effects
+ *  - **Player** (superficie grande) → [appContainerSurfaceExitSpec] con el token *slow* de effects
  *    ([EXPRESSIVE_SLOW_EFFECTS_MS], 300): al CERRAR es el saliente y su rect ENCOGE, así que no se
  *    pixela y puede quedarse cubriendo a la píldora entrante —que arranca escalada— hasta que ésta
  *    casi se asienta. **La duración va atada al bounds** ([AppContainerBoundsTransform], que asienta
@@ -547,15 +611,28 @@ fun appFadeExit(): ExitTransition =
  *    parpadeo, no como una superficie que encoge.
  *
  * El exit del saliente es además lo que MANTIENE VIVA su punta esos ms; con exit 0 el morph de bounds
- * no tendría ventana y saltaría (por eso el rápido no es instantáneo).
+ * no tendría ventana y saltaría (por eso el rápido no es instantáneo). Eso vale para la punta atada a
+ * un `AnimatedVisibility` (la píldora); la del player ya no depende de su `exit` para vivir —es
+ * persistente— y por eso aplica el suyo a mano, ver [appContainerSurfaceExitSpec].
  */
 fun appContainerContentEnter(): EnterTransition = EnterTransition.None
 
-/** Exit del container transform para la superficie GRANDE (el player): dura casi lo que el bounds. Ver KDoc arriba. */
-fun appContainerContentExit(): ExitTransition =
-    fadeOut(tween(EXPRESSIVE_SLOW_EFFECTS_MS, easing = ExpressiveSlowEffectsEasing))
+/**
+ * Fundido de la superficie GRANDE (el player) al salir: dura casi lo que el bounds. Ver el KDoc de
+ * arriba para el porqué de la duración.
+ *
+ * **Es un SPEC y no una `ExitTransition`, y ahí está el detalle que cuesta caro olvidar**: la punta
+ * del player tiene la visibilidad gestionada a mano (el subárbol es persistente, ver `PlayerOverlay`)
+ * y en ese modo el estado de reposo es `PostExit`, así que un `exit` con fade dejaría el alfa en 0 en
+ * reposo y la vuelta `PostExit → Visible` la animaría la librería con su spring por defecto —no hay
+ * parámetro para eso—: el reproductor CRECIENDO translúcido, justo lo contrario del patrón. La punta
+ * va con `ExitTransition.None` y `NowPlayingScreen` aplica este fundido desde su propio
+ * `graphicsLayer`, en la dirección que toca y con `snap` en la otra.
+ */
+fun appContainerSurfaceExitSpec(): FiniteAnimationSpec<Float> =
+    tween(EXPRESSIVE_SLOW_EFFECTS_MS, easing = ExpressiveSlowEffectsEasing)
 
-/** Exit RÁPIDO del container transform, para la superficie CHICA (la píldora) — ver [appContainerContentExit]. */
+/** Exit RÁPIDO del container transform, para la superficie CHICA (la píldora) — ver [appContainerSurfaceExitSpec]. */
 fun appContainerContentExitFast(): ExitTransition =
     fadeOut(tween(EXPRESSIVE_FAST_EFFECTS_MS, easing = ExpressiveFastEffectsEasing))
 
@@ -608,8 +685,7 @@ const val SHARED_AXIS_Z_FAR_SCALE = 1.1f
  * deslizándose un tercio— y con la fase 2 del container transform se corrigió el eje en vez de
  * añadir otro patrón: abrir un artista, un álbum o un ajuste es bajar un nivel, no ir hacia un lado.
  * Consecuencia práctica de elegir Z sobre un container transform por tile: **cero maquinaria por
- * ítem** en grillas y carruseles (lo que acaba de costar el lag de scroll en "Todas"), y el
- * predictive back recorre la misma escala que hace el sistema entre actividades.
+ * ítem** en grillas y carruseles (lo que acaba de costar el lag de scroll en "Todas").
  *
  * Al ir ADELANTE la que llega crece de [SHARED_AXIS_Z_NEAR_SCALE] a 1 y la que se va se hunde de 1 a
  * [SHARED_AXIS_Z_FAR_SCALE]; al volver, exactamente al revés (el hijo se encoge hacia

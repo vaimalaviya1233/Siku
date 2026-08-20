@@ -35,7 +35,9 @@ import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.qhana.siku.R
 import com.qhana.siku.data.local.AlbumSummary
-import com.qhana.siku.ui.theme.AppBoundsTransform
+
+/** Radio del `Card` del tile. La punta del shared element deriva de él sus esquinas superiores. */
+private val AlbumTileCorner = 20.dp
 
 /**
  * Tarjeta de álbum: `Card` tonal con la carátula arriba (esquinas superiores redondeadas por el
@@ -66,20 +68,20 @@ fun AlbumTileCard(
 ) {
     Card(
         onClick = onClick,
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = colorScheme.surfaceContainerHigh),
+        shape = RoundedCornerShape(AlbumTileCorner),
+        colors = CardDefaults.cardColors(containerColor = colorScheme.surface),
         modifier = modifier.fillMaxWidth()
     ) {
-        val sharedModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
-            with(sharedTransitionScope) {
-                Modifier.sharedBounds(
-                    sharedContentState = rememberSharedContentState(key = "album_image_${album.name}"),
-                    animatedVisibilityScope = animatedVisibilityScope,
-                    // Spring del tema en vez del default de la API (ver AppBoundsTransform).
-                    boundsTransform = AppBoundsTransform
-                )
-            }
-        } else Modifier
+        // La forma que viaja son las esquinas SUPERIORES del card: la carátula ocupa su borde de
+        // arriba, así que abajo es un corte recto contra el contenido. Sin declararla, al despegar
+        // salían las cuatro esquinas vivas — el recorte lo pone el `Card`, que es un ANCESTRO, y el
+        // overlay del `SharedTransitionScope` se los salta. Ver [entityImageSharedBounds].
+        val sharedModifier = entityImageSharedBounds(
+            key = "album_image_${album.name}",
+            shape = RoundedCornerShape(topStart = AlbumTileCorner, topEnd = AlbumTileCorner),
+            sharedTransitionScope = sharedTransitionScope,
+            animatedVisibilityScope = animatedVisibilityScope
+        )
 
         // Carátula cuadrada + badge de nº de canciones.
         Box(

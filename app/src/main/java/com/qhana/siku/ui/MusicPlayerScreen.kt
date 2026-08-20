@@ -527,7 +527,7 @@ fun MusicPlayerScreen(
             )
             ProvideAppSharedTransitionScope(
                 scope = this@SharedTransitionLayout,
-                rowOrigin = rememberRowOriginHost(rowOrigin, appState)
+                rowOrigin = rememberRowOriginHost(rowOrigin, appState, playerLayerTransition)
             ) {
             // Box: permite montar el PlayerOverlay como capa flotante SOBRE el NavHost.
             Box(modifier = Modifier.fillMaxSize()) {
@@ -551,6 +551,7 @@ fun MusicPlayerScreen(
                         playbackViewModel = playbackViewModel,
                         libraryViewModel = libraryViewModel,
                         sourcesViewModel = sourcesViewModel,
+                        syncViewModel = syncViewModel,
                         snackbarManager = snackbarManager,
                         sharedTransitionScope = this@SharedTransitionLayout
                     )

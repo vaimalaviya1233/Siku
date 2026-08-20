@@ -39,6 +39,7 @@ import com.qhana.siku.ui.theme.appNavForwardExit
 import com.qhana.siku.ui.viewmodel.LibraryViewModel
 import com.qhana.siku.ui.viewmodel.PlaybackViewModel
 import com.qhana.siku.ui.viewmodel.SourcesViewModel
+import com.qhana.siku.ui.viewmodel.SyncViewModel
 
 /**
  * Grafo de navegación de la app. Las pantallas reciben TODO por parámetro: los ViewModels
@@ -67,6 +68,7 @@ fun AppNavHost(
     playbackViewModel: PlaybackViewModel,
     libraryViewModel: LibraryViewModel,
     sourcesViewModel: SourcesViewModel,
+    syncViewModel: SyncViewModel,
     snackbarManager: SnackbarManager,
     sharedTransitionScope: SharedTransitionScope
 ) {
@@ -75,14 +77,25 @@ fun AppNavHost(
     // Estado compartido por varias rutas (cada capa lo colecta de su ViewModel; StateFlow
     // hace que ambas vean lo mismo sin acoplarse entre sí).
     val currentSong by playbackViewModel.currentSong.collectAsStateWithLifecycle()
-    val libraryUiState by libraryViewModel.uiState.collectAsStateWithLifecycle()
+    // Vistas de UN campo, no el `uiState` entero. Esta es la raíz del grafo: colectando el objeto
+    // completo, cualquier emisión —una tecla de la búsqueda, un chip de origen, el slider de
+    // ReplayGain de Ajustes, un tick del banner— recomponía el NavHost aunque solo hicieran falta
+    // estos tres campos, todos de `data`. Ver el bloque de vistas en `LibraryViewModel`.
+    val favorites by libraryViewModel.favorites.collectAsStateWithLifecycle()
+    val playlists by libraryViewModel.playlists.collectAsStateWithLifecycle()
+    val favoriteSongs by libraryViewModel.favoriteSongs.collectAsStateWithLifecycle()
 
     // Transiciones del grafo, declaradas UNA vez aquí y no ruta por ruta. Antes cada `composable`
     // repetía el mismo par `slideInHorizontally(tween(300))` / `slideOutHorizontally(tween(300))`
     // —14 veces, con la duración a mano— y solo declaraba `enterTransition` + `popExitTransition`.
     // Faltaban las OTRAS dos, así que la pantalla que quedaba detrás no se movía: no había shared
-    // axis (una capa entrando sobre un fondo congelado) y el predictive back no tenía recorrido que
-    // enseñar durante el gesto. Los cuatro specs salen del MotionScheme (ver ui/theme/Motion.kt).
+    // axis, solo una capa entrando sobre un fondo congelado. Los cuatro specs salen del MotionScheme
+    // (ver ui/theme/Motion.kt).
+    //
+    // Las cuatro SE QUEDAN aunque el predictive back esté desactivado desde el 18 ago 2026 (ver el
+    // manifest): con el gesto, `popEnter`/`popExit` eran además lo que se recorría con el dedo, pero
+    // el motivo por el que existen es el shared axis, y ese vale igual cuando el "atrás" es un
+    // evento — la pantalla de atrás tiene que moverse se llegue como se llegue.
     NavHost(
         navController = navController,
         startDestination = startDestination,
@@ -165,6 +178,8 @@ fun AppNavHost(
                 songs = playlistSongs,
                 currentSong = currentSong,
                 isFavoritesList = false,
+                favorites = favorites,
+                playlists = playlists,
                 onBackClick = { navController.popBackStack() },
                 onPlayAll = { songs, index ->
                     libraryViewModel.recordContext(
@@ -184,6 +199,12 @@ fun AppNavHost(
                 onAddToQueue = { playbackViewModel.addToQueue(it) },
                 // Misma función, otra sobrecarga: la de lista cuenta cuántas entraron de verdad.
                 onAddAllToQueue = { playbackViewModel.addToQueue(it) },
+                onAddSongToPlaylist = { targetId, songId -> libraryViewModel.addSongToPlaylist(targetId, songId) },
+                onCreatePlaylist = { name, pendingSongId ->
+                    libraryViewModel.createPlaylist(name) { id ->
+                        pendingSongId?.let { libraryViewModel.addSongToPlaylist(id, it) }
+                    }
+                },
                 onReorderSongs = { songIds -> libraryViewModel.reorderPlaylistSongs(playlistId, songIds) },
                 onRemoveSong = { songId -> libraryViewModel.removeSongFromPlaylist(playlistId, songId) },
                 onAddSongs = { appState.showAddSongsSheet = true }
@@ -199,8 +220,8 @@ fun AppNavHost(
             ArtistDetailScreen(
                 artistName = artistName,
                 currentSong = currentSong,
-                favorites = libraryUiState.favorites,
-                playlists = libraryUiState.playlists,
+                favorites = favorites,
+                playlists = playlists,
                 onBackClick = { navController.popBackStack() },
                 onAlbumClick = { album -> appState.navigateToAlbum(album) },
                 onPlayAll = { songs, index ->
@@ -241,8 +262,8 @@ fun AppNavHost(
             AlbumDetailScreen(
                 albumName = albumName,
                 currentSong = currentSong,
-                favorites = libraryUiState.favorites,
-                playlists = libraryUiState.playlists,
+                favorites = favorites,
+                playlists = playlists,
                 onBackClick = { navController.popBackStack() },
                 onArtistClick = { artist -> appState.navigateToArtist(artist) },
                 onPlayAll = { songs, index ->
@@ -283,8 +304,8 @@ fun AppNavHost(
             GenreDetailScreen(
                 genreName = genreName,
                 currentSong = currentSong,
-                favorites = libraryUiState.favorites,
-                playlists = libraryUiState.playlists,
+                favorites = favorites,
+                playlists = playlists,
                 onBackClick = { navController.popBackStack() },
                 onPlayAll = { songs, index ->
                     libraryViewModel.recordContext(
@@ -320,9 +341,11 @@ fun AppNavHost(
         ) {
             PlaylistDetailScreen(
                 playlistName = "Favoritos",
-                songs = libraryUiState.favoriteSongs,
+                songs = favoriteSongs,
                 currentSong = currentSong,
                 isFavoritesList = true,
+                favorites = favorites,
+                playlists = playlists,
                 onBackClick = { navController.popBackStack() },
                 onPlayAll = { songs, index ->
                     libraryViewModel.recordContext(PlaybackContext.Favorites)
@@ -338,6 +361,12 @@ fun AppNavHost(
                 onAddToQueue = { playbackViewModel.addToQueue(it) },
                 // Misma función, otra sobrecarga: la de lista cuenta cuántas entraron de verdad.
                 onAddAllToQueue = { playbackViewModel.addToQueue(it) },
+                onAddSongToPlaylist = { targetId, songId -> libraryViewModel.addSongToPlaylist(targetId, songId) },
+                onCreatePlaylist = { name, pendingSongId ->
+                    libraryViewModel.createPlaylist(name) { id ->
+                        pendingSongId?.let { libraryViewModel.addSongToPlaylist(id, it) }
+                    }
+                },
                 onAddSongs = { appState.showAddSongsSheet = true }
             )
         }
@@ -385,21 +414,27 @@ fun AppNavHost(
         ) {
             SettingsPlaybackScreen(
                 onBackClick = { navController.popBackStack() },
-                onNavigate = { route -> appState.navigate(route) }
+                onNavigate = { route -> appState.navigate(route) },
+                viewModel = libraryViewModel
             )
         }
 
         composable(
             route = Screen.SettingsEqPresets.route
         ) {
-            SettingsEqPresetsScreen(onBackClick = { navController.popBackStack() })
+            SettingsEqPresetsScreen(
+                onBackClick = { navController.popBackStack() },
+                viewModel = libraryViewModel
+            )
         }
 
         composable(
             route = Screen.SettingsDownloads.route
         ) {
             SettingsDownloadsScreen(
-                onBackClick = { navController.popBackStack() }
+                onBackClick = { navController.popBackStack() },
+                viewModel = syncViewModel,
+                sourcesViewModel = sourcesViewModel
             )
         }
 
@@ -408,32 +443,45 @@ fun AppNavHost(
         ) {
             SettingsAppearanceScreen(
                 onBackClick = { navController.popBackStack() },
-                onNavigate = { route -> appState.navigate(route) }
+                onNavigate = { route -> appState.navigate(route) },
+                viewModel = libraryViewModel
             )
         }
 
         composable(
             route = Screen.SettingsGestures.route
         ) {
-            SettingsGesturesScreen(onBackClick = { navController.popBackStack() })
+            SettingsGesturesScreen(
+                onBackClick = { navController.popBackStack() },
+                viewModel = libraryViewModel
+            )
         }
 
         composable(
             route = Screen.SettingsTabs.route
         ) {
-            SettingsTabsScreen(onBackClick = { navController.popBackStack() })
+            SettingsTabsScreen(
+                onBackClick = { navController.popBackStack() },
+                viewModel = libraryViewModel
+            )
         }
 
         composable(
             route = Screen.SettingsPlayerBar.route
         ) {
-            SettingsPlayerBarScreen(onBackClick = { navController.popBackStack() })
+            SettingsPlayerBarScreen(
+                onBackClick = { navController.popBackStack() },
+                viewModel = libraryViewModel
+            )
         }
 
         composable(
             route = Screen.SettingsProgressBar.route
         ) {
-            SettingsProgressBarScreen(onBackClick = { navController.popBackStack() })
+            SettingsProgressBarScreen(
+                onBackClick = { navController.popBackStack() },
+                viewModel = libraryViewModel
+            )
         }
 
         composable(Screen.DownloadManager.route) {

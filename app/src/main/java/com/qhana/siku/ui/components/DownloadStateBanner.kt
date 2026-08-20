@@ -28,7 +28,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
@@ -89,7 +88,7 @@ fun DownloadStateBanner(
                         if (stopped) R.string.download_banner_pending_title
                         else R.string.download_banner_paused_title
                     ),
-                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
+                    style = MaterialTheme.typography.titleSmallEmphasized
                 )
                 Text(
                     stringResource(
@@ -117,6 +116,7 @@ fun DownloadStateBanner(
                     }
                     Button(
                         onClick = onResume,
+                        shapes = ButtonDefaults.shapes(),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = accent,
                             contentColor = onContainerColor(accent)

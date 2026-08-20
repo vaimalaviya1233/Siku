@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.lazy.LazyColumn
@@ -37,9 +38,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -50,14 +51,16 @@ import com.qhana.siku.R
 import com.qhana.siku.data.local.AlbumSummary
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.ui.components.AdaptiveCollage
+import com.qhana.siku.ui.components.SongRowContainer
+import com.qhana.siku.ui.components.entityImageSharedBounds
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.onContainerColor
 import com.qhana.siku.ui.components.vividAccentColor
 import com.qhana.siku.ui.viewmodel.HomeArtistPick
+import com.qhana.siku.ui.viewmodel.RelatedArtistUi
 import com.qhana.siku.ui.viewmodel.HomeStats
 import com.qhana.siku.data.model.PlaybackContext
 import java.time.LocalTime
-import com.qhana.siku.ui.theme.AppBoundsTransform
 
 // Tarjeta grande de los carruseles Expressive del inicio (item "grande" del multi-browse; los
 // medianos/chicos los deriva el propio carrusel). Cuadrada con etiqueta superpuesta.
@@ -72,6 +75,13 @@ private val HomeCardShape = RoundedCornerShape(24.dp)
  * `16.dp` sueltos que se desalinean en cuanto alguien toca uno.
  */
 private val HomeContentPadding = 16.dp
+
+/**
+ * Aire por encima del saludo, sumado al `contentPadding` que la lista ya reserva bajo el bloque de
+ * pestañas. Calibrado en device: es de una sola pantalla, no de la rejilla general (ver
+ * `HeaderContentGap` en LibraryScreen para esa).
+ */
+private val GreetingTopPadding = 8.dp
 
 /**
  * Si este carrusel tiene algo que desplazar. Load-bearing para el GESTO, no para el aspecto:
@@ -113,10 +123,9 @@ fun HomeScreen(
     currentSongId: String?,
     contentPadding: PaddingValues,
     onPlaySongs: (List<Song>, Int) -> Unit,
-    // Reproducir del bloque "Porque escuchaste X" SÍ tiene un contexto reanudable (ese artista),
-    // a diferencia de los demás carruseles de canciones sueltas: va por su propio callback para
-    // que el caller pueda registrarlo. Recibe el nombre del artista además de la cola.
-    onPlayArtistPick: (String, List<Song>, Int) -> Unit,
+    // "Porque escuchaste a X" propone OTROS artistas, así que su tarjeta NAVEGA a un detalle en vez
+    // de reproducir: descubrir a alguien es entrar a ver qué tiene, no que empiece a sonar.
+    onArtistClick: (String) -> Unit,
     onAlbumClick: (String) -> Unit,
     onResumeContext: (PlaybackContext) -> Unit,
     // Acciones rápidas de la fila de chips (arriba de los carruseles). Todas ARRANCAN música al
@@ -127,6 +136,14 @@ fun HomeScreen(
     onPlayAll: () -> Unit,
     hasFavorites: Boolean,
     onShuffleFavorites: () -> Unit,
+    /**
+     * ¿Tiene sentido hablar de ORIGEN? Solo con la biblioteca partida entre lo que suena sin red y
+     * lo que la necesita (ver `LibraryViewModel.hasSourceSplit`). Gobierna las dos acciones de
+     * abajo, que aparecen y desaparecen junto con los chips de filtro de las listas.
+     */
+    showSourceActions: Boolean,
+    onShuffleOffline: () -> Unit,
+    onShuffleNotDownloaded: () -> Unit,
     // Géneros (chips extra tras los fijos): cada uno reproduce ese género en aleatorio.
     genres: List<String>,
     onShuffleGenre: (String) -> Unit,
@@ -157,8 +174,10 @@ fun HomeScreen(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(
             // El top que llega incluye el alto del header (el contenido pasa por debajo de
-            // TopBar + tabs): conservarlo o el saludo nace tapado por las pestañas.
-            top = contentPadding.calculateTopPadding() + 4.dp,
+            // TopBar + tabs): conservarlo o el saludo nace tapado por las pestañas. Y SIN sumarle
+            // nada: ese inset ya trae los 4dp de aire tras el bloque de pestañas que reservan todas
+            // las listas de la biblioteca, así que un extra aquí solo separaba el inicio del resto.
+            top = contentPadding.calculateTopPadding(),
             bottom = contentPadding.calculateBottomPadding() + 24.dp
         ),
         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -172,6 +191,9 @@ fun HomeScreen(
                 onPlayAll = onPlayAll,
                 hasFavorites = hasFavorites,
                 onShuffleFavorites = onShuffleFavorites,
+                showSourceActions = showSourceActions,
+                onShuffleOffline = onShuffleOffline,
+                onShuffleNotDownloaded = onShuffleNotDownloaded,
                 genres = genres,
                 onShuffleGenre = onShuffleGenre
             )
@@ -198,14 +220,15 @@ fun HomeScreen(
                 )
             }
         }
-        // Sección generada: el catálogo del artista más escuchado.
+        // Sección generada: OTROS artistas que comparten género con el que más escuchas.
         artistPick?.let { pick ->
             item(key = "artist_pick") {
-                SongCarousel(
-                    title = stringResource(R.string.home_section_because_you_listened, pick.artist),
-                    songs = pick.songs,
-                    currentSongId = currentSongId,
-                    onPlaySongs = { songs, index -> onPlayArtistPick(pick.artist, songs, index) }
+                RelatedArtistCarousel(
+                    title = stringResource(R.string.home_section_because_you_listened, pick.seed),
+                    artists = pick.related,
+                    onArtistClick = onArtistClick,
+                    sharedTransitionScope = sharedTransitionScope,
+                    animatedVisibilityScope = animatedVisibilityScope
                 )
             }
         }
@@ -265,13 +288,22 @@ private fun GreetingHeader(stats: HomeStats) {
         modifier = Modifier.padding(
             start = HomeContentPadding,
             end = HomeContentPadding,
-            top = 8.dp,
+            // Aire PROPIO del saludo, además del que ya trae el `contentPadding` de la lista.
+            //
+            // Estuvo en cero, con este razonamiento: el saludo es lo primero de la lista, el aire
+            // contra las pestañas ya lo pone el contentPadding (el mismo que en las demás) y la
+            // interlínea de `headlineMedium` añade lo suyo, así que sumar aquí era contar el mismo
+            // espacio tres veces. La cuenta era correcta y aun así el resultado nacía apretado
+            // (device, 20 ago 2026): un titular grande pide más aire por encima que una fila de
+            // chips, y las demás pestañas empiezan justo con eso. Es la excepción de UNA pantalla,
+            // por eso vive aquí y no en `HeaderContentGap`, que las gobierna a todas.
+            top = GreetingTopPadding,
             bottom = 4.dp
         )
     ) {
         Text(
             text = stringResource(greetingRes),
-            style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.SemiBold),
+            style = MaterialTheme.typography.headlineMediumEmphasized,
             color = colorScheme.onSurface
         )
         if (subtitle != null) {
@@ -298,6 +330,9 @@ private fun HomeQuickActions(
     onPlayAll: () -> Unit,
     hasFavorites: Boolean,
     onShuffleFavorites: () -> Unit,
+    showSourceActions: Boolean,
+    onShuffleOffline: () -> Unit,
+    onShuffleNotDownloaded: () -> Unit,
     genres: List<String>,
     onShuffleGenre: (String) -> Unit
 ) {
@@ -314,6 +349,17 @@ private fun HomeQuickActions(
             QuickActionChip("shuffle", stringResource(R.string.home_action_shuffle), enabled = canPlayAll, onClick = onShuffleAll)
             QuickActionChip("play_arrow", stringResource(R.string.home_action_play_order), enabled = canPlayAll, fill = true, onClick = onPlayAll)
             QuickActionChip("favorite", stringResource(R.string.home_action_favorites), enabled = hasFavorites, fill = true, onClick = onShuffleFavorites)
+            // Acciones por ORIGEN. Solo existen mientras la biblioteca esté partida entre lo que
+            // suena sin red y lo que la necesita (misma puerta que los chips de filtro de las
+            // listas, ver [LibraryViewModel.hasSourceSplit]): con todo descargado, "Sin conexión"
+            // sería un segundo botón de "Aleatorio" y "Sin descargar" no tendría qué reproducir.
+            //
+            // `offline_pin` es el MISMO glifo con el que la fila de una canción y el chip del
+            // reproductor dicen "esto ya está en el dispositivo": tres superficies, un solo signo.
+            if (showSourceActions) {
+                QuickActionChip("offline_pin", stringResource(R.string.home_action_offline), onClick = onShuffleOffline)
+                QuickActionChip("cloud", stringResource(R.string.home_action_not_downloaded), onClick = onShuffleNotDownloaded)
+            }
             // Chips de género (top por cantidad). El label ES el nombre del género (no un string res).
             genres.forEach { genre ->
                 QuickActionChip("genres", label = genre, onClick = { onShuffleGenre(genre) })
@@ -321,6 +367,19 @@ private fun HomeQuickActions(
         }
     }
 }
+
+/**
+ * Tope de caracteres del label de un chip que fija Material. Las etiquetas FIJAS de esta fila lo
+ * cumplen escritas; el que no puede garantizarlo es el chip de GÉNERO, cuyo texto es el tag crudo
+ * del archivo ("Progressive Metal/Fusion") y no lo elige nadie de este lado.
+ */
+private const val CHIP_LABEL_MAX_CHARS = 20
+
+/**
+ * Ancho medio de un glifo en fracción del tamaño de fuente. Aproximación (la Google Sans Flex no
+ * es monoespaciada), suficiente porque lo que se busca es el punto donde CORTAR, no medir el texto.
+ */
+private const val CHIP_LABEL_AVG_CHAR_EM = 0.5f
 
 /** Chip de una acción rápida: `AssistChip` real de M3 con relleno tonal y sin borde. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -332,10 +391,24 @@ private fun QuickActionChip(
     fill: Boolean = false,
     onClick: () -> Unit
 ) {
+    // El tope se calcula en ANCHO y a partir del tamaño de fuente VIVO, no como un dp fijo: así
+    // sube con la escala tipográfica del sistema y el chip sigue mostrando los mismos ~20
+    // caracteres en vez de recortar antes. Recortar el String sería peor —el corte debe caer donde
+    // la fuente diga, y la elipsis es cosa del layout.
+    val maxLabelWidth = with(LocalDensity.current) {
+        (MaterialTheme.typography.labelLarge.fontSize * CHIP_LABEL_MAX_CHARS * CHIP_LABEL_AVG_CHAR_EM).toDp()
+    }
     androidx.compose.material3.AssistChip(
         onClick = onClick,
         enabled = enabled,
-        label = { Text(label) },
+        label = {
+            Text(
+                label,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = maxLabelWidth)
+            )
+        },
         // Sin color explícito: el icono hereda el leadingIconContentColor del chip (y se
         // atenúa solo cuando está deshabilitado).
         leadingIcon = { MaterialSymbol(icon, size = 18.sp, fill = fill) },
@@ -352,7 +425,7 @@ private fun QuickActionChip(
 private fun SectionHeader(title: String) {
     Text(
         text = title,
-        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+        style = MaterialTheme.typography.titleMediumEmphasized,
         color = colorScheme.onSurface,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
@@ -388,15 +461,46 @@ private fun SongCarousel(
                 .height(HomeCardHeight)
         ) { i ->
             val song = songs[i]
-            HomeCarouselCard(
-                art = song.albumArtUri?.toString(),
-                title = song.title,
-                subtitle = song.artist,
-                isCurrent = song.id == currentSongId,
-                onClick = { onPlaySongs(songs, i) },
-                labelAlpha = labelAlpha(),
-                modifier = Modifier.maskClip(HomeCardShape)
-            )
+            // La tarjeta ES la punta de origen del morph: crece hasta ser el reproductor, igual que
+            // una fila de "Todas", y con la misma maquinaria (`SongRowContainer`). El `maskClip` del
+            // carrusel va POR FUERA de la punta compartida: durante el morph la superficie se dibuja
+            // en el overlay del `SharedTransitionScope`, fuera del recorte del carrusel, que es lo
+            // que le permite crecer más allá de su casilla.
+            //
+            // **Se identifica por el id de CANCIÓN, igual que una fila, y eso admite un empate**: los
+            // carruseles del inicio son consultas independientes que no deduplican entre sí, así que
+            // la misma canción puede tener tarjeta en "Añadidas hace poco" y en "Lo que más escuchas"
+            // a la vez, y las dos tomarían el papel de origen. Se asumió el 17 ago 2026 creyendo que
+            // "da igual de cuál de las dos salga" — **y eso es FALSO**: con dos puntas declarándose
+            // destino no sale de ninguna, Compose no anima y el reproductor aparece sin morph (ver
+            // `SharedTransitionGate`, donde el mismo empate ENTRE PESTAÑAS sí dio la cara el 19 ago).
+            // Aquí sigue abierto: hace falta que una canción caiga en DOS carruseles a la vez. El
+            // arreglo, si aparece, es dar el papel a UNA sola instancia —`SongRowContainer` ya tiene
+            // identidad por instancia para `placedRows`—, y NO el id por superficie
+            // (`home:<sección>:<id>` + `PlayerMorphOrigin` con canción y superficie separadas), que
+            // se escribió entero y se descartó por complejidad.
+            SongRowContainer(
+                songId = song.id,
+                modifier = Modifier.maskClip(HomeCardShape).fillMaxSize()
+            ) {
+                HomeCarouselCard(
+                    art = song.albumArtUri?.toString(),
+                    title = song.title,
+                    subtitle = song.artist,
+                    isCurrent = song.id == currentSongId,
+                    onClick = { onPlaySongs(songs, i) },
+                    labelAlpha = labelAlpha(),
+                    // La tarjeta se RECORTA A SÍ MISMA, y eso no es redundante con el `maskClip` de
+                    // fuera: mientras vuela, el shared element se dibuja en el overlay del
+                    // `SharedTransitionScope`, que cuelga de la raíz y por tanto se salta los recortes
+                    // de sus padres — incluido el del carrusel. Sin este clip, la superficie que crece
+                    // salía con las ESQUINAS RECTAS mientras que la tarjeta parada es un cuadrado
+                    // redondeado. Es el mismo motivo por el que la píldora y las filas de lista no
+                    // pasan `clipInOverlayDuringTransition`: su propia superficie ya lleva la forma
+                    // puesta (ver el Card de `MiniPlayer` y el `.clip(...)` de `SongItem`).
+                    modifier = Modifier.fillMaxSize().clip(HomeCardShape)
+                )
+            }
         }
     }
 }
@@ -496,6 +600,67 @@ private fun PlaybackContext.typeIcon(): String = when (this) {
     PlaybackContext.LibraryAll -> "library_music"
 }
 
+/**
+ * Carrusel de "Porque escuchaste a X": otros artistas de tu biblioteca que comparten género con el
+ * que más escuchas (ver `LibraryViewModel.homeArtistPick`).
+ *
+ * A diferencia de los carruseles de canciones, sus tarjetas **navegan** al detalle del artista en vez
+ * de reproducir: la sección es de descubrimiento, y descubrir a alguien es ir a ver qué tiene. Por eso
+ * tampoco es punta del *container transform* hacia el reproductor — su transición es la del NavHost,
+ * con la foto viajando al header del detalle (misma key que la celda de la pestaña Artistas).
+ */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
+@Composable
+private fun RelatedArtistCarousel(
+    title: String,
+    artists: List<RelatedArtistUi>,
+    onArtistClick: (String) -> Unit,
+    sharedTransitionScope: SharedTransitionScope?,
+    animatedVisibilityScope: AnimatedVisibilityScope?
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        SectionHeader(title)
+        val state = rememberCarouselState { artists.size }
+        HorizontalMultiBrowseCarousel(
+            state = state,
+            preferredItemWidth = HomeCardWidth,
+            itemSpacing = 8.dp,
+            userScrollEnabled = artists.isScrollable,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = HomeContentPadding)
+                .height(HomeCardHeight)
+        ) { i ->
+            val artist = artists[i]
+            // Shared element de la foto → header del detalle de artista (misma key que la fila de la
+            // pestaña Artistas). La FORMA de la tarjeta viaja con ella: el recorte que se ve aquí lo
+            // pone el `maskClip` del carrusel, o sea un ANCESTRO, y el overlay del
+            // `SharedTransitionScope` cuelga de la raíz — ver [entityImageSharedBounds].
+            val sharedArtModifier = entityImageSharedBounds(
+                key = "artist_image_${artist.name}",
+                shape = HomeCardShape,
+                sharedTransitionScope = sharedTransitionScope,
+                animatedVisibilityScope = animatedVisibilityScope
+            )
+            HomeCarouselCard(
+                art = artist.artUri,
+                title = artist.name,
+                subtitle = pluralStringResource(
+                    R.plurals.song_count,
+                    artist.songCount,
+                    artist.songCount
+                ),
+                badgeIcon = "artist",
+                placeholderIcon = "artist",
+                onClick = { onArtistClick(artist.name) },
+                artModifier = sharedArtModifier,
+                labelAlpha = labelAlpha(),
+                modifier = Modifier.maskClip(HomeCardShape)
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
 private fun AlbumCarousel(
@@ -519,19 +684,16 @@ private fun AlbumCarousel(
                 .height(HomeCardHeight)
         ) { i ->
             val album = albums[i]
-            // Shared element de la carátula → header del detalle de álbum (misma key que la
-            // celda de la pestaña Álbumes), preservado dentro del ítem recortado del carrusel.
-            val sharedArtModifier =
-                if (sharedTransitionScope != null && animatedVisibilityScope != null) {
-                    with(sharedTransitionScope) {
-                        Modifier.sharedBounds(
-                            sharedContentState = rememberSharedContentState(key = "album_image_${album.name}"),
-                            animatedVisibilityScope = animatedVisibilityScope,
-                            // Spring del tema en vez del default de la API (ver AppBoundsTransform).
-                            boundsTransform = AppBoundsTransform
-                        )
-                    }
-                } else Modifier
+            // Shared element de la carátula → header del detalle de álbum (misma key que la celda de
+            // la pestaña Álbumes). Con la FORMA de la tarjeta declarada para el vuelo: el recorte que
+            // se ve aquí es el `maskClip` del carrusel —un ANCESTRO— y el overlay del
+            // `SharedTransitionScope` se los salta todos. Ver [entityImageSharedBounds].
+            val sharedArtModifier = entityImageSharedBounds(
+                key = "album_image_${album.name}",
+                shape = HomeCardShape,
+                sharedTransitionScope = sharedTransitionScope,
+                animatedVisibilityScope = animatedVisibilityScope
+            )
             HomeCarouselCard(
                 art = album.albumArtUri,
                 title = album.name.ifBlank { stringResource(R.string.common_unknown_album) },
@@ -647,7 +809,7 @@ private fun HomeCarouselCard(
         ) {
             Text(
                 text = title,
-                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                style = MaterialTheme.typography.titleSmallEmphasized,
                 color = Color.White,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis

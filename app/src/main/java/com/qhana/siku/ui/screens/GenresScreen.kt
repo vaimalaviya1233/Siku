@@ -42,7 +42,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.graphics.shapes.RoundedPolygon
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -52,8 +51,8 @@ import com.qhana.siku.ui.components.ACCENT_SECONDARY_ALPHA
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.QueueOverflowButton
 import com.qhana.siku.ui.components.TonalChip
+import com.qhana.siku.ui.components.entityImageSharedBounds
 import com.qhana.siku.ui.components.rememberRowActionColors
-import com.qhana.siku.ui.theme.AppBoundsTransform
 
 /**
  * Pestaña "Géneros": cuadrícula de 2 columnas. Como un género no tiene carátula propia, cada tile es
@@ -136,7 +135,6 @@ fun GenresScreen(
                 TonalChip {
                     Text(
                         text = pluralStringResource(R.plurals.genre_count, genres.size, genres.size),
-                        style = MaterialTheme.typography.labelLarge,
                         color = colorScheme.onSecondaryContainer
                     )
                 }
@@ -181,20 +179,19 @@ private fun GenreTileCard(
     sharedTransitionScope: SharedTransitionScope? = null,
     animatedVisibilityScope: AnimatedVisibilityScope? = null
 ) {
-    val sharedModifier = if (sharedTransitionScope != null && animatedVisibilityScope != null) {
-        with(sharedTransitionScope) {
-            Modifier.sharedBounds(
-                sharedContentState = rememberSharedContentState(key = "genre_image_${genre.name}"),
-                animatedVisibilityScope = animatedVisibilityScope,
-                // Spring del tema en vez del default de la API (ver AppBoundsTransform).
-                boundsTransform = AppBoundsTransform
-            )
-        }
-    } else Modifier
-
     // SIN Card detrás: la forma ES el tile. Una superficie rectangular por debajo asomaría por las
     // esquinas —que la forma no llena— y anularía justo la silueta que le da identidad al género.
     val shape = genreShape(genre.name).toShape()
+
+    // La MISMA silueta viaja con la punta: el `clip` de abajo la pone en reposo (y recorta a los
+    // hijos), pero mientras vuela el shared element se dibuja en el overlay del
+    // `SharedTransitionScope`, fuera de esos recortes. Ver [entityImageSharedBounds].
+    val sharedModifier = entityImageSharedBounds(
+        key = "genre_image_${genre.name}",
+        shape = shape,
+        sharedTransitionScope = sharedTransitionScope,
+        animatedVisibilityScope = animatedVisibilityScope
+    )
     val (containerColor, onColor) = genrePalette(genre.name)
     Box(
         modifier = modifier
@@ -216,7 +213,7 @@ private fun GenreTileCard(
         ) {
             Text(
                 text = genre.name,
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                style = MaterialTheme.typography.titleMediumEmphasized,
                 color = onColor,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,

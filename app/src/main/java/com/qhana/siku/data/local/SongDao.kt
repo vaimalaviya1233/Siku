@@ -117,14 +117,14 @@ interface SongDao {
     )
     suspend fun mergePlayStats(loserId: String, winnerId: String)
 
-    // Visibilidad de los chips de origen: derivada del CONTENIDO real de la biblioteca
-    // (no de qué fuentes están configuradas — una fuente conectada pero vacía no debe
-    // mostrar filtros inútiles).
-    @Query("SELECT EXISTS(SELECT 1 FROM songs WHERE sourceType = :sourceType)")
-    fun hasSongsOfSourceFlow(sourceType: String): Flow<Boolean>
-
-    @Query("SELECT EXISTS(SELECT 1 FROM songs WHERE sourceType != :sourceType)")
-    fun hasSongsNotOfSourceFlow(sourceType: String): Flow<Boolean>
+    /**
+     * ¿Hay alguna canción que cumpla una condición de origen? Derivado del CONTENIDO real de la
+     * biblioteca y no de qué fuentes están configuradas: una fuente conectada pero vacía no debe
+     * mostrar filtros inútiles. Lo alimentan [buildExistsQuery] (una familia) y
+     * [buildSourceSplitQuery] (las dos mitades a la vez), que son las que ponen el `WHERE`.
+     */
+    @RawQuery(observedEntities = [SongEntity::class])
+    fun hasSongsMatchingFlow(query: SupportSQLiteQuery): Flow<Boolean>
 
     companion object {
         /** Carátulas distintas que se piden por género para el collage de su tarjeta. */
@@ -218,6 +218,46 @@ interface SongDao {
             val args = mutableListOf<Any>()
             appendSourceFilters(sb, args, sourceFilters)
             return SimpleSQLiteQuery(sb.toString(), args.toTypedArray())
+        }
+
+        /** ¿EXISTE alguna canción que cumpla estos filtros? Mismo `WHERE` que [buildCountQuery]. */
+        fun buildExistsQuery(sourceFilters: Set<SongSourceFilter>): SimpleSQLiteQuery {
+            val sb = StringBuilder("SELECT ")
+            val args = mutableListOf<Any>()
+            appendExists(sb, args, sourceFilters)
+            return SimpleSQLiteQuery(sb.toString(), args.toTypedArray())
+        }
+
+        /**
+         * ¿La biblioteca está PARTIDA entre lo que suena sin red (local o ya descargado) y lo que
+         * la necesita (nube sin descargar)? Es la pregunta que gobierna TODO lo que habla de
+         * origen: los chips de Todas/Artistas/Álbumes y las acciones del inicio. Mientras las dos
+         * mitades existan, elegir origen dice algo; en cuanto una se vacía —lo normal cuando se
+         * deja que la biblioteca termine de descargarse— no separa nada.
+         *
+         * Va en UNA consulta y no en dos flows combinados en el consumidor porque la consultan dos
+         * repositorios distintos ([SongDao] lo ve una vez, `SongRepository` y `BrowseRepository`
+         * lo piden por separado): con la combinación arriba, la definición viviría dos veces. Y se
+         * arma con [appendSourceFilters], igual que el resto, para que "qué cuenta como
+         * descargada" siga teniendo un solo dueño.
+         */
+        fun buildSourceSplitQuery(): SimpleSQLiteQuery {
+            val sb = StringBuilder("SELECT ")
+            val args = mutableListOf<Any>()
+            appendExists(sb, args, setOf(SongSourceFilter.LOCAL, SongSourceFilter.DOWNLOADED))
+            sb.append(" AND ")
+            appendExists(sb, args, setOf(SongSourceFilter.STREAMING))
+            return SimpleSQLiteQuery(sb.toString(), args.toTypedArray())
+        }
+
+        private fun appendExists(
+            sb: StringBuilder,
+            args: MutableList<Any>,
+            sourceFilters: Set<SongSourceFilter>
+        ) {
+            sb.append("EXISTS(SELECT 1 FROM songs WHERE 1=1")
+            appendSourceFilters(sb, args, sourceFilters)
+            sb.append(")")
         }
 
         /**
@@ -964,6 +1004,53 @@ interface SongDao {
     fun getTopPlayedArtistFlow(unknownArtist: String, minSongs: Int): Flow<String?>
 
     /**
+     * Artistas de la biblioteca que comparten GÉNERO con [seedArtist], para la sección "Porque
+     * escuchaste a X" del inicio: si escuchas mucho Dream Theater, la sección propone Haken antes que
+     * más Dream Theater, que es lo que ya tienes a mano.
+     *
+     * **Empareja contra el CONJUNTO de géneros del artista semilla, no contra uno solo**, y eso es lo
+     * que decide si la sección sirve: los tags son texto libre y un mismo artista suele traer varios
+     * ("Progressive Metal" en un disco, "Progressive Rock" en otro). Con un único género dominante,
+     * dos vecinos evidentes quedan desconectados en cuanto uno de sus discos está etiquetado distinto;
+     * con el conjunto, basta que coincida UNA etiqueta. Lo que este criterio NO puede hacer es
+     * relacionar géneros que no comparten cadena: si Dream Theater es "Progressive Metal" y Tool es
+     * "Alternative Metal", no hay parentesco que sacar de la BD — eso pediría una taxonomía, y aquí no
+     * hay ninguna.
+     *
+     * El orden es por CUÁNTOS géneros comparten (los vecinos más cercanos primero) y, a igualdad, por
+     * tamaño del catálogo: un artista del que tienes un disco entero es mejor propuesta que uno del
+     * que tienes una canción suelta. Se excluye la semilla, el sentinel de artista desconocido y los
+     * blancos, igual que en [getTopPlayedArtistFlow].
+     *
+     * La foto NO se resuelve aquí: sale de la tabla `artists` vía `BrowseRepository.getArtistPhotos`,
+     * como en "Seguir escuchando", porque es tardía (la trae el backfill) y mutable (el picker).
+     * [fallbackArtUri] es el respaldo, la carátula de alguno de sus álbumes.
+     */
+    @Query(
+        """
+        SELECT s.artist AS name,
+               COUNT(*) AS songCount,
+               COUNT(DISTINCT s.genre) AS sharedGenres,
+               MAX(s.albumArtUriString) AS fallbackArtUri
+        FROM songs s
+        WHERE s.genre IN (
+                SELECT DISTINCT genre FROM songs
+                WHERE artist = :seedArtist AND genre IS NOT NULL AND TRIM(genre) != ''
+              )
+          AND s.artist != :seedArtist
+          AND TRIM(s.artist) != '' AND s.artist != :unknownArtist
+        GROUP BY s.artist
+        ORDER BY sharedGenres DESC, songCount DESC, s.artist COLLATE NOCASE ASC
+        LIMIT :limit
+        """
+    )
+    fun getRelatedArtistsFlow(
+        seedArtist: String,
+        unknownArtist: String,
+        limit: Int
+    ): Flow<List<RelatedArtist>>
+
+    /**
      * "Vuelve a escucharlas": canciones ya escuchadas alguna vez pero cuya última escucha es
      * anterior a [before] (no tocadas en un buen rato), de la más antigua a la más nueva.
      */
@@ -991,6 +1078,19 @@ data class ColorPair(
 /**
  * Proyección para las vistas de álbumes (pestaña y grid del detalle de artista).
  */
+/**
+ * Un artista propuesto por parecido de GÉNERO con el que más escuchas. Ver
+ * [SongDao.getRelatedArtistsFlow].
+ */
+data class RelatedArtist(
+    val name: String,
+    val songCount: Int,
+    /** Cuántos géneros comparte con la semilla: es el criterio de cercanía. */
+    val sharedGenres: Int,
+    /** Carátula de alguno de sus álbumes, para cuando aún no hay foto del artista. */
+    val fallbackArtUri: String?
+)
+
 data class AlbumSummary(
     val name: String,
     val artist: String,

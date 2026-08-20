@@ -28,7 +28,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import kotlinx.coroutines.launch
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
@@ -1824,7 +1823,7 @@ private fun GainReductionMeter(
             } else {
                 String.format(Locale.getDefault(), "%.1f dB", -gainReductionDb)
             },
-            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+            style = MaterialTheme.typography.labelMedium,
             color = if (gainReductionDb > 0f && active) MaterialTheme.colorScheme.onSurface
             else MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.widthIn(min = EqValueWidth),
@@ -2145,7 +2144,7 @@ private fun EqSliderRow(
         Spacer(modifier = Modifier.width(BadgeReadoutGap))
         Text(
             text = readout,
-            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+            style = MaterialTheme.typography.labelMedium,
             color = readoutColor
                 ?: if (enabled) MaterialTheme.colorScheme.onSurface
                 else MaterialTheme.colorScheme.onSurfaceVariant,

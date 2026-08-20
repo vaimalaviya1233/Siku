@@ -29,7 +29,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.qhana.siku.R
 import com.qhana.siku.data.lyrics.LyricsSaveOptions
@@ -64,7 +63,7 @@ fun SaveLyricsDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.lyrics_save_title), fontWeight = FontWeight.Bold) },
+        title = { Text(stringResource(R.string.lyrics_save_title)) },
         text = {
             Column {
                 Text(

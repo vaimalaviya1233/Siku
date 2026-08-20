@@ -32,6 +32,7 @@ import com.qhana.siku.BuildConfig
 import com.qhana.siku.data.config.AppConfig
 import com.qhana.siku.data.coordinator.SyncManager
 import com.qhana.siku.data.manager.MusicDownloader
+import com.qhana.siku.data.util.InFlightImageDedupInterceptor
 import androidx.work.WorkManager
 import coil3.ImageLoader
 import coil3.disk.DiskCache
@@ -82,6 +83,10 @@ object AppModule {
             }
             // En Coil 3, el OkHttpClient se conecta como ComponentRegistry via OkHttpNetworkFetcherFactory
             .components {
+                // El dedup va PRIMERO: corta antes de que dos peticiones idénticas simultáneas
+                // lleguen a decodificar por separado (Coil cachea resultados, no peticiones en
+                // vuelo). Ver [InFlightImageDedupInterceptor].
+                add(InFlightImageDedupInterceptor())
                 add(OkHttpNetworkFetcherFactory(callFactory = { okHttpClient }))
             }
             .crossfade(true)

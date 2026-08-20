@@ -10,6 +10,7 @@ import androidx.paging.cachedIn
 import com.qhana.siku.data.coordinator.SyncManager
 import com.qhana.siku.data.coordinator.SyncStatus
 import com.qhana.siku.data.model.PlaybackContext
+import com.qhana.siku.data.model.Playlist
 import com.qhana.siku.data.model.LyricsSaveMode
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.model.SongFilter
@@ -40,13 +41,27 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.LocalDate
+import kotlin.random.Random
 import javax.inject.Inject
 
 /** Dato de bienvenida del inicio: escuchas de la semana + tamaño de biblioteca (respaldo). */
 data class HomeStats(val playedThisWeek: Int, val librarySize: Int)
 
 /** Sección generada del inicio: catálogo del artista más escuchado. */
-data class HomeArtistPick(val artist: String, val songs: List<Song>)
+/**
+ * Sección "Porque escuchaste a X": el artista que más escuchas ([seed]) y OTROS artistas de tu
+ * biblioteca que comparten género con él.
+ *
+ * Antes eran canciones DEL PROPIO artista, y eso prometía descubrimiento para entregar la
+ * discografía que ya tenías a mano (ordenada por álbum, además, así que salían siempre las mismas).
+ * Proponer vecinos es lo que la sección decía hacer. Ver `SongDao.getRelatedArtistsFlow` para lo que
+ * este criterio puede y NO puede relacionar.
+ */
+data class HomeArtistPick(val seed: String, val related: List<RelatedArtistUi>)
+
+/** Un artista propuesto, ya con su foto resuelta (o la carátula de respaldo). Ver [HomeArtistPick]. */
+data class RelatedArtistUi(val name: String, val songCount: Int, val artUri: String?)
 
 sealed class LibraryBannerState {
     data class Scanning(val progress: Int, val message: String) : LibraryBannerState()
@@ -105,6 +120,47 @@ class LibraryViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(LibraryUiState())
     val uiState: StateFlow<LibraryUiState> = _uiState.asStateFlow()
+
+    /*
+     * --- Vistas de UN campo para las capas persistentes -----------------------------------------
+     *
+     * [LibraryUiState] está partido en cinco sub-estados justamente para acotar el alcance de la
+     * recomposición, pero eso solo sirve si el consumidor colecta la parte que le importa. Las tres
+     * capas RAÍZ de la app —`AppNavHost`, `PlayerOverlay` y `NowPlayingRoute`— lo colectaban entero
+     * para leer entre uno y tres campos, todos de `data`: ninguna toca `searchFilter`, `sorting`,
+     * `colorTuning` ni `playbackSettings`. Al colectar la raíz, cualquier emisión las recomponía.
+     *
+     * Lo que emite: cada TECLA de la barra de búsqueda, cada cambio de orden o de chip de origen,
+     * el slider de ReplayGain de Ajustes, la regeneración de colores y cada actualización del banner
+     * de sync. Escribir una palabra en la búsqueda recomponía las tres capas una vez por letra — el
+     * reproductor persistente incluido, que en ese momento está guardado y no se ve.
+     *
+     * `distinctUntilChanged` es lo que hace el trabajo: `favorites` es un `Set` y `playlists` una
+     * `List`, así que la comparación estructural corta la emisión cuando el campo no cambió, que es
+     * casi siempre. Con `WhileSubscribed` no arrancan si nadie los colecta y el `replay = 1` deja el
+     * valor listo para el siguiente suscriptor.
+     *
+     * `LibraryScreen` sigue colectando [uiState] entero, que es donde de verdad se usa completo.
+     */
+
+    /** Ids de las canciones favoritas. Ver el bloque de arriba. */
+    val favorites: StateFlow<Set<String>> = _uiState
+        .map { it.data.favorites }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, WhileUiSubscribed, emptySet())
+
+    /** Listas del usuario. Ver el bloque de arriba. */
+    val playlists: StateFlow<List<Playlist>> = _uiState
+        .map { it.data.playlists }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, WhileUiSubscribed, emptyList())
+
+    /** Canciones favoritas resueltas (lista pesada). Ver el bloque de arriba. */
+    val favoriteSongs: StateFlow<List<Song>> = _uiState
+        .map { it.data.favoriteSongs }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, WhileUiSubscribed, emptyList())
+
     private var bannerDismissJob: Job? = null
 
     // Evento tipado "colores regenerados" (antes MainActivity lo detectaba por el texto del
@@ -211,16 +267,39 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
-    // Visibilidad de los chips por CONTENIDO real: con biblioteca solo-local no hay nada
-    // que filtrar (todo es local); con solo-nube el chip Local sobra pero Descargadas/Nube
-    // siguen distinguiendo offline vs streaming.
-    val hasLocalSongs: StateFlow<Boolean> = repository.hasLocalSongsFlow()
+    /**
+     * ¿La biblioteca está partida entre lo que suena sin red y lo que la necesita? PUERTA ÚNICA de
+     * todo lo que habla de origen: los chips de Todas/Artistas/Álbumes y las dos acciones del
+     * inicio ("Sin conexión" / "Sin descargar"), que aparecen y desaparecen juntas.
+     *
+     * Antes bastaba con que hubiera canciones de nube, y ese criterio dejaba tres chips
+     * permanentes en tres barras para una biblioteca completamente descargada, donde separan
+     * 777 de 0. La regla honesta es la que ya usaba el chip "Local" —visibilidad por CONTENIDO—
+     * llevada hasta el final: si una de las dos mitades está vacía, elegir origen no dice nada.
+     *
+     * Vale la pena que sea REACTIVO y no una consulta al abrir: en una biblioteca de nube los
+     * chips nacen útiles y se apagan solos cuando la última descarga termina, sin reinicios.
+     */
+    val hasSourceSplit: StateFlow<Boolean> = repository.hasSourceSplitFlow()
         .distinctUntilChanged()
         .stateIn(viewModelScope, WhileUiSubscribed, false)
 
-    val hasCloudSongs: StateFlow<Boolean> = repository.hasCloudSongsFlow()
+    private val hasLocalSongs: StateFlow<Boolean> = repository.hasLocalSongsFlow()
         .distinctUntilChanged()
         .stateIn(viewModelScope, WhileUiSubscribed, false)
+
+    /**
+     * Los chips de nube (Descargadas / Nube) SON el reparto, así que su visibilidad es la puerta
+     * tal cual. La decisión vive aquí y no en cada pantalla: la calculaban por separado
+     * `LibraryScreen` (para Artistas/Álbumes) y `SongsScreen` (para Todas) con la misma expresión
+     * copiada, o sea dos sitios que podían discrepar sobre cuándo se ve un control.
+     */
+    val showCloudSourceChips: StateFlow<Boolean> = hasSourceSplit
+
+    /** El chip "Local" añade su propia condición: que además HAYA canciones locales. */
+    val showLocalSourceChip: StateFlow<Boolean> =
+        combine(hasSourceSplit, hasLocalSongs) { split, local -> split && local }
+            .stateIn(viewModelScope, WhileUiSubscribed, false)
 
     // --- Secciones de la pantalla de inicio ---
     // Reactivas al historial (v22): cada escucha contada actualiza estas listas sin recargar
@@ -300,20 +379,33 @@ class LibraryViewModel @Inject constructor(
         .flowOn(Dispatchers.IO)
         .stateIn(viewModelScope, WhileUiSubscribed, HomeStats(0, 0))
 
-    // Sección generada "Porque escuchaste a X": el catálogo del artista más escuchado. Reactiva
-    // en dos niveles — cambia de artista cuando el historial lo hace, y refleja altas/bajas de
-    // canciones de ese artista.
+    // Sección generada "Porque escuchaste a X": OTROS artistas que comparten género con el que más
+    // escuchas. Reactiva en tres niveles — cambia de artista semilla cuando el historial lo hace,
+    // refleja altas/bajas en la biblioteca, y recoge las fotos de Deezer según van llegando.
+    // Ver [HomeArtistPick] para por qué ya no son canciones del propio artista.
     val homeArtistPick: StateFlow<HomeArtistPick?> = repository.getTopPlayedArtist(MIN_ARTIST_PICK_SONGS)
         .distinctUntilChanged()
         .flatMapLatest { artist ->
             if (artist.isNullOrBlank()) flowOf(null)
-            else repository.getSongsByArtist(artist).map { songs ->
-                // Guarda de respaldo: el propio query ya exige MIN_ARTIST_PICK_SONGS, pero por si
-                // acaso no mostramos un carrusel de menos de ese tamaño.
-                songs.take(HOME_SECTION_LIMIT)
-                    .takeIf { it.size >= MIN_ARTIST_PICK_SONGS }
-                    ?.let { HomeArtistPick(artist, it) }
-            }
+            else browseRepository.getRelatedArtists(artist, HOME_SECTION_LIMIT)
+                .flatMapLatest { related ->
+                    // Menos de dos propuestas no es un carrusel, es una tarjeta suelta: la sección
+                    // no se pinta. Pasa con una biblioteca sin géneros analizados (`songs.genre` es
+                    // null hasta que se lee el tag) o muy monotemática.
+                    if (related.size < MIN_RELATED_ARTISTS) return@flatMapLatest flowOf(null)
+                    // La foto se resuelve AQUÍ y no en la consulta, por lo mismo que en "Seguir
+                    // escuchando": es tardía (la trae el backfill de Deezer) y mutable (el picker la
+                    // cambia o la quita), así que un JOIN la congelaría. El respaldo es la carátula
+                    // de alguno de sus álbumes.
+                    browseRepository.getArtistPhotos(related.map { it.name }).map { photos ->
+                        HomeArtistPick(
+                            seed = artist,
+                            related = related.map {
+                                RelatedArtistUi(it.name, it.songCount, photos[it.name] ?: it.fallbackArtUri)
+                            }
+                        )
+                    }
+                }
         }
         .sampledDuringSync(libraryIsSettling)
         .flowOn(Dispatchers.IO)
@@ -326,8 +418,14 @@ class LibraryViewModel @Inject constructor(
             .flowOn(Dispatchers.IO)
             .stateIn(viewModelScope, WhileUiSubscribed, emptyList())
 
-    // Top de géneros para los chips de acciones rápidas del inicio (≥ GENRE_MIN_COUNT canciones,
-    // máx. GENRE_CHIP_LIMIT). Reactivo: aparecen solos a medida que el backfill puebla la columna.
+    // Géneros para los chips de acciones rápidas del inicio (≥ GENRE_MIN_COUNT canciones).
+    // Reactivo: aparecen solos a medida que el backfill puebla la columna.
+    //
+    // **No son el TOP fijo, son una selección del DÍA** (17 ago 2026). Con `ORDER BY songCount DESC
+    // LIMIT 5` y una biblioteca quieta salían los mismos cinco para siempre, que es exactamente lo
+    // contrario de lo que una fila de atajos debería hacer: los géneros grandes ya los tienes a mano
+    // en su pestaña, y el chip vale justo para lo que no se te habría ocurrido abrir. Así que la
+    // consulta trae un CANDIDATERO más ancho ([GENRE_POOL_LIMIT]) y de ahí se eligen los del día.
     //
     // El top SOLO se publica con la biblioteca QUIETA: durante un scan/descargas la tabla
     // `songs` cambia miles de veces y Room reemite en cada cambio; como el orden es por
@@ -341,15 +439,35 @@ class LibraryViewModel @Inject constructor(
     // distinctUntilChanged no filtraba NADA (misma fila en pantalla, emisión nueva).
     val homeTopGenres: StateFlow<List<String>> =
         combine(
-            repository.getTopGenres(GENRE_MIN_COUNT, GENRE_CHIP_LIMIT).sampledDuringSync(libraryIsSettling),
+            repository.getTopGenres(GENRE_MIN_COUNT, GENRE_POOL_LIMIT).sampledDuringSync(libraryIsSettling),
             libraryIsSettling
         ) { genres, settling ->
-            if (settling) null else genres.map { it.name }
+            if (settling) null else genres.map { it.name }.pickGenreChipsOfTheDay()
         }
             .filterNotNull()
             .distinctUntilChanged()
             .flowOn(Dispatchers.IO)
             .stateIn(viewModelScope, WhileUiSubscribed, emptyList())
+
+    /**
+     * Los chips de género de HOY, elegidos entre los candidatos que trae la consulta.
+     *
+     * **La aleatoriedad va sembrada con el DÍA, y eso es la mitad del diseño.** Un `shuffled()` a
+     * secas reordenaría la fila en cada emisión —y la consulta reemite con cada canción analizada,
+     * cada descarga y cada cambio de la tabla—, así que los chips bailarían delante del usuario; es el
+     * mismo parpadeo que ya obligó a gatear esta sección por `sampledDuringSync`, entrando por otra
+     * puerta. Con la semilla del día la selección es ESTABLE mientras el día lo sea (misma lista tras
+     * reabrir la app, tras un scan y tras cambiar de pestaña) y cambia sola al día siguiente, sin
+     * ningún temporizador que mantener.
+     *
+     * Se usa el día LOCAL y no `currentTimeMillis / 86_400_000`: ese cambiaría a medianoche UTC, o sea
+     * a media tarde en Perú, y "los géneros de hoy" tiene que cambiar cuando cambia el día de quien
+     * mira. Con menos candidatos que huecos no hay nada que elegir y se devuelven todos.
+     */
+    private fun List<String>.pickGenreChipsOfTheDay(): List<String> {
+        if (size <= GENRE_CHIP_LIMIT) return this
+        return shuffled(Random(LocalDate.now().toEpochDay())).take(GENRE_CHIP_LIMIT)
+    }
 
     /**
      * Canciones de un género (para el chip: se reproducen en aleatorio). Respeta el ajuste
@@ -360,11 +478,15 @@ class LibraryViewModel @Inject constructor(
         repository.getSongsByGenre(genre, musicPreferences.loadGenrePartialMatch())
 
     init {
-        // Saneo: si una familia desaparece (p. ej. logout de la nube o quitar la carpeta
-        // local) con su chip seleccionado, el filtro quedaría ACTIVO pero INVISIBLE —
-        // una lista filtrada sin forma de quitar el filtro. Se limpia solo.
+        // Saneo: si un chip deja de verse con su filtro seleccionado, el filtro quedaría ACTIVO
+        // pero INVISIBLE — una lista filtrada sin forma de quitar el filtro. Se limpia solo.
+        //
+        // Va contra la VISIBILIDAD y no contra las familias de canciones, que es lo que hacía
+        // antes: desde que la puerta es el reparto ([hasSourceSplit]), el caso que más se va a dar
+        // no es un logout sino que la última canción sin descargar TERMINE de bajarse con el chip
+        // "Nube" puesto — los chips desaparecen y, sin esto, la lista se quedaba en cero.
         viewModelScope.launch {
-            combine(hasLocalSongs, hasCloudSongs) { local, cloud -> local to cloud }
+            combine(showLocalSourceChip, showCloudSourceChips) { local, cloud -> local to cloud }
                 .collect { (local, cloud) ->
                     _uiState.update { state ->
                         val sanitized = state.searchFilter.sourceFilters.filterTo(mutableSetOf()) { f ->
@@ -389,6 +511,7 @@ class LibraryViewModel @Inject constructor(
                     nowPlayingSolidBackground = musicPreferences.loadNowPlayingSolidBackground(),
                     nowPlayingWavyProgress = musicPreferences.loadNowPlayingWavyProgress(),
                     nowPlayingProgressThickness = musicPreferences.loadNowPlayingProgressThickness(),
+                    nowPlayingProgressHandle = musicPreferences.loadNowPlayingProgressHandle(),
                     miniPlayerRoundedRect = musicPreferences.loadMiniPlayerRoundedRect(),
                     playerGestures = musicPreferences.loadPlayerGestures(),
                     themePaletteStyle = musicPreferences.loadThemePaletteStyle(),
@@ -483,7 +606,9 @@ class LibraryViewModel @Inject constructor(
                     _isManualRefreshing.value = false
                 }
 
-                val banner = when (signal) {
+                // `null` = "no toques el banner". Lo necesita el caso Complete (abajo): no es lo
+                // mismo "poner Hidden" que "dejar lo que hay", y confundirlos era el parpadeo.
+                val banner: LibraryBannerState? = when (signal) {
                     is SyncSignal.Progress -> when (val status = signal.status) {
                         is SyncStatus.Scanning ->
                             LibraryBannerState.Scanning(status.found, status.message)
@@ -499,9 +624,22 @@ class LibraryViewModel @Inject constructor(
                         // NO lleva acción: reanudar con datos móviles ya se decide en Ajustes,
                         // y para escuchar ahora mismo está el streaming.
                         is SyncStatus.Paused -> LibraryBannerState.Paused(status.message)
-                        // Terminó: el banner de progreso se va. Si hay algo que anunciar, la
-                        // señal Finished que viene detrás lo repone con el resumen.
-                        is SyncStatus.Complete, is SyncStatus.Idle -> LibraryBannerState.Hidden
+                        // **Terminó: NO se toca el banner, se deja lo que haya.** `SyncManager`
+                        // publica `_state.value = complete` y en la línea siguiente emite el evento
+                        // `Finished`, así que son DOS emisiones seguidas del flujo fusionado. Poner
+                        // Hidden en la primera hacía que el banner se plegara del todo —la lista
+                        // saltaba hacia arriba— para volver a desplegarse un frame después con el
+                        // resumen. Visible en vídeo (17 ago 2026): "Escaneando" → nada → "Biblioteca
+                        // al día". Dejándolo intacto, el resumen RELEVA al de progreso sin hueco.
+                        //
+                        // No hay riesgo de que se quede colgado: `Complete` es un estado retenido, y
+                        // si el evento no llegara (nadie suscrito cuando se emitió) lo que hay es
+                        // Hidden de todos modos. El camino que sí necesita limpiar es Idle.
+                        is SyncStatus.Complete -> null
+                        // Idle es "no hay corrida": cancelación, logout, `release()`. Ahí sí se
+                        // retira lo que estuviera puesto, y es la red que impide que un "Escaneando"
+                        // sobreviva a un sync abortado.
+                        is SyncStatus.Idle -> LibraryBannerState.Hidden
                     }
                     // "Biblioteca al día" (sync sin cambio alguno) solo aporta con una fuente de
                     // NUBE (confirma que se consultó el servidor). Con biblioteca 100% local el
@@ -522,6 +660,9 @@ class LibraryViewModel @Inject constructor(
                     }
                 }
 
+                // Con `null` no se toca NADA, ni el estado ni el job de auto-retirada: cancelarlo
+                // dejaría el resumen en pantalla para siempre si esta señal llega después de él.
+                if (banner == null) return@collect
                 bannerDismissJob?.cancel()
                 _uiState.update { it.copy(data = it.data.copy(bannerState = banner)) }
                 // El resumen es lo único que se retira solo: los estados en curso los releva la
@@ -846,6 +987,12 @@ class LibraryViewModel @Inject constructor(
         musicPreferences.saveNowPlayingProgressThickness(dp)
     }
 
+    /** Palo del handle siempre visible en la barra del NowPlaying (false = solo al arrastrar). */
+    fun setNowPlayingProgressHandle(enabled: Boolean) {
+        _uiState.update { it.copy(playbackSettings = it.playbackSettings.copy(nowPlayingProgressHandle = enabled)) }
+        musicPreferences.saveNowPlayingProgressHandle(enabled)
+    }
+
     /** Forma del MiniPlayer: rectángulo redondeado (true) o píldora (false, el diseño actual). */
     fun setMiniPlayerRoundedRect(enabled: Boolean) {
         _uiState.update { it.copy(playbackSettings = it.playbackSettings.copy(miniPlayerRoundedRect = enabled)) }
@@ -984,9 +1131,21 @@ class LibraryViewModel @Inject constructor(
         // Mínimo de canciones para que un artista alimente "Porque escuchaste a X": con menos no
         // justifica un carrusel de "más de este artista" (1 sola = tarjeta suelta absurda).
         private const val MIN_ARTIST_PICK_SONGS = 3
+
+        /** Menos de esto no da un carrusel de propuestas. Ver [HomeArtistPick]. */
+        private const val MIN_RELATED_ARTISTS = 2
         // Chips de género del inicio: hasta 5 géneros con al menos 5 canciones cada uno.
         private const val GENRE_MIN_COUNT = 5
         private const val GENRE_CHIP_LIMIT = 5
+
+        /**
+         * Candidatos entre los que se eligen los [GENRE_CHIP_LIMIT] chips del día. Tres veces los
+         * huecos: suficiente para que la fila cambie de verdad de un día a otro sin bajar a géneros
+         * marginales (el suelo lo sigue poniendo [GENRE_MIN_COUNT]). Si tu biblioteca no llega a
+         * tantos géneros, la rotación no tiene de dónde tirar y la fila se queda fija — eso se
+         * ensancha bajando el umbral, no subiendo esto.
+         */
+        private const val GENRE_POOL_LIMIT = GENRE_CHIP_LIMIT * 3
         // Ventanas de tiempo del inicio: "esta semana" para el stat del saludo, "no escuchada
         // en ~2 semanas" para la sección de redescubrimiento.
         private const val WEEK_MILLIS = 7L * 24 * 60 * 60 * 1000

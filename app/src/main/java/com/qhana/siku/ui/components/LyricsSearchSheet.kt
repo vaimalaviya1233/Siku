@@ -18,7 +18,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -79,12 +78,17 @@ fun LyricsSearchSheet(
                         // Reintentar: la búsqueda de candidatos suele fallar por timeout de
                         // LrcLib; relanza la misma consulta sin cerrar la hoja.
                         Spacer(Modifier.height(16.dp))
-                        Button(onClick = onRetry) {
+                        val retryButtonHeight = ButtonDefaults.MinHeight
+                        Button(onClick = onRetry, shapes = ButtonDefaults.shapes()) {
                             // Sin color explícito: hereda el LocalContentColor del Button (así se
                             // atenúa solo si alguna vez se deshabilita, en vez de quedar brillante
                             // sobre un texto apagado — mismo criterio que el botón del onboarding).
-                            MaterialSymbol("refresh", size = 18.sp)
-                            Spacer(Modifier.width(8.dp))
+                            // Tamaño y separación derivados de la altura, no literales.
+                            MaterialSymbol(
+                                "refresh",
+                                size = ButtonDefaults.iconSizeFor(retryButtonHeight).value.sp
+                            )
+                            Spacer(Modifier.width(ButtonDefaults.iconSpacingFor(retryButtonHeight)))
                             Text(stringResource(R.string.common_retry))
                         }
                     }
@@ -150,7 +154,11 @@ private fun CandidateItem(
         // Transparente deja ver el color real de la hoja y las filas dejan de "cortarse".
         colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
         headlineContent = {
-            Text(candidate.trackName, fontWeight = FontWeight.SemiBold, maxLines = 1)
+            Text(
+                candidate.trackName,
+                style = MaterialTheme.typography.bodyLargeEmphasized,
+                maxLines = 1
+            )
         },
         supportingContent = {
             Column {
@@ -196,7 +204,8 @@ private fun LyricsPreviewDialog(
         onDismissRequest = onDismiss,
         title = {
             Column {
-                Text(candidate.trackName, fontWeight = FontWeight.SemiBold, maxLines = 2)
+                // Sin peso propio: el slot `title` del AlertDialog ya aplica el rol del spec.
+                Text(candidate.trackName, maxLines = 2)
                 Text(
                     candidate.artistName,
                     style = MaterialTheme.typography.bodyMedium,
@@ -235,8 +244,7 @@ private fun Badge(text: String, colors: BadgeColors) {
         Text(
             text,
             color = colors.content,
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.Medium
+            style = MaterialTheme.typography.labelSmall
         )
     }
 }

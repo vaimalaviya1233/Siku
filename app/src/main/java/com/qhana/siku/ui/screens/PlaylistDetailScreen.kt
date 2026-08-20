@@ -27,28 +27,34 @@ import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
 import com.qhana.siku.R
+import com.qhana.siku.data.model.Playlist
 import com.qhana.siku.data.model.Song
+import com.qhana.siku.ui.components.AddToPlaylistBottomSheet
 import com.qhana.siku.ui.components.AdaptiveCollage
+import com.qhana.siku.ui.components.CreatePlaylistDialog
 import com.qhana.siku.ui.components.ComponentConfig
 import com.qhana.siku.ui.components.DetailPlayButtons
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.SongItem
 import com.qhana.siku.ui.components.SongRowContainer
-import com.qhana.siku.ui.components.SongQueueOverflowButton
+import com.qhana.siku.ui.components.SongOverflowButton
 import com.qhana.siku.ui.components.TonalChip
 import com.qhana.siku.ui.components.rememberActiveRowContentColor
 import com.qhana.siku.ui.components.rememberListItemShape
+import com.qhana.siku.ui.components.rememberReorderableListItemShape
 import com.qhana.siku.ui.components.songRowBackground
+import com.qhana.siku.ui.components.sort
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
 
 import com.qhana.siku.ui.theme.appEffectsSpec
+import com.qhana.siku.ui.theme.appFastEffectsSpec
+import com.qhana.siku.ui.theme.appItemPlacementSpec
 
 /**
  * Detalle de lista de reproducción / favoritos, con el MISMO lenguaje inmersivo que álbum y
@@ -64,6 +70,10 @@ fun PlaylistDetailScreen(
     songs: List<Song>,
     currentSong: Song?,
     isFavoritesList: Boolean = false,
+    /** Qué canciones son favoritas, para el toggle del overflow de cada fila. */
+    favorites: Set<String>,
+    /** Listas destino de "añadir a lista de reproducción" (overflow de cada fila). */
+    playlists: List<Playlist>,
     onBackClick: () -> Unit,
     onPlayAll: (List<Song>, Int) -> Unit,
     onShufflePlay: (List<Song>) -> Unit,
@@ -71,6 +81,9 @@ fun PlaylistDetailScreen(
     onAddToQueue: (Song) -> Unit,
     /** Encolar TODAS las canciones de la lista, desde la botonera de la cabecera. */
     onAddAllToQueue: (List<Song>) -> Unit,
+    onAddSongToPlaylist: (Long, String) -> Unit,
+    /** Crear lista nueva; [pendingSongId] = canción del flujo "agregar a lista" que debe nacer dentro. */
+    onCreatePlaylist: (name: String, pendingSongId: String?) -> Unit,
     onReorderSongs: ((List<String>) -> Unit)? = null,
     onRemoveSong: ((String) -> Unit)? = null,
     onAddSongs: (() -> Unit)? = null,
@@ -80,6 +93,26 @@ fun PlaylistDetailScreen(
 
     // Copia local para que el arrastre se vea fluido; el orden se persiste al soltar.
     var localSongs by remember(songs) { mutableStateOf(songs) }
+
+    // Motion de las filas al añadirse y quitarse, con el reparto que manda la convención: la
+    // POSICIÓN por un token spatial (rebota, damping 0.8) y las OPACIDADES por effects (damping
+    // 1.0). La salida va con el token FAST porque lo que se va no debe hacerse esperar — es
+    // literalmente para lo que existe ese token— y a la vez es lo que impide que el hueco tarde
+    // más en cerrarse que la fila en desaparecer. Los tres se izan aquí y no se piden por fila:
+    // el valor es el mismo para todas y la lista los pediría en cada recomposición.
+    //
+    // Sustituyen al default de `animateItem` (los tres a `spring(stiffness = 400)` sin rebote),
+    // que es de `compose-foundation` y no mira el `MaterialTheme`: su fundido iba a 400 contra los
+    // 1600 del `effects` del tema, o sea cuatro veces más lento que el resto de la app.
+    val rowFadeInSpec = appEffectsSpec<Float>()
+    val rowPlacementSpec = appItemPlacementSpec()
+    val rowFadeOutSpec = appFastEffectsSpec<Float>()
+
+    // Flujo "añadir a lista de reproducción" desde el overflow de una fila, igual que en el detalle
+    // de artista: hoja de listas → (opcional) diálogo de lista nueva, que nace con la canción.
+    var songIdForPlaylist by remember { mutableStateOf<String?>(null) }
+    var showCreatePlaylistDialog by remember { mutableStateOf(false) }
+    var pendingSongForNewPlaylist by remember { mutableStateOf<String?>(null) }
 
     // Los dos primeros ítems del LazyColumn son la cabecera y la botonera: los índices que
     // reporta la librería de reordenado son de la LISTA LAZY, no de las canciones.
@@ -120,7 +153,13 @@ fun PlaylistDetailScreen(
 
     Scaffold(
         modifier = modifier,
-        contentWindowInsets = WindowInsets(0, 0, 0, 0)
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        // Fondo `surfaceContainer` (94), el nivel MEDIO de la escala: el contenido de la pantalla
+        // —filas y tarjetas— sube desde aquí a `surface` (98) y las barras bajan a
+        // `surfaceContainerHigh` (92). Mismo reparto que la biblioteca; el porqué, en `headerColor`
+        // de LibraryScreen. Si se cambia, hay que mover CON él el degradado del header inmersivo,
+        // que funde la imagen contra este color y dejaría costura.
+        containerColor = colorScheme.surfaceContainer
     ) { paddingValues ->
         Box(
             modifier = Modifier
@@ -164,6 +203,9 @@ fun PlaylistDetailScreen(
                         DetailPlayButtons(
                             onPlayAll = { onPlayAll(localSongs, 0) },
                             onShuffle = { onShufflePlay(localSongs) },
+                            // Solo esta pantalla lo pasa: es la única cuyo orden lo puso el
+                            // usuario, así que es la única donde "al revés" quiere decir algo.
+                            onPlayInOrder = { order -> onPlayAll(order.sort(localSongs), 0) },
                             onAddToQueue = { onAddAllToQueue(localSongs) },
                             onAddSongs = onAddSongs,
                             modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp)
@@ -177,21 +219,48 @@ fun PlaylistDetailScreen(
                         // La canción actual, esté sonando o en PAUSA: mismo criterio que la cola y
                         // la lista de canciones (el resaltado marca "cargada", no "sonando ahora").
                         val isPlaying = currentSong?.id == song.id
-                        // isActive: el ítem en reproducción usa la forma redondeada (16 dp), igual
-                        // que en la cola y la lista de canciones, en vez de la esquina agrupada.
-                        val shape = rememberListItemShape(index, localSongs.size, isActive = isPlaying)
                         val canReorder = onReorderSongs != null && !isFavoritesList
 
                         if (canReorder) {
-                            ReorderableItem(reorderState, key = song.id) { isDragging ->
-                                val elevation = if (isDragging) 8.dp else 0.dp
+                            // `animateItemModifier` explícito: el default del componente es
+                            // `Modifier.animateItem()` a secas, y con él las dos ramas de esta
+                            // misma pantalla quitarían filas a velocidades distintas. La librería
+                            // solo lo aplica a los items que NO se están arrastrando, así que
+                            // sigue sin pisar el offset del arrastre.
+                            ReorderableItem(
+                                reorderState,
+                                key = song.id,
+                                animateItemModifier = Modifier.animateItem(
+                                    fadeInSpec = rowFadeInSpec,
+                                    placementSpec = rowPlacementSpec,
+                                    fadeOutSpec = rowFadeOutSpec
+                                )
+                            ) { isDragging ->
+                                // isActive: el ítem en reproducción usa la forma redondeada (16 dp),
+                                // igual que en la cola y la lista de canciones, en vez de la esquina
+                                // agrupada. isDragging hace lo mismo mientras la fila está levantada
+                                // (el `draggedShape` del spec; ver [rememberReorderableListItemShape]): fuera
+                                // del bloque, no debe conservar las esquinas con las que encajaba.
+                                val shape = rememberReorderableListItemShape(
+                                    index = index,
+                                    count = localSongs.size,
+                                    isActive = isPlaying,
+                                    isDragging = isDragging
+                                )
+                                // Elevación del SPEC (`ListTokens.ItemDraggedContainerElevation` /
+                                // `ItemContainerElevation`, vía `ListItemDefaults.elevation()`) y no
+                                // un 8dp escrito a mano — que resultaba ser ese mismo valor, pero
+                                // sin quedar atado a él. Mismo cambio que en la hoja de la cola.
+                                val listElevation = ListItemDefaults.elevation()
+                                val elevation =
+                                    if (isDragging) listElevation.draggedElevation else listElevation.elevation
                                 // El resaltado del ítem en reproducción lo pinta la Surface de TODA
                                 // la fila —igual que en la cola, que tiene este mismo layout— y no
                                 // el `ListItem` de SongItem: aquí SongItem es un `weight(1f)` entre
                                 // el grip y los botones, así que su tinte cubría solo el trozo
                                 // central, con esquinas rectas, y la fila activa se leía distinta
                                 // que en el resto de listas de la app.
-                                val rowBackground = songRowBackground(colorScheme.surfaceContainer, isPlaying)
+                                val rowBackground = songRowBackground(colorScheme.surface, isPlaying)
                                 val activeContent = rememberActiveRowContentColor(rowBackground, isPlaying)
                                 val rowVariantColor =
                                     if (isPlaying) activeContent else colorScheme.onSurfaceVariant
@@ -243,7 +312,10 @@ fun PlaylistDetailScreen(
                                                     .weight(1f)
                                                     .clickable { onPlayAll(localSongs, index) }
                                             )
-                                            SongQueueOverflowButton(
+                                            SongOverflowButton(
+                                                isFavorite = song.id in favorites,
+                                                onToggleFavorite = { onToggleFavorite(song.id) },
+                                                onAddToPlaylist = { songIdForPlaylist = song.id },
                                                 onAddToQueue = { onAddToQueue(song) },
                                                 rowBackground = rowBackground
                                             )
@@ -263,16 +335,35 @@ fun PlaylistDetailScreen(
                                 }
                             }
                         } else {
+                            // Sin arrastre no hay estado `dragged`: solo la posición en el grupo y
+                            // si la canción es la que está cargada.
+                            val shape = rememberListItemShape(
+                                index = index,
+                                count = localSongs.size,
+                                isActive = isPlaying
+                            )
                             // Punta ORIGEN del container transform hacia el reproductor; ver
                             // [SongRowContainer].
+                            //
+                            // `animateItem()` es lo que hace que quitar una canción no sea un
+                            // corte: la fila se funde y las de abajo suben deslizándose, en vez de
+                            // desaparecer entre dos frames. Aquí va FUERA porque esta rama no pasa
+                            // por `ReorderableItem`, que es quien lo aplica en la otra (por eso
+                            // allí se le pasa el mismo juego de specs por `animateItemModifier`, y
+                            // no se añade un segundo `animateItem` encima).
                             SongRowContainer(
                                 songId = song.id,
                                 modifier = Modifier
+                                    .animateItem(
+                                        fadeInSpec = rowFadeInSpec,
+                                        placementSpec = rowPlacementSpec,
+                                        fadeOutSpec = rowFadeOutSpec
+                                    )
                                     .fillMaxWidth()
                                     .padding(horizontal = 16.dp, vertical = 1.dp)
                             ) {
                                 Surface(
-                                    color = colorScheme.surfaceContainer,
+                                    color = colorScheme.surface,
                                     shape = shape,
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
@@ -281,17 +372,31 @@ fun PlaylistDetailScreen(
                                         isPlaying = isPlaying,
                                         showStatusIcon = false,
                                         modifier = Modifier.clickable { onPlayAll(localSongs, index) },
+                                        // El corazón va PRIMERO y el ⋮ detrás: es la acción
+                                        // principal de la fila en esta lista, y estaba puesta
+                                        // DESPUÉS del cajón de las secundarias. Al estar fuera,
+                                        // el menú no repite el favorito (`onToggleFavorite` en
+                                        // null) — serían dos controles para lo mismo a un
+                                        // centímetro uno del otro.
                                         trailingContent = {
                                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                                SongQueueOverflowButton(
-                                                    onAddToQueue = { onAddToQueue(song) },
-                                                    rowBackground = songRowBackground(colorScheme.surfaceContainer, isPlaying)
-                                                )
                                                 if (isFavoritesList) {
                                                     IconButton(onClick = { onToggleFavorite(song.id) }) {
                                                         MaterialSymbol("favorite", fill = true, color = colorScheme.primary)
                                                     }
                                                 }
+                                                SongOverflowButton(
+                                                    isFavorite = song.id in favorites,
+                                                    // Sin corazón fuera (una lista normal que
+                                                    // cayera en esta rama por no ser reordenable),
+                                                    // el favorito vuelve al menú.
+                                                    onToggleFavorite = if (isFavoritesList) null else {
+                                                        { onToggleFavorite(song.id) }
+                                                    },
+                                                    onAddToPlaylist = { songIdForPlaylist = song.id },
+                                                    onAddToQueue = { onAddToQueue(song) },
+                                                    rowBackground = songRowBackground(colorScheme.surface, isPlaying)
+                                                )
                                             }
                                         }
                                     )
@@ -308,7 +413,7 @@ fun PlaylistDetailScreen(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
-                    .background(colorScheme.surface.copy(alpha = if (songs.isEmpty()) 1f else topBarAlpha))
+                    .background(colorScheme.surfaceContainerHigh.copy(alpha = if (songs.isEmpty()) 1f else topBarAlpha))
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -319,8 +424,9 @@ fun PlaylistDetailScreen(
                 ) {
                     FilledIconButton(
                         onClick = onBackClick,
+                        shapes = IconButtonDefaults.shapes(),
                         colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = colorScheme.surfaceContainer,
+                            containerColor = colorScheme.surface,
                             contentColor = colorScheme.onSurface
                         )
                     ) {
@@ -354,7 +460,7 @@ fun PlaylistDetailScreen(
             if (songs.isNotEmpty()) {
                 Text(
                     text = playlistName,
-                    style = MaterialTheme.typography.headlineLarge.copy(fontWeight = FontWeight.Bold),
+                    style = MaterialTheme.typography.headlineLargeEmphasized,
                     color = colorScheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -380,6 +486,38 @@ fun PlaylistDetailScreen(
             }
         }
     }
+
+    // Flujo "añadir a lista de reproducción" del overflow de fila, idéntico al del detalle de
+    // artista: si el usuario pide lista nueva, la canción se RETIENE para que nazca dentro.
+    if (songIdForPlaylist != null) {
+        AddToPlaylistBottomSheet(
+            playlists = playlists,
+            onPlaylistSelected = { playlistId ->
+                onAddSongToPlaylist(playlistId, songIdForPlaylist!!)
+                songIdForPlaylist = null
+            },
+            onCreateNewPlaylist = {
+                pendingSongForNewPlaylist = songIdForPlaylist
+                songIdForPlaylist = null
+                showCreatePlaylistDialog = true
+            },
+            onDismiss = { songIdForPlaylist = null }
+        )
+    }
+
+    if (showCreatePlaylistDialog) {
+        CreatePlaylistDialog(
+            onDismiss = {
+                showCreatePlaylistDialog = false
+                pendingSongForNewPlaylist = null
+            },
+            onConfirm = { name ->
+                onCreatePlaylist(name, pendingSongForNewPlaylist)
+                pendingSongForNewPlaylist = null
+                showCreatePlaylistDialog = false
+            }
+        )
+    }
 }
 
 @Composable
@@ -390,8 +528,12 @@ private fun EmptyPlaylistState(
 ) {
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            // Glifos que dicen VACÍO, no glifos de la entidad: `heart_broken` y `playlist_remove`
+            // en vez de `favorite` y `queue_music`. Los de la entidad son los mismos que marcan una
+            // lista CON contenido (el corazón de Favoritos, el icono de lista de cada fila), así
+            // que aquí no añadían nada al mensaje que hay justo debajo; estos sí.
             MaterialSymbol(
-                if (isFavoritesList) "favorite" else "queue_music",
+                if (isFavoritesList) "heart_broken" else "playlist_remove",
                 fill = true,
                 color = colorScheme.outline,
                 size = 64.sp
@@ -418,9 +560,16 @@ private fun EmptyPlaylistState(
             // addSongsToFavorites y sin botón quedaba inalcanzable con la lista vacía.
             if (onAddSongs != null) {
                 Spacer(modifier = Modifier.height(24.dp))
-                Button(onClick = onAddSongs) {
-                    MaterialSymbol("playlist_add", size = 18.sp)
-                    Spacer(modifier = Modifier.width(8.dp))
+                // Glifo y separación DERIVADOS de la altura del botón (`iconSizeFor` /
+                // `iconSpacingFor`), no literales — mismo trato que su hermano "Crear lista" en la
+                // pestaña Listas, que es el otro extremo de esta misma acción.
+                val addButtonHeight = ButtonDefaults.MinHeight
+                Button(onClick = onAddSongs, shapes = ButtonDefaults.shapes()) {
+                    MaterialSymbol(
+                        "playlist_add",
+                        size = ButtonDefaults.iconSizeFor(addButtonHeight).value.sp
+                    )
+                    Spacer(modifier = Modifier.width(ButtonDefaults.iconSpacingFor(addButtonHeight)))
                     Text(stringResource(R.string.playlist_add_songs))
                 }
             }
@@ -471,7 +620,7 @@ private fun PlaylistImmersiveHeader(
                 .background(
                     Brush.verticalGradient(
                         0.4f to Color.Transparent,
-                        1f to colorScheme.surface
+                        1f to colorScheme.surfaceContainer
                     )
                 )
         )
@@ -483,7 +632,7 @@ private fun PlaylistImmersiveHeader(
         ) {
             Text(
                 text = playlistName,
-                style = MaterialTheme.typography.headlineLarge.copy(fontWeight = FontWeight.Bold),
+                style = MaterialTheme.typography.headlineLargeEmphasized,
                 color = colorScheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -500,7 +649,6 @@ private fun PlaylistImmersiveHeader(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = pluralStringResource(R.plurals.song_count, songs.size, songs.size),
-                        style = MaterialTheme.typography.labelMedium,
                         color = colorScheme.onSecondaryContainer
                     )
                 }
@@ -510,7 +658,6 @@ private fun PlaylistImmersiveHeader(
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = "$totalDurationMin min",
-                            style = MaterialTheme.typography.labelMedium,
                             color = colorScheme.onSecondaryContainer
                         )
                     }

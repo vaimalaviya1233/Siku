@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
@@ -32,6 +33,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.LinearWavyProgressIndicator
 import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -48,7 +50,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -73,6 +75,23 @@ import com.qhana.siku.ui.theme.SCREEN_SLIDE_DIVISOR
 import com.qhana.siku.ui.theme.ScreenEnterEasing
 import androidx.compose.animation.core.tween
 
+
+/**
+ * Posición del paso dentro de los pasos ACTIVOS. Se pasa como los dos números y no como la frase
+ * ya formateada porque el encabezado pinta con ellos dos cosas —la barra de avance y el texto—, y
+ * de una frase no se puede recuperar la fracción.
+ */
+private data class StepProgress(val index: Int, val count: Int) {
+    /**
+     * Cuánto del flujo se ha recorrido. Cuenta el paso ACTUAL como hecho (`index + 1`), que es lo
+     * que hace que la barra se vea llena en el último paso, acompañando al "Paso 3 de 3" que tiene
+     * al lado. Con `index / count` el final del onboarding se leería como incompleto.
+     */
+    val fraction: Float get() = (index + 1).toFloat() / count
+}
+
+/** Ancho de la barra de avance del encabezado: una pista corta bajo el hero, no un riel a todo lo ancho. */
+private val OnboardingProgressWidth = 96.dp
 
 /** Música del propio teléfono: dispositivo entero o carpetas. Se puede omitir. */
 private const val STEP_LOCAL = 0
@@ -229,24 +248,23 @@ fun OnboardingScreen(
         // conviven ambas pantallas, y con el índice de fuera la saliente mostraría el número
         // de la entrante mientras se va.
         val index = activeSteps.indexOf(currentStep).coerceAtLeast(0)
-        val label = if (activeSteps.size > 1) {
-            stringResource(R.string.onboarding_step, index + 1, activeSteps.size)
-        } else {
-            null
-        }
+        // Los DOS NÚMEROS y no la frase ya formateada: con ellos el encabezado puede pintar
+        // además la barra de avance (ver [OnboardingStep]). Con un solo paso no hay progreso
+        // que enseñar y va null, igual que antes.
+        val progress = if (activeSteps.size > 1) StepProgress(index, activeSteps.size) else null
         val isLast = index == activeSteps.lastIndex
 
         when (currentStep) {
             STEP_NOTIFICATIONS -> NotificationsStep(
                 hasCloudSource = hasCloudSource,
-                stepLabel = label,
+                stepProgress = progress,
                 // Conceda o no, el onboarding termina: el permiso no condiciona nada.
                 onDecided = finishOnboarding,
                 onBack = { activeSteps.getOrNull(index - 1)?.let { step = it } }
             )
             STEP_STORAGE -> StorageStep(
                 syncViewModel = syncViewModel,
-                stepLabel = label,
+                stepProgress = progress,
                 isLastStep = isLast,
                 onBack = { step = STEP_CLOUD },
                 onContinue = advance
@@ -259,7 +277,7 @@ fun OnboardingScreen(
                 // final; sin ella, este paso cierra el bloque de fuentes y por eso exige que se
                 // haya elegido algo en alguno de los dos.
                 hasAnySource = hasAnySource,
-                stepLabel = label,
+                stepProgress = progress,
                 isLastStep = isLast,
                 onConnectOneDrive = onConnectOneDrive,
                 onDisconnectOneDrive = onDisconnectOneDrive,
@@ -275,7 +293,7 @@ fun OnboardingScreen(
                 scanWholeDevice = scanWholeDevice,
                 audioPermission = viewModel.audioPermission,
                 hasAudioPermission = viewModel::hasAudioPermission,
-                stepLabel = label,
+                stepProgress = progress,
                 onFolderPicked = { viewModel.addLocalFolder(it, scanNow = false) },
                 onRemoveFolder = viewModel::removeLocalFolder,
                 onScanWholeDeviceChange = { viewModel.setScanWholeDevice(it, scanNow = false) },
@@ -301,7 +319,7 @@ private fun LocalSourcesStep(
     scanWholeDevice: Boolean,
     audioPermission: String,
     hasAudioPermission: () -> Boolean,
-    stepLabel: String?,
+    stepProgress: StepProgress?,
     onFolderPicked: (String) -> Unit,
     onRemoveFolder: (String) -> Unit,
     onScanWholeDeviceChange: (Boolean) -> Unit,
@@ -319,7 +337,7 @@ private fun LocalSourcesStep(
         icon = "library_music",
         title = stringResource(R.string.onboarding_local_title),
         subtitle = stringResource(R.string.onboarding_local_subtitle),
-        stepLabel = stepLabel
+        stepProgress = stepProgress
     ) {
         // Una sola tarjeta con las dos formas de la música local (escanear todo · añadir carpeta):
         // en Ajustes van separadas, pero para el primer arranque son una única decisión.
@@ -357,7 +375,7 @@ private fun CloudSourceStep(
     authLoading: Boolean,
     authError: String?,
     hasAnySource: Boolean,
-    stepLabel: String?,
+    stepProgress: StepProgress?,
     isLastStep: Boolean,
     onConnectOneDrive: (Activity) -> Unit,
     onDisconnectOneDrive: () -> Unit,
@@ -376,7 +394,7 @@ private fun CloudSourceStep(
         icon = "cloud",
         title = stringResource(R.string.onboarding_cloud_title),
         subtitle = stringResource(R.string.onboarding_cloud_subtitle),
-        stepLabel = stepLabel
+        stepProgress = stepProgress
     ) {
         OneDriveSourceCard(
             isConnected = isLoggedIn,
@@ -448,7 +466,7 @@ private fun CloudSourceStep(
 @Composable
 private fun StorageStep(
     syncViewModel: SyncViewModel,
-    stepLabel: String?,
+    stepProgress: StepProgress?,
     isLastStep: Boolean,
     onBack: () -> Unit,
     onContinue: () -> Unit
@@ -461,7 +479,7 @@ private fun StorageStep(
         icon = "storage",
         title = stringResource(R.string.onboarding_storage_title),
         subtitle = stringResource(R.string.onboarding_storage_subtitle),
-        stepLabel = stepLabel
+        stepProgress = stepProgress
     ) {
         StorageLimitCard(
             limitGb = storageLimitGb,
@@ -503,7 +521,7 @@ private fun StorageStep(
 @Composable
 private fun NotificationsStep(
     hasCloudSource: Boolean,
-    stepLabel: String?,
+    stepProgress: StepProgress?,
     onDecided: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -515,7 +533,7 @@ private fun NotificationsStep(
         icon = "notifications_active",
         title = stringResource(R.string.onboarding_notifications_title),
         subtitle = stringResource(R.string.onboarding_notifications_subtitle),
-        stepLabel = stepLabel
+        stepProgress = stepProgress
     ) {
         NotificationUseRow(
             icon = "play_circle",
@@ -619,7 +637,7 @@ private fun OnboardingStep(
     icon: String,
     title: String,
     subtitle: String,
-    stepLabel: String?,
+    stepProgress: StepProgress?,
     content: @Composable ColumnScope.() -> Unit
 ) {
     Column(
@@ -650,10 +668,36 @@ private fun OnboardingStep(
             }
         }
 
-        if (stepLabel != null) {
+        if (stepProgress != null) {
             Spacer(modifier = Modifier.height(20.dp))
+            // Barra de avance + "Paso N de M". La frase sola obliga a hacer la cuenta para saber
+            // cuánto falta; la barra sola no dice cuántas pantallas quedan. Van juntas porque
+            // responden a preguntas distintas, y el texto es además lo que lee el lector de
+            // pantalla (la barra va marcada como decorativa para no anunciar el mismo dato dos
+            // veces).
+            //
+            // `LinearWavyProgressIndicator` y no el clásico: criterio unificado de la app — todo
+            // indicador LINEAL de la app es el ondulado. Determinado, porque aquí el total se
+            // conoce.
+            LinearWavyProgressIndicator(
+                progress = { stepProgress.fraction },
+                // Onda CONGELADA. El default de la variante determinada es
+                // `waveSpeed = wavelength`, o sea un frame por vsync mientras la pantalla viva —
+                // y el onboarding se queda ahí quieto todo el tiempo que el usuario tarde en
+                // decidir. Es la regla de "cero productores continuos de frames" de la app; la
+                // forma ondulada se conserva, que es lo que aporta el componente aquí.
+                waveSpeed = 0.dp,
+                modifier = Modifier
+                    .width(OnboardingProgressWidth)
+                    .clearAndSetSemantics {}
+            )
+            Spacer(modifier = Modifier.height(12.dp))
             Text(
-                text = stepLabel,
+                text = stringResource(
+                    R.string.onboarding_step,
+                    stepProgress.index + 1,
+                    stepProgress.count
+                ),
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -664,7 +708,7 @@ private fun OnboardingStep(
 
         Text(
             text = title,
-            style = MaterialTheme.typography.displaySmall.copy(fontWeight = FontWeight.Bold),
+            style = MaterialTheme.typography.displaySmallEmphasized,
             textAlign = TextAlign.Center
         )
 
@@ -685,25 +729,40 @@ private fun OnboardingStep(
     }
 }
 
-/** Botón Expressive REAL (shape-morph al presionar), como los de las pantallas de detalle. */
+/**
+ * Botón Expressive REAL (shape-morph al presionar), como los de las pantallas de detalle.
+ *
+ * **Es un botón de tamaño MEDIUM del spec, no un botón normal estirado a un alto inventado.**
+ * M3 Expressive define cinco tamaños (32 / 40 / 56 / 96 / 136 dp) y de cada uno DERIVA su forma,
+ * su forma al presionar, su padding y el tamaño de su icono; aquí había un `.height(60.dp)` a
+ * mano, que no es ninguno de los cinco y dejaba el resto de las medidas en las del tamaño por
+ * defecto (40dp) dentro de una caja más alta. Ahora el alto es el único valor que se elige y
+ * `shapesFor` / `contentPaddingFor` / `iconSizeFor` sacan de él todo lo demás.
+ */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun OnboardingPrimaryButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+    val height = ButtonDefaults.MediumContainerHeight
     Button(
         onClick = onClick,
         enabled = enabled,
-        shapes = ButtonDefaults.shapes(),
+        shapes = ButtonDefaults.shapesFor(height),
+        contentPadding = ButtonDefaults.contentPaddingFor(height),
         modifier = Modifier
             .fillMaxWidth()
-            .height(60.dp)
+            .heightIn(min = height)
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
+            style = MaterialTheme.typography.titleMediumEmphasized
         )
-        Spacer(modifier = Modifier.width(8.dp))
+        Spacer(modifier = Modifier.width(ButtonDefaults.iconSpacingFor(height)))
         // Sin color explícito: hereda el LocalContentColor del Button, que se atenúa solo cuando
         // está deshabilitado (con onPrimary fijo, la flecha seguía brillante sobre el texto gris).
-        MaterialSymbol("arrow_forward", size = 22.sp)
+        //
+        // `iconSizeFor` devuelve Dp y `MaterialSymbol` mide en sp, que es la convención de toda la
+        // app (sus glifos escalan con la tipografía del sistema). El número es el mismo; se toma de
+        // ahí para que siga al alto del botón en vez de quedar clavado como estaba (22.sp).
+        MaterialSymbol("arrow_forward", size = ButtonDefaults.iconSizeFor(height).value.sp)
     }
 }

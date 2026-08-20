@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.LoadingIndicator
@@ -31,7 +32,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -114,8 +114,7 @@ fun OneDriveFolderPickerSheet(
         Column(modifier = Modifier.padding(horizontal = 24.dp).padding(bottom = 24.dp)) {
             Text(
                 text = stringResource(R.string.onedrive_folder_title),
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold
+                style = MaterialTheme.typography.headlineSmallEmphasized
             )
             Spacer(Modifier.height(4.dp))
             Text(
@@ -226,7 +225,11 @@ fun OneDriveFolderPickerSheet(
                     }
                     Spacer(Modifier.width(8.dp))
                 }
-                Button(onClick = { close { onConfirm(state.path) } }, enabled = !state.isLoading) {
+                Button(
+                    onClick = { close { onConfirm(state.path) } },
+                    enabled = !state.isLoading,
+                    shapes = ButtonDefaults.shapes()
+                ) {
                     Text(
                         text = if (state.canGoUp) {
                             stringResource(R.string.onedrive_folder_use, state.crumbs.last().name)

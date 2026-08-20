@@ -68,7 +68,7 @@ class MusicRepository @Inject constructor(
         songRepository.mergePlayStats(loserId, winnerId)
     override suspend fun repointSongRefs(loserId: String, winnerId: String) =
         playlistRepository.repointSongRefs(loserId, winnerId)
-    override fun hasCloudSongsFlow(): Flow<Boolean> = songRepository.hasCloudSongsFlow()
+    override fun hasSourceSplitFlow(): Flow<Boolean> = songRepository.hasSourceSplitFlow()
     override suspend fun upsertSongs(songs: List<Song>): AppResult<Int> = songRepository.upsertSongs(songs)
     override suspend fun getSongsNeedingMetadataOrDownload(limit: Int, offset: Int): List<Song> = songRepository.getSongsNeedingMetadataOrDownload(limit, offset)
     override suspend fun requeueDownloadedSongsWithoutMetadata(): Int = songRepository.requeueDownloadedSongsWithoutMetadata()

@@ -217,3 +217,72 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
+// ---------------------------------------------------------------------------------------------
+// Verificación del BASELINE PROFILE antes de empaquetar una release.
+//
+// Este pipeline falla EN SILENCIO por diseño y ya costó dos veces: `assembleRelease` empaqueta el
+// perfil si existe y compila igual si no (así se publicaron ocho días de releases sin perfil AOT
+// para el código propio), y el generador puede escribir un `startup-prof.txt` idéntico al
+// `baseline-prof.txt` (lo que ocurre con un único test marcado `includeInStartupProfile`), en cuyo
+// caso el reparto de clases dentro del dex no ordena NADA. Las dos cosas se detectan en un segundo
+// y ninguna avisa sola: de ahí esta tarea.
+//
+// Los tres criterios son exactamente los del bloque de comandos de CLAUDE.md:
+//   1. el perfil EXISTE (si no, la release sale sin AOT para el código de la app),
+//   2. el startup profile es MÁS CORTO que el baseline (si es igual, no hay nada que ordenar),
+//   3. el baseline CUBRE el reproductor (su árbol es el composable más grande de la app y es el
+//      coste que solo el AOT puede quitar de la primera apertura).
+//
+// Escape explícito para un build de emergencia: `-PskipBaselineProfileCheck`. Es a propósito una
+// bandera que hay que escribir, y no un warning: un warning en la consola de Gradle es justo lo
+// que nadie leyó las dos veces anteriores.
+// Símbolo que el baseline profile TIENE que mencionar para que valga lo que promete: el árbol del
+// reproductor. Se busca por nombre de clase Compose y no por una firma exacta porque los nombres
+// generados cambian entre versiones del compilador; lo que se comprueba es que ESE recorrido corrió.
+val PLAYER_PROFILE_MARKER = "NowPlaying"
+
+val baselineProfileDir = layout.projectDirectory.dir("src/release/generated/baselineProfiles")
+val skipBaselineProfileCheck = providers.gradleProperty("skipBaselineProfileCheck").isPresent
+
+val verifyBaselineProfile = tasks.register("verifyBaselineProfile") {
+    group = "verification"
+    description = "Comprueba que el baseline profile existe, cubre el reproductor y no es idéntico al startup profile."
+
+    val baselineFile = baselineProfileDir.file("baseline-prof.txt").asFile
+    val startupFile = baselineProfileDir.file("startup-prof.txt").asFile
+    val skip = skipBaselineProfileCheck
+    val playerMarker = PLAYER_PROFILE_MARKER
+
+    // Declarados como entradas para que la tarea sea cacheable y no corra en cada build.
+    inputs.files(baselineFile, startupFile).withPropertyName("baselineProfiles").optional()
+
+    doLast {
+        if (skip) return@doLast
+
+        check(baselineFile.exists()) {
+            "No hay baseline profile en ${baselineFile.parentFile}. La release saldría SIN AOT para el " +
+                "código de la app. Generarlo con `./gradlew :app:generateBaselineProfile` (⚠️ es un test " +
+                "instrumentado: DESINSTALA la app y se lleva la biblioteca — exportar antes las playlists) " +
+                "y COMMITEARLO. Para saltarse esta comprobación: -PskipBaselineProfileCheck"
+        }
+
+        val baselineText = baselineFile.readText()
+
+        check(!startupFile.exists() || startupFile.length() < baselineFile.length()) {
+            "El startup profile no es más corto que el baseline (${startupFile.length()} vs ${baselineFile.length()} bytes): " +
+                "el recorrido completo entró en el startup profile, así que el reparto de clases dentro del dex " +
+                "no ordena nada. Regenerar con el generador de DOS tests (solo `startup()` lleva " +
+                "`includeInStartupProfile = true`). Para saltarse esta comprobación: -PskipBaselineProfileCheck"
+        }
+
+        check(baselineText.contains(playerMarker)) {
+            "El baseline profile no menciona '$playerMarker': el recorrido del reproductor no llegó a " +
+                "correr (device sin biblioteca = la app se queda en el onboarding), así que el perfil solo cubre " +
+                "el arranque. Regenerar en un device CON música. Para saltarse esta comprobación: -PskipBaselineProfileCheck"
+        }
+    }
+}
+
+tasks.matching { it.name == "assembleRelease" || it.name == "bundleRelease" }.configureEach {
+    dependsOn(verifyBaselineProfile)
+}

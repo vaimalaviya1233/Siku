@@ -1,5 +1,6 @@
 package com.qhana.siku.ui.components
 
+import android.content.Context
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
@@ -14,6 +15,9 @@ import com.qhana.siku.ui.theme.ExpressiveDefaultEffectsEasing
 import com.qhana.siku.ui.theme.ExpressiveFastEffectsEasing
 import java.util.concurrent.TimeUnit
 import androidx.compose.ui.unit.dp
+import coil3.request.ImageRequest
+import coil3.request.crossfade
+import coil3.size.Scale
 
 // ============== CONFIGURACIÓN ==============
 
@@ -110,10 +114,35 @@ internal object ComponentConfig {
     // ajuste de Apariencia movería el layout de todo el bloque de controles.
     val ProgressTrackHeight = 12.dp
     // Extremos del ajuste de grosor. Abajo, 6dp deja el trazo de la onda en 2dp (el mínimo que se
-    // sigue leyendo a densidad baja); arriba, 24dp es el alto de la zona táctil, o sea el punto en
-    // que el dibujo ya ocupa todo el control y engordar más solo empujaría el layout.
+    // sigue leyendo a densidad baja).
     val ProgressTrackHeightMin = 6.dp
-    val ProgressTrackHeightMax = 24.dp
+
+    /**
+     * Tope del grosor en modo ONDA. La onda no es un riel más grueso sino una FORMA, y todo lo que
+     * la dibuja escala con el alto: a 24dp el trazo ya mide 8dp, el DOBLE del
+     * `LinearProgressIndicatorTokens.ActiveThickness` (4dp) con el que M3 dibuja cualquier barra
+     * ondulada, y la amplitud 6 contra los 3 del token. Más allá deja de leerse como onda y pasa a
+     * ser una serpiente.
+     *
+     * Los tokens no declaran ningún máximo (el `stroke` del `LinearWavyProgressIndicator` es un
+     * parámetro libre y no hay tamaños S/M/L para este componente en material3 1.5.0-alpha24/25),
+     * así que este número es perceptual y se deja anclado a "el doble del trazo del spec".
+     */
+    val ProgressTrackHeightMaxWavy = 24.dp
+
+    /**
+     * Tope del grosor en modo PLANO, donde no hay forma que se deforme: la píldora sigue siendo una
+     * píldora a cualquier alto y el único límite real es cuánto sitio le quita a la carátula.
+     *
+     * 56dp = el track del tamaño **L** de la tabla del slider Expressive (ver [SliderSizeTable]). El
+     * spec llega a 96 (XL), pero ese es el tamaño de un slider que ES la pantalla; aquí la barra
+     * comparte el reproductor con la carátula, los tiempos y el transporte. Subirlo a 96 es cambiar
+     * este número y nada más: la geometría ya sale de la tabla y el rango la cubre entera.
+     *
+     * Con la altura del palo tomada del spec (que a 56 son 68dp, no 84) el bloque entero mide MENOS
+     * que lo que medía el tope anterior de 44 con la fórmula vieja de asomo fijo (72dp).
+     */
+    val ProgressTrackHeightMaxFlat = 56.dp
     // Paso del ajuste. 2dp: por debajo, dos valores contiguos no se distinguen en pantalla y el
     // slider tendría paradas que no cambian nada.
     val ProgressTrackHeightStep = 2.dp
@@ -126,12 +155,23 @@ internal object ComponentConfig {
     // ciclo es lo que permite retocar la longitud de onda sin tocar de paso el ritmo: con el periodo
     // fijo en 1 s, ensanchar la onda le hacía recorrer más distancia en el mismo tiempo.
     val ProgressWaveSpeed = 22.dp
-    // Handle (el "palito" vertical del slider Expressive), COMPARTIDO por los dos modos: aparece al
-    // arrastrar. Antes la onda lo llevaba PERMANENTE; se retiró (decisión del usuario) y ahora los
-    // dos modos se comportan igual: en reposo no hay palo, y al buscar sí.
+    // Handle (el "palito" vertical del slider Expressive), COMPARTIDO por los dos modos y con el
+    // MISMO comportamiento en ambos: permanente por defecto —como las barras de progreso del spec—
+    // y solo-al-arrastrar si el usuario lo apaga en Ajustes → Apariencia → Barra de progreso.
     // El ancho es el del spec (4dp) y NO escala con el grosor: es el objeto de M3, no una parte del
     // riel. Su alto sí (ver [ProgressMetrics.handleHeight]).
     val ProgressHandleWidth = 4.dp
+    // Ancho del palo MIENTRAS el dedo está en la barra. Es `SliderTokens.PressedHandleWidth` (2dp),
+    // que resulta ser exactamente la mitad del ancho en reposo — y así lo implementa el `Slider` de
+    // material3, que no lee el token sino que pinta `thumbSize.width / 2` mientras haya press, drag
+    // o foco. El palo se AFINA al tocarlo, que es la forma que tiene un objeto de 4dp de acusar
+    // recibo del dedo sin moverse ni cambiar de color.
+    //
+    // OJO: solo cambia el DIBUJO del palo. El hueco que el fill y el riel le dejan sigue midiendo
+    // [ProgressHandleWidth], igual que en el Slider oficial —donde el hueco sale del contenedor de
+    // 4dp y no del rectángulo interior que se encoge—: si el hueco siguiera al ancho animado, tocar
+    // la barra movería el borde del progreso, que es lo único que el usuario está mirando.
+    val ProgressHandlePressedWidth = 2.dp
     // Hueco entre el progreso y lo que venga después (el palo al buscar, el riel apagado siempre).
     // ES lo que hace legible el handle, y por eso el palo puede ser del color del ACENTO en vez de
     // un blanco/negro ajeno a la paleta: se separa por geometría (este hueco + su altura), no por
@@ -153,18 +193,77 @@ internal object ComponentConfig {
     // cuyo track es fijo— y con la barra en 24dp el punto se hundiría 12dp adentro. Con 12dp de
     // grosor el tope no muerde y el resultado es idéntico al de antes.
     val ProgressStopIndicatorTrailingSpace = 6.dp
+
+    /**
+     * Lado del **stop indicator** (el punto del final de la barra), token `StopSize` de
+     * `LinearProgressIndicatorTokens`.
+     *
+     * **Es un tamaño FIJO acotado al track, no una proporción**, y vale para los DOS modos. Las dos
+     * implementaciones de material3 hacen lo mismo con el track de cada una:
+     * `ProgressIndicator.drawStopIndicator` calcula `min(stopSize, size.height)` ("Stop can't be
+     * bigger than track") y la del ondulado, `LinearWavyProgressModifiers.drawStopIndicator`,
+     * `min(trackStroke.width, maxStopIndicatorSize)` — o sea el TRAZO, que es su track.
+     *
+     * Aquí se derivaba del grosor (`alto / 3`) en la onda, que con los 12 dp del diseño original
+     * daba estos mismos 4 dp por casualidad y se separaba en los dos extremos del ajuste de
+     * Apariencia: a 24 dp pintaba un punto de 8 —el doble de lo que M3 pinta en cualquier barra— y a
+     * 6 dp uno de 2, que se pierde. El punto es un REMATE del riel y su tamaño es del spec, no del
+     * grosor que elija el usuario.
+     */
+    val ProgressStopIndicatorSize = 4.dp
     // Alto MÍNIMO de la zona de gesto de la barra (el bloque que responde al arrastre y al toque).
     // Es MAYOR que el track por defecto: el objetivo táctil de un control no es su dibujo. Con un
     // grosor mayor manda el track (ver [ProgressMetrics.touchHeight]).
     val ProgressTouchHeight = 24.dp
-    // Cuánto asoma el handle por fuera del track, a cada lado. Es lo que lo distingue del riel, así
-    // que se suma al grosor en vez de ser un alto fijo: con la barra gruesa un palo de alto fijo
-    // quedaría embebido en ella.
-    val ProgressHandleOvershoot = 7.dp
-    // Gota con el tiempo que flota sobre el handle al arrastrar: cuadrado rotado 45° (de ahí que
-    // el lado sea menor que su diagonal aparente) y cuánto se separa del centro de la barra.
-    val ProgressBubbleSize = 46.dp
-    val ProgressBubbleOffset = 52.dp
+    // El ALTO del palo ya no es "el track más un asomo fijo": sale de [SliderSizeTable], porque el
+    // asomo del spec NO es constante — decrece según el slider engorda (14, 10, 6, 6, 6 dp de XS a
+    // XL). Ver `progressHandleHeightFor`.
+    // VALUE INDICATOR (la etiqueta con el tiempo que flota sobre el handle al arrastrar).
+    //
+    // Es una PASTILLA, no el pin con punta que había antes: el pin —un cuadrado rotado 45° con tres
+    // esquinas redondas— es el value indicator del Material viejo; Expressive lo sustituyó por una
+    // etiqueta flotante de esquina completa. Compose todavía no trae el componente (en material3
+    // 1.5.0-alpha24/25 `ValueIndicator` existe SOLO como tokens, no hay composable), así que lo que
+    // se sigue son los cuatro tokens que sí están: `ValueIndicatorContainerColor` = inverseSurface,
+    // `ValueIndicatorLabelTextColor` = inverseOnSurface, `ValueIndicatorLabelTextFont` = labelLarge y
+    // `ValueIndicatorActiveBottomSpace` = 12dp. El alto y el padding NO están tokenizados en esta
+    // versión y son nuestros, ver abajo.
+    //
+    // El cambio de color no es cosmético: la etiqueta era del color del ACENTO con el texto resuelto
+    // por `maxContrastOn`, o sea el único sitio de la barra que seguía teniendo que pelear el
+    // contraste contra un acento arbitrario (el mismo problema que ya obligó a separar el handle por
+    // geometría en vez de por color). El par inverseSurface/inverseOnSurface lo resuelve el sistema y
+    // vale para cualquier carátula.
+
+    /**
+     * Aire entre el borde superior del HANDLE y el borde inferior de la etiqueta.
+     * `SliderTokens.ValueIndicatorActiveBottomSpace`. Se mide contra el palo, que es la pieza activa
+     * más alta: contra el riel, el palo —que asoma por encima de él— la atravesaría.
+     */
+    val ProgressLabelBottomSpace = 12.dp
+
+    /**
+     * Alto de la pastilla: **44dp, el "label container height" del spec** (es el mismo en los cinco
+     * tamaños del slider, ver [SliderSizeTable]). Estuvo en 32 —derivado a mano de `labelLarge`, 14sp
+     * con 20 de interlineado más el padding— mientras la tabla no estaba a mano, y se quedaba corto.
+     *
+     * Es un alto MÍNIMO y a la vez la SEMILLA de la medida real: con la fuente del sistema ampliada
+     * la pastilla crece y la posición usa el alto medido, no éste. Que exista un número fijo es lo
+     * que permite colocarla desde el primer frame sin esperar a medir, y lo que sustituyó al offset
+     * absoluto de 52dp que no seguía al grosor ajustable (a 24dp el palo ya mide 52 y la etiqueta le
+     * caía encima).
+     */
+    val ProgressLabelHeight = 44.dp
+
+    /**
+     * Ancho mínimo de la pastilla: **48dp, el "label container width" del spec**. El ancho real lo
+     * pone el texto (de "0:07" a "1:23:45"); esto es el suelo, y sin él un tiempo corto degeneraba
+     * la pastilla en un círculo aplastado. Antes ese suelo era el propio alto, que es lo que se hace
+     * cuando no se tiene la tabla delante.
+     */
+    val ProgressLabelMinWidth = 48.dp
+    val ProgressLabelPaddingHorizontal = 12.dp
+    val ProgressLabelPaddingVertical = 6.dp
 }
 
 /**
@@ -174,8 +273,9 @@ internal object ComponentConfig {
  * tendría que mantener coherentes a mano (o que quedarían clavados en su valor de 12dp y
  * desproporcionados en cuanto la barra engorda).
  *
- * Las proporciones son EXACTAMENTE las del diseño actual con 12dp, así que el default no cambia ni
- * un píxel: trazo 4, amplitud 3, indicador 4, handle 26.
+ * Las proporciones son las del diseño con 12dp: trazo 4, amplitud 3. Lo que el spec TABULA no sale
+ * de ninguna proporción sino de [SliderSizeTable]: el alto del palo (44dp con el riel por defecto) y
+ * el radio de esquina del track. El stop indicator es un tamaño fijo del spec, acotado al track.
  */
 internal data class ProgressMetrics(
     /** Alto de la píldora plana / alto útil de la onda. Es el valor que elige el usuario. */
@@ -184,35 +284,154 @@ internal data class ProgressMetrics(
     val waveStroke: Dp,
     /** Desviación máxima de la onda respecto al centro. */
     val waveAmplitude: Dp,
-    /** Diámetro del stop indicator del final del riel. */
+    /**
+     * Diámetro del stop indicator del final del riel. FIJO
+     * ([ComponentConfig.ProgressStopIndicatorSize]) y solo acotado por el track del modo, que es lo
+     * que hacen las dos implementaciones de material3: el alto de la píldora en el plano, el TRAZO
+     * en la onda. Por eso [progressMetricsFor] necesita saber el modo — con la fórmula del plano, un
+     * punto de 4 dp dentro de un trazo de 8 quedaría escondido, y con la de la onda a secas el punto
+     * de la píldora crecía con el grosor.
+     */
     val stopIndicator: Dp,
-    /** Alto del palo del handle: el track más lo que asoma por arriba y por abajo. */
+    /**
+     * Radio de esquina del track PLANO. **No es media altura**: el spec lo tabula aparte (8, 8, 12,
+     * 16, 28 dp de XS a XL, ver [SliderSizeTable]), así que solo el tamaño más fino es una píldora
+     * perfecta y a partir de ahí la barra es un rectángulo cada vez más redondeado. Dibujarlo
+     * siempre como píldora convertía una barra gruesa en una cápsula. La onda no lo usa.
+     */
+    val trackCorner: Dp,
+    /**
+     * Alto del palo del handle, TABULADO por el spec (44, 44, 52, 68, 108 dp de XS a XL, ver
+     * [SliderSizeTable]) e interpolado para los grosores intermedios. Antes era `track + 28`, o sea
+     * el asomo de XS aplicado a cualquier tamaño: correcto en los finos y falso en cuanto la barra
+     * crece —a 40 dp de track el spec pone un palo de 52 y esa fórmula pedía 68—.
+     */
     val handleHeight: Dp,
-    /** Alto de la zona de gesto: nunca menor que el mínimo táctil ni que el propio dibujo. */
+    /**
+     * Alto que OCUPA la barra: nunca menor que el mínimo de gesto ni que el palo, que es la pieza
+     * más alta que se dibuja. Reservarle su sitio es lo que hace el `Slider` de M3 —su componente
+     * mide 48dp y contiene el thumb de 44—, y aquí es obligatorio desde que el palo tiene la altura
+     * del spec: con la caja pegada al mínimo de gesto se salía por debajo y a mitad de canción se
+     * montaba sobre el chip de formato.
+     */
     val touchHeight: Dp
 )
+
+/**
+ * Grosor MÁXIMO que admite cada modo de la barra. La onda tiene su propio tope porque es una FORMA
+ * que se deforma al engordar, mientras que la píldora plana solo se hace más alta: ver
+ * [ComponentConfig.ProgressTrackHeightMaxWavy] y [ComponentConfig.ProgressTrackHeightMaxFlat].
+ *
+ * Vive aquí y no en la pantalla de Ajustes porque lo necesitan los DOS lados: el slider, para saber
+ * hasta dónde llega, y [progressMetricsFor], para que un valor guardado con el otro modo no pueda
+ * dibujar una onda de 56dp.
+ */
+internal fun progressTrackHeightMax(wavy: Boolean): Dp =
+    if (wavy) ComponentConfig.ProgressTrackHeightMaxWavy else ComponentConfig.ProgressTrackHeightMaxFlat
 
 /**
  * Construye la geometría de la barra para un [trackHeight] dado, acotándolo al rango del ajuste
  * (una preferencia vieja o corrupta no debe poder dibujar una barra de 0dp ni de 200).
  *
+ * El modo entra como parámetro por DOS motivos, los dos load-bearing: el tope del grosor es distinto
+ * (ver [progressTrackHeightMax]) y el stop indicator se acota contra el track de cada modo (ver
+ * [ProgressMetrics.stopIndicator]).
+ *
+ * **Lo que escala con el grosor sale de DOS sitios distintos, y no es lo mismo**: lo que es NUESTRO
+ * (trazo y amplitud de la onda, que M3 no tabula para un indicador de grosor variable) se deriva por
+ * proporción, y lo que el spec TABULA (alto del palo, radio del track) se lee de [SliderSizeTable].
+ * Derivar por proporción algo que el spec tabula fue exactamente el error del asomo fijo.
+ *
  * Amplitud = alto/4 y trazo = alto/3, así que las crestas caben siempre dentro del contenedor:
  * el margen disponible es (alto − trazo)/2 = alto/3, mayor que la amplitud para cualquier alto.
  */
-internal fun progressMetricsFor(trackHeight: Dp): ProgressMetrics {
+internal fun progressMetricsFor(trackHeight: Dp, wavy: Boolean): ProgressMetrics {
     val height = trackHeight.coerceIn(
         ComponentConfig.ProgressTrackHeightMin,
-        ComponentConfig.ProgressTrackHeightMax
+        progressTrackHeightMax(wavy)
     )
     val stroke = height / WAVE_STROKE_DIVISOR
     return ProgressMetrics(
         trackHeight = height,
         waveStroke = stroke,
         waveAmplitude = height / WAVE_AMPLITUDE_DIVISOR,
-        stopIndicator = stroke,
-        handleHeight = height + ComponentConfig.ProgressHandleOvershoot * 2f,
-        touchHeight = maxOf(height, ComponentConfig.ProgressTouchHeight)
+        // Tamaño del spec acotado al TRACK DE ESTE MODO, que es lo que hacen las dos
+        // implementaciones de material3: ver [ComponentConfig.ProgressStopIndicatorSize].
+        stopIndicator = minOf(
+            ComponentConfig.ProgressStopIndicatorSize,
+            if (wavy) stroke else height
+        ),
+        trackCorner = SliderSizeTable.trackCornerFor(height),
+        handleHeight = SliderSizeTable.handleHeightFor(height),
+        // El palo domina en todo el rango del ajuste (con el riel al mínimo ya mide los 44dp del
+        // spec), así que hoy este `maxOf` siempre lo elige; el mínimo de gesto se queda como suelo
+        // declarado, que es lo que impide que un futuro palo más corto encoja la zona táctil sin que
+        // nadie lo note.
+        touchHeight = maxOf(
+            SliderSizeTable.handleHeightFor(height),
+            ComponentConfig.ProgressTouchHeight
+        )
     )
+}
+
+/**
+ * **La tabla de tamaños del `Slider` de M3 Expressive** (XS, S, M, L, XL), que es lo que gobierna la
+ * geometría de la barra que no es nuestra.
+ *
+ * | | XS | S | M | L | XL |
+ * |---|---|---|---|---|---|
+ * | Track height | 16 | 24 | 40 | 56 | 96 |
+ * | Handle height | 44 | 44 | 52 | 68 | 108 |
+ * | Track shape (radio) | 8 | 8 | 12 | 16 | 28 |
+ *
+ * (El handle width es 4dp en los cinco, de ahí que [ComponentConfig.ProgressHandleWidth] no escale.)
+ *
+ * **NO está en material3**: `SliderTokens` de 1.5.0-alpha24/25 trae un solo juego de valores —el de
+ * XS: track 16, handle 44— y ni tokens ni API por tamaño, así que la tabla se transcribe del spec.
+ * Si una versión futura la publica, esto se sustituye por sus tokens.
+ *
+ * Nuestro grosor es CONTINUO (6..56 en pasos de 2), así que los valores se **interpolan** entre los
+ * cinco puntos. Las dos lecciones que la tabla dejó, y que ninguna proporción da:
+ *  - el **asomo del palo DECRECE** (14, 10, 6, 6, 6 dp): un palo que asome 14 sobre un track de 56
+ *    sería un poste. Por eso se interpola el ALTO tabulado en vez de sumar un asomo.
+ *  - el **track deja de ser píldora**: solo XS tiene radio = media altura. A 56 el spec pide 16 de
+ *    radio, no 28.
+ */
+internal object SliderSizeTable {
+    /** Track heights de los cinco tamaños, en dp. Es el eje de las dos interpolaciones. */
+    private val trackHeights = floatArrayOf(16f, 24f, 40f, 56f, 96f)
+
+    private val handleHeights = floatArrayOf(44f, 44f, 52f, 68f, 108f)
+
+    private val trackCorners = floatArrayOf(8f, 8f, 12f, 16f, 28f)
+
+    /** Alto del palo para un grosor dado. Por debajo de XS se queda en los 44dp del spec. */
+    fun handleHeightFor(trackHeight: Dp): Dp = interpolate(trackHeight, handleHeights).dp
+
+    /**
+     * Radio de esquina del track plano. Por debajo de XS se extiende la recta hasta el origen, o sea
+     * media altura: una barra fina sigue siendo una píldora perfecta y el valor EMPALMA con el del
+     * spec en 16dp (8 = 16/2), así que no hay salto en la frontera.
+     */
+    fun trackCornerFor(trackHeight: Dp): Dp =
+        if (trackHeight.value <= trackHeights[0]) trackHeight / 2f
+        else interpolate(trackHeight, trackCorners).dp
+
+    /** Interpolación lineal por tramos sobre [trackHeights]; fuera de rango, el extremo. */
+    private fun interpolate(trackHeight: Dp, values: FloatArray): Float {
+        val h = trackHeight.value
+        if (h <= trackHeights.first()) return values.first()
+        if (h >= trackHeights.last()) return values.last()
+        for (i in 0 until trackHeights.size - 1) {
+            val lo = trackHeights[i]
+            val hi = trackHeights[i + 1]
+            if (h <= hi) {
+                val t = (h - lo) / (hi - lo)
+                return values[i] + (values[i + 1] - values[i]) * t
+            }
+        }
+        return values.last()
+    }
 }
 
 /** Trazo de la onda = un tercio del alto (4dp sobre los 12 del diseño original). */
@@ -296,3 +515,34 @@ fun formatTime(millis: Long): String {
     val seconds = totalSeconds - TimeUnit.MINUTES.toSeconds(minutes)
     return "%d:%02d".format(minutes, seconds)
 }
+
+
+/**
+ * La **única** petición de la carátula grande del reproductor: la que hace el `AsyncImage` del
+ * NowPlaying y la que usa `PlaybackViewModel.preloadVisualArt` para precalentarla al cambiar de
+ * canción.
+ *
+ * La clave de caché de Coil es `data + size + SCALE + transformaciones`, así que **igualar el
+ * tamaño no basta**: hasta el 19 ago 2026 las dos peticiones pedían 800 px pero con escalas
+ * distintas —el precalentamiento sin `scale` (el default de Coil es `Scale.FIT`) y el `AsyncImage`
+ * con `ContentScale.Crop`, que le pasa `Scale.FILL`—. Sobre una portada que no es exactamente
+ * cuadrada eso da DOS destinos distintos y por tanto dos entradas y dos decodificaciones del mismo
+ * JPEG. Medido en un trace de Perfetto (release, Xiaomi klimt): el mismo archivo decodificado a
+ * `794×800` (35 ms), `800×806` (62 ms) y otra vez `794×800` (33 ms) — 130 ms de CPU y tres bitmaps
+ * para una sola imagen, justo mientras corre el container transform y con un GC cada ~600 ms.
+ *
+ * O sea que el precalentamiento no es que no ahorrara: **duplicaba** el trabajo que decía evitar.
+ * Es la segunda vuelta del mismo error —la primera fue pedir 900 y 800, ver [ComponentConfig.NowPlayingArtDecodePx]—
+ * y por eso ahora la petición se construye en UN solo sitio en vez de repetir sus parámetros: dos
+ * llamantes que tienen que "acordarse" de coincidir en tres campos vuelven a divergir tarde o
+ * temprano, y el síntoma no falla en compilación ni se ve en pantalla.
+ */
+fun nowPlayingArtRequest(context: Context, data: Any): ImageRequest =
+    ImageRequest.Builder(context)
+        .data(data)
+        .size(ComponentConfig.NowPlayingArtDecodePx)
+        // EXPLÍCITA, aunque `Scale.FILL` sea lo que `ContentScale.Crop` deduciría: es justo el campo
+        // cuyo default silencioso partía el caché en dos.
+        .scale(Scale.FILL)
+        .crossfade(false)
+        .build()

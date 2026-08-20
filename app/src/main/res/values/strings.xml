@@ -85,6 +85,7 @@
     <string name="playlist_create_placeholder">Mi lista genial</string>
     <string name="playlist_add_sheet_title">Añadir a lista</string>
     <string name="playlist_none_created">No tienes listas creadas</string>
+    <string name="playlist_none_created_subtitle">Agrupa tus canciones como quieras</string>
     <string name="playlist_rename_title">Cambiar nombre</string>
     <string name="playlist_delete_title">Eliminar playlist</string>
     <!-- %1$s = nombre de la playlist -->
@@ -113,6 +114,10 @@
     <!-- ==================== Acciones de detalle (artista/álbum/lista) ==================== -->
     <string name="detail_play_all">Reproducir todo</string>
     <string name="detail_shuffle">Reproducir en aleatorio</string>
+    <string name="detail_play_options">Opciones de reproducción</string>
+    <string name="detail_play_reversed">Reproducir en orden inverso</string>
+    <string name="detail_play_title_asc">Reproducir de A a Z</string>
+    <string name="detail_play_title_desc">Reproducir de Z a A</string>
     <string name="detail_add_all_to_queue">Añadir todo a la cola</string>
 
     <!-- ==================== Gestor de descargas ==================== -->
@@ -674,9 +679,9 @@
     <!-- Copia de seguridad de playlists (Fase 6) -->
     <string name="backup_header">Copia de seguridad</string>
     <string name="backup_desc">Guarda tus playlists y favoritos en la carpeta de la app en OneDrive, y restáuralos en otro dispositivo. Restaurar nunca borra nada: solo añade lo que falte.</string>
-    <string name="backup_export">Exportar playlists</string>
+    <string name="backup_export">Exportar</string>
     <string name="backup_export_desc">Sube tus playlists a OneDrive y reemplaza el backup anterior.</string>
-    <string name="backup_import">Restaurar playlists</string>
+    <string name="backup_import">Restaurar</string>
     <string name="backup_import_desc">Trae el backup de OneDrive y lo fusiona con tus playlists actuales.</string>
     <!-- %1$d = nº de playlists -->
     <string name="backup_export_success">%1$d listas guardadas en OneDrive</string>
@@ -705,10 +710,12 @@
     <string name="settings_wavy_progress">Barra de progreso ondulada</string>
     <string name="settings_wavy_progress_desc">Usa la onda animada de Material 3 en el reproductor. El miniplayer mantiene la barra fina.</string>
     <string name="settings_progress_bar_header">Barra de progreso</string>
-    <string name="settings_progress_bar_desc">Modo (plana u ondulada) y grosor, con vista previa.</string>
+    <string name="settings_progress_bar_desc">Modo (plana u ondulada), marcador y grosor, con vista previa.</string>
     <string name="settings_progress_thickness">Grosor de la barra</string>
     <string name="settings_progress_thickness_desc">Vale para la barra plana y la ondulada del reproductor.</string>
     <string name="settings_progress_thickness_value">%1$d dp</string>
+    <string name="settings_progress_handle">Marcador de posición</string>
+    <string name="settings_progress_handle_desc">Mantiene el palito de la posición siempre visible en la barra del reproductor. Si lo apagas, aparece solo mientras arrastras.</string>
     <string name="settings_mini_player_rect">Miniplayer rectangular</string>
     <string name="settings_mini_player_rect_desc">Usa esquinas redondeadas en la barra flotante en vez de la forma de píldora.</string>
     <string name="settings_player_gestures">Gestos del reproductor</string>
@@ -778,6 +785,8 @@
     <string name="home_action_shuffle">Aleatorio</string>
     <string name="home_action_play_order">En orden</string>
     <string name="home_action_favorites">Favoritos</string>
+    <string name="home_action_offline">Sin conexión</string>
+    <string name="home_action_not_downloaded">Sin descargar</string>
     <string name="home_greeting_morning">Buenos días</string>
     <string name="home_greeting_afternoon">Buenas tardes</string>
     <string name="home_greeting_evening">Buenas noches</string>
@@ -851,7 +860,7 @@
     <string name="sort_recent_first">Recientes primero</string>
     <string name="sort_oldest_first">Antiguos primero</string>
     <string name="sort_most_played">Más reproducidas</string>
-    <string name="sort_recently_played">Escuchadas recientemente</string>
+    <string name="sort_recently_played">Últimas escuchadas</string>
 
     <!-- Progreso del escaneo por fuente (banner de sync: "N encontradas · <esto>") -->
     <plurals name="source_local_count">

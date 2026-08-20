@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -41,14 +42,17 @@ fun DuplicatePolicyDialog(
             ) {
                 Button(
                     onClick = { onResolve(DuplicatePolicy.KEEP_BOTH) },
+                    shapes = ButtonDefaults.shapes(),
                     modifier = Modifier.fillMaxWidth()
                 ) { Text(stringResource(R.string.duplicates_keep_both)) }
                 OutlinedButton(
                     onClick = { onResolve(DuplicatePolicy.PREFER_CLOUD) },
+                    shapes = ButtonDefaults.shapes(),
                     modifier = Modifier.fillMaxWidth()
                 ) { Text(stringResource(R.string.duplicates_prefer_cloud)) }
                 OutlinedButton(
                     onClick = { onResolve(DuplicatePolicy.PREFER_LOCAL) },
+                    shapes = ButtonDefaults.shapes(),
                     modifier = Modifier.fillMaxWidth()
                 ) { Text(stringResource(R.string.duplicates_prefer_local)) }
                 TextButton(

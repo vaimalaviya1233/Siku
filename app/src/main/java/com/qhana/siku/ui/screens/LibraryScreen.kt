@@ -2,8 +2,11 @@ package com.qhana.siku.ui.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
@@ -22,6 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.onSizeChanged
@@ -31,7 +35,6 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -47,9 +50,12 @@ import com.qhana.siku.data.model.PlaybackContext
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.util.FuzzyMatch
 import com.qhana.siku.data.model.SongFilter
+import com.qhana.siku.data.model.SongSourceFilter
 import com.qhana.siku.ui.PlayerArtOrigin
+import com.qhana.siku.ui.SharedTransitionGate
 import com.qhana.siku.ui.components.*
 import com.qhana.siku.ui.viewmodel.BrowseViewModel
+import com.qhana.siku.ui.viewmodel.DownloadBannerState
 import com.qhana.siku.ui.viewmodel.LibraryBannerState
 import com.qhana.siku.ui.viewmodel.LibraryViewModel
 import com.qhana.siku.ui.viewmodel.PlaybackViewModel
@@ -61,8 +67,8 @@ import com.qhana.siku.ui.theme.appSpatialSpec
 import com.qhana.siku.ui.theme.appFastSpatialSpec
 import com.qhana.siku.ui.theme.appEffectsSpec
 import com.qhana.siku.ui.theme.appFastEffectsSpec
-import com.qhana.siku.ui.theme.appShrinkFadeOut
-import com.qhana.siku.ui.theme.appExpandFadeIn
+import com.qhana.siku.ui.theme.appBannerEnter
+import com.qhana.siku.ui.theme.appBannerExit
 
 @Immutable
 private data class TabInfo(
@@ -177,6 +183,18 @@ fun LibraryScreen(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
+    // Mantenimiento de las fotos de artista (backfill + re-disparo al cambiar de red). Se pide
+    // AQUÍ y en ningún otro sitio: de esta pantalla cuelgan las superficies que las muestran
+    // —pestaña Artistas, inicio, búsqueda— y desde ellas se llega a los detalles. Estaba en el
+    // `init` de `BrowseViewModel`, que se resuelve por `NavBackStackEntry`: cada detalle de
+    // artista, álbum o género montaba su propia réplica. Ver [BrowseViewModel.startArtistPhotoMaintenance].
+    // Y el saneo de los chips de origen de Artistas/Álbumes, que son pestañas de ESTA pantalla:
+    // también estaba en un `init` que corría en cada detalle, donde esos filtros ni existen.
+    LaunchedEffect(browseViewModel) {
+        browseViewModel.startArtistPhotoMaintenance()
+        browseViewModel.startSourceFilterSanitizing()
+    }
+
     // Data Collection from ViewModels
     val uiState by libraryViewModel.uiState.collectAsStateWithLifecycle()
     val songCount by libraryViewModel.songCount.collectAsStateWithLifecycle()
@@ -184,10 +202,11 @@ fun LibraryScreen(
     val albums by browseViewModel.albums.collectAsStateWithLifecycle()
     // Visibilidad de los chips de origen (compartida por Todas/Artistas/Álbumes): Local solo
     // si hay AMBAS familias; Descargadas/Nube con que haya nube. Misma regla que SongsScreen.
-    val hasLocalSongs by libraryViewModel.hasLocalSongs.collectAsStateWithLifecycle()
-    val hasCloudSongs by libraryViewModel.hasCloudSongs.collectAsStateWithLifecycle()
-    val showLocalSourceChip = hasLocalSongs && hasCloudSongs
-    val showCloudSourceChips = hasCloudSongs
+    // Una sola regla, decidida en el ViewModel (ver [LibraryViewModel.hasSourceSplit]): la
+    // comparten los chips de Artistas/Álbumes de aquí, los de Todas (que la leen del mismo sitio)
+    // y las dos acciones de origen del inicio.
+    val showLocalSourceChip by libraryViewModel.showLocalSourceChip.collectAsStateWithLifecycle()
+    val showCloudSourceChips by libraryViewModel.showCloudSourceChips.collectAsStateWithLifecycle()
 
     // Secciones de la pestaña Inicio (reactivas al historial).
     val homeMostPlayed by libraryViewModel.homeMostPlayed.collectAsStateWithLifecycle()
@@ -258,25 +277,63 @@ fun LibraryScreen(
     val topAppBarState = rememberTopAppBarState()
     val currentScrollBehavior = TopAppBarDefaults.pinnedScrollBehavior(state = topAppBarState)
 
-    // Header FUNDIDO con el fondo SIEMPRE: el mismo color que el `containerColor` del Scaffold
-    // (`surfaceContainerLow`), en reposo Y con contenido debajo. Por decisión de diseño NO hay
-    // cambio de color al scrollear —el top bar es una continuación de la página, no una barra con
-    // identidad propia—; el contenido pasa por debajo del header opaco sin que este se despegue.
-    // (Antes viraba a un contenedor más alto al scrollear para "elevarse"; se quitó.) Es un rol, así
-    // que se adapta a claro/oscuro y a todos los estilos. DEBE seguir igual al fondo del Scaffold: si
-    // divergen, aparece una costura entre el bloque de tabs y la página.
-    val headerColor = colorScheme.surfaceContainerLow
-    // Contenedor de la píldora de búsqueda: un peldaño POR ENCIMA del header
-    // (`surfaceContainerHigh` sobre `surfaceContainerLow`) para leerse como un campo y no fundirse
-    // con él. NEUTRO a propósito: el color fuerte (`secondaryContainer`) es el lenguaje del estado
-    // SELECCIONADO —el tab activo—, y teñir también la búsqueda le robaba ese protagonismo. Constante:
-    // como el header ya no cambia con el scroll, la píldora tampoco necesita animarse para seguirlo.
-    val headerItemColor = colorScheme.surfaceContainerHigh
+    // El bloque de cabecera (búsqueda + pestañas) es una NAVIGATION BAR puesta arriba, no un top app
+    // bar, y de ahí sale su color. Los tokens lo confirman: `LibraryTabsRow` ya pinta el tab activo
+    // como `NavigationBarTokens` (`ItemActiveIndicatorColor` = `secondaryContainer`,
+    // `ItemActiveIndicatorShape` = `CornerFull`, inactivos en `onSurfaceVariant`). Y una navigation
+    // bar de M3 se separa del contenido POR COLOR, en un peldaño por encima de él: su
+    // `ContainerElevation = Level2` no es una sombra —la implementación solo expone `tonalElevation`,
+    // que además es no-op cuando el container ya no es `surface`, y `NavigationBarDefaults.Elevation`
+    // vale Level0—, es el NOMBRE del peldaño de color.
+    //
+    // Por eso NO va fundido con el fondo, y NO vira con el scroll (eso es el patrón del app bar, que
+    // es otro componente: `AppBarTokens` sí tiene `OnScrollContainerColor`). Aquí la barra flota
+    // sobre el contenido siempre, así que se distingue siempre.
+    //
+    // **EL REPARTO NO ES UNA PILA, ES UNA HORQUILLA**, y esto es lo que hay que entender antes de
+    // tocar cualquier color de la biblioteca. La referencia es el Dialer de Google (M3 Expressive
+    // real), muestreado píxel a píxel el 20 ago 2026:
+    //
+    //     tarjetas de llamada y search bar   250,249,254   tono ~98   `surface`
+    //     FONDO de la página                 238,237,243   tono ~94   `surfaceContainer`
+    //     bottom navigation bar              231,232,237   tono ~92   `surfaceContainerHigh`
+    //
+    // El fondo NO es el extremo de la escala: es el nivel MEDIO. Desde ahí el CONTENIDO sube (98,
+    // más claro, flota) y las BARRAS bajan (92, más oscuras, se hunden) — direcciones OPUESTAS. Esta
+    // pantalla lo copia: fondo `surfaceContainer`, filas y tarjetas `surface`, cabecera aquí.
+    //
+    // Antes se apilaba todo hacia un lado desde `surface` (98 / 96 / 94: fondo, cabecera, filas) y
+    // por eso "la escala se agotaba": las tres superficies competían por el mismo lado y siempre
+    // había una frontera en 2 puntos de tono, invisible. Con la horquilla la frontera crítica
+    // —cabecera contra las filas que le pasan por debajo al scrollear— pasa a **6 puntos**, la mayor
+    // de la pantalla, mientras que contra el fondo se queda en 2 y la barra deja de pesar. Las dos
+    // quejas que llevaron aquí (que no se distinguía de las filas; que era una masa contra el fondo)
+    // se resuelven a la vez porque cada una mira una frontera distinta.
+    //
+    // Historia de lo probado y DESCARTADO en device el mismo día, para no repetirlo: cabecera en el
+    // techo (`surfaceContainerHighest`, 90) con el fondo en 96 — se leía como una MASA, ~157dp de
+    // banda, el 16 % de la pantalla; y fondo en `surface` (98) con esa misma cabecera — salto máximo
+    // en tono Y croma a la vez, "no combinan". El diagnóstico que ordenó todo salió de medir los
+    // píxeles de una captura: los tres colores tenían el MISMO hue y la misma calidez (R−G = 10-11),
+    // o sea que el problema nunca fue de armonía sino de PESO y de DIRECCIÓN.
+    val headerColor = colorScheme.surfaceContainerHigh
+    // Contenedor de la píldora de búsqueda: `surface` (98), el lado del CONTENIDO — 6 puntos por
+    // encima de su bloque (92). Es lo que hace el Dialer, donde la search bar lleva exactamente el
+    // mismo color que las tarjetas de la lista (medido: `250,249,254` en las dos).
+    //
+    // **Se aparta de `SearchBarTokens.ContainerColor`** (`surfaceContainerHigh`, 92) y **va sin
+    // sombra**: el Level 3 de `SearchBarTokens.ContainerElevation` se implementó y se quitó el mismo
+    // día (20 ago, en device). Ese token da por hecho que la search bar flota sobre el fondo de la
+    // página; aquí vive DENTRO de una barra, y con la horquilla ya se separa de ella por tono. Con
+    // el token crudo el campo empataría con su propio bloque.
+    // NEUTRO a propósito: el color fuerte (`secondaryContainer`) es el lenguaje del estado
+    // SELECCIONADO —el tab activo—, y teñir también la búsqueda le robaba ese protagonismo.
+    val headerItemColor = colorScheme.surface
 
     // --- BÚSQUEDA (search as secondary action / focused search) ---
     // Componente REAL de M3, variante CONTAINED: la lupa de la TopBar es el ancla colapsada y los
-    // resultados viven en ExpandedFullScreenContainedSearchBar (diálogo edge-to-edge, con
-    // predictive back nativo). El TextField manual que había en el slot topBar se borró
+    // resultados viven en ExpandedFullScreenContainedSearchBar (diálogo edge-to-edge, que trae su
+    // propio manejo del back). El TextField manual que había en el slot topBar se borró
     // (ui/components/SearchBar.kt).
     //
     // Contained, NO la variante con divisor (`ExpandedFullScreenSearchBar`): aquella pega el input
@@ -288,12 +345,29 @@ fun LibraryScreen(
         animationSpecForExpand = SearchViewMotionSpec,
         animationSpecForCollapse = SearchViewMotionSpec
     )
-    // Contenedor del input NEUTRO, del color animado del header (`headerItemColor`), NO del token
-    // fijo `SearchBarTokens.ContainerColor` (surfaceContainerHigh): con la lista scrolleada ese
-    // token queda a un peldaño del bloque. El resto de la paleta (contenido, superficie del diálogo
-    // expandido) se conserva por defecto.
+    // El override se queda aunque `headerItemColor` COINCIDA hoy con el default del componente
+    // (`collapsedContainedSearchBarColor` = `SearchBarTokens.ContainerColor` = `surfaceContainerHigh`):
+    // lo que se pasa es la constante de ESTA pantalla, así que el input y el `Surface` que proyecta
+    // su sombra siguen al mismo valor si mañana cambia el reparto. Sin él serían dos fuentes para el
+    // mismo color, que es como se separan en silencio. El resto de la paleta (contenido, superficie
+    // del diálogo expandido) se conserva por defecto.
     val searchBarColors = SearchBarDefaults.containedColors(searchBarState).let { base ->
         base.copy(
+            // El `containerColor` va TAMBIÉN, no solo el del input: el componente los usa en dos
+            // capas —`SearchBar` pinta un `Surface` con él y el `inputField` pinta la suya dentro—,
+            // así que dejarlo en su default (`SearchBarTokens.ContainerColor`, 92) mientras el input
+            // baja a `headerItemColor` (94) las descuadraría en un peldaño. Mientras los dos valores
+            // coincidían daba igual; desde que la píldora se aparta del token, no.
+            //
+            // SOLO en colapsado: este mismo objeto lo consume `ExpandedFullScreenContainedSearchBar`,
+            // y ahí `containedColors` devuelve OTRO valor (`fullScreenContainedSearchBarColor`) que
+            // es el fondo del diálogo a pantalla completa. Pisarlo sin mirar el estado le cambiaría
+            // el color a esa pantalla, que no tiene nada que ver con la píldora de la cabecera.
+            // `currentValue`, no `isExpanded`: esa extensión existe en material3 pero es PRIVADA de
+            // su archivo, y es literalmente esta misma comparación.
+            containerColor =
+                if (searchBarState.currentValue == SearchBarValue.Expanded) base.containerColor
+                else headerItemColor,
             inputFieldColors = base.inputFieldColors.copy(
                 focusedContainerColor = headerItemColor,
                 unfocusedContainerColor = headerItemColor
@@ -411,13 +485,30 @@ fun LibraryScreen(
     // Solo se muestra cuando NO hay un banner de sync en curso (idle), en el mismo slot.
     val downloadBanner by syncViewModel.downloadBanner.collectAsStateWithLifecycle()
     val showBanner = uiState.bannerState !is LibraryBannerState.Hidden || downloadBanner != null
+    // Lo ÚLTIMO que hubo que mostrar, retenido mientras el banner se va.
+    //
+    // **Sin esto, la animación de salida no existe por mucho spec que se le ponga**, y era la causa
+    // real del "desaparece de golpe": el contenido del `AnimatedVisibility` se decide con un `when`
+    // sobre `uiState.bannerState`, así que en cuanto ese estado pasa a `Hidden` la rama `else` no
+    // pinta NADA. `AnimatedVisibility` se queda animando la altura de una caja vacía —la tarjeta ya
+    // se esfumó en el primer frame— y lo que se ve es un salto. Reteniendo el último contenido
+    // visible, el `exit` tiene algo que apagar y encoger.
+    //
+    // Contenedor plano y no estado de snapshot, por lo mismo que `rememberUnderlayColorScheme`: se
+    // escribe y se lee en la MISMA composición (la que ya está corriendo porque `showBanner` cambió),
+    // así que un `mutableStateOf` solo serviría para invalidarse a sí mismo.
+    val bannerContent = remember { LastBannerContent() }
+    if (showBanner) {
+        bannerContent.state = uiState.bannerState
+        bannerContent.download = downloadBanner
+    }
     // El indicador del pull-to-refresh es estado del ViewModel: se enciende solo si el scan
     // realmente va a correr (red/batería verificadas) y se apaga cuando el sync publica
     // estado — sin "safety timeout" arbitrario.
     val isManualRefreshing by libraryViewModel.isManualRefreshing.collectAsStateWithLifecycle()
 
-    // El back de la búsqueda lo maneja el diálogo de ExpandedFullScreenSearchBar (predictive
-    // back incluido): no hace falta BackHandler propio.
+    // El back de la búsqueda lo maneja el diálogo de ExpandedFullScreenSearchBar: no hace falta
+    // BackHandler propio en este nivel (el que sí hay vive DENTRO de su content, ver abajo).
 
     // Decisión de duplicados entre fuentes: el sync la detecta (StateFlow del SyncManager,
     // sobrevive a navegación) y aquí se pregunta — el home es a donde se aterriza tras
@@ -436,10 +527,12 @@ fun LibraryScreen(
             .fillMaxSize()
             .nestedScroll(currentScrollBehavior.nestedScrollConnection),
         contentWindowInsets = WindowInsets(0,0,0,0),
-        // Fondo de la biblioteca: `surfaceContainerLow` (un peldaño de tinte sobre `surface`) para
-        // que se note el color del seed en vez de leerse casi blanco en balanceado. DEBE coincidir
-        // con el `headerColor` de REPOSO (el header se funde con el fondo hasta que hay scroll).
-        containerColor = colorScheme.surfaceContainerLow,
+        // Fondo de la biblioteca: `surfaceContainer` (94), el nivel MEDIO de la escala — NO el
+        // extremo claro. Desde aquí el contenido sube a `surface` y las barras bajan a
+        // `surfaceContainerHigh`; la horquilla completa, con la medición del Dialer de la que sale,
+        // está en `headerColor`. Estuvo en `surface` (98) unas horas el 20 ago: con todo apilado
+        // hacia abajo desde el extremo, alguna frontera quedaba siempre en 2 puntos de tono.
+        containerColor = colorScheme.surfaceContainer,
         // Sin snackbarHost: el host único vive en MainActivity, ya posicionado sobre el
         // MiniPlayer flotante. Tener otro acá duplicaba el componente y solo mostraba los
         // snackbars pedidos a mano desde esta pantalla, no los del bus.
@@ -465,12 +558,16 @@ fun LibraryScreen(
                 // collapsedShape por defecto (píldora): el ancla ya ES la píldora docked,
                 // el morph nace de su forma real (antes era CircleShape por la lupa).
             ) {
-                // Cierre UNIFORME: el back del sistema debe animar igual que el icono arrow_back
-                // (morph directo a la lupa), no con el encogimiento del predictive back del diálogo.
-                // Este BackHandler se compone DENTRO del content, después del PredictiveBackStateHandler
-                // de BasicEdgeToEdgeDialog, así que gana por prioridad LIFO del OnBackPressedDispatcher:
-                // consume el back y llama al mismo animateToCollapsed(), sin que el gesto muestre preview.
+                // Cierre UNIFORME: el back del sistema debe animar igual que el icono arrow_back,
+                // o sea morph directo a la lupa, y no con el encogimiento propio del diálogo. Este
+                // BackHandler se compone DENTRO del content, después del PredictiveBackStateHandler
+                // de BasicEdgeToEdgeDialog, así que gana por prioridad LIFO del
+                // OnBackPressedDispatcher: consume el back y llama al mismo animateToCollapsed().
                 // Es el patrón que el propio componente usa en su variante docked.
+                //
+                // SIGUE HACIENDO FALTA con el predictive back desactivado (18 ago 2026): lo que se
+                // fue con el flag es el preview del gesto, pero el diálogo sigue teniendo su propio
+                // cierre y sin esto el back lo usaría en vez del morph a la lupa.
                 BackHandler { scope.launch { searchBarState.animateToCollapsed() } }
                 Box(modifier = Modifier.fillMaxSize()) {
                     SearchResults(
@@ -509,10 +606,7 @@ fun LibraryScreen(
         var bannerHeightPx by remember { mutableIntStateOf(0) }
         val bannerHeight = with(LocalDensity.current) { bannerHeightPx.toDp() }
         val listInsets = PaddingValues(
-            // 4dp tras el bloque de tabs: el aire principal ya vive DENTRO del área teñida
-            // (bottom interno de LibraryTabsRow); 12dp externos dejaban un canal vacío
-            // entre el corte del bloque y el contenido.
-            top = topBarInset + TabsRowHeight + bannerHeight + 4.dp,
+            top = topBarInset + TabsRowHeight + bannerHeight + HeaderContentGap,
             bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + ComponentConfig.FloatingBarListInset
         )
         Box(modifier = Modifier.fillMaxSize()) {
@@ -543,6 +637,20 @@ fun LibraryScreen(
             ) {
                 HorizontalPager(state = pagerState, key = { it }, beyondViewportPageCount = 1) { page ->
                     val tab = tabs[page]
+                    // **Solo la pestaña que se VE declara shared elements.** `beyondViewportPageCount`
+                    // deja la vecina compuesta y COLOCADA, y una punta colocada participa en el match
+                    // aunque esté fuera del viewport: por eso una canción que salía en un carrusel del
+                    // Inicio se abría SIN morph desde "Todas" (dos puntas de la misma key, las dos
+                    // declarándose destino). Ver [SharedTransitionGate], donde está el caso completo.
+                    //
+                    // `derivedStateOf` y no leer `currentPage` a pelo: así solo recomponen las dos
+                    // páginas que cambian de estado al deslizar, no las cuatro que hay compuestas. La
+                    // clave del `remember` es `page`, que es constante para esta ranura — lo que se
+                    // observa es `currentPage`, que es el estado (convención 9c).
+                    val isActivePage by remember(page, pagerState) {
+                        derivedStateOf { page == pagerState.currentPage }
+                    }
+                    SharedTransitionGate(visible = isActivePage) {
                     when (tab.tab) {
                         LibraryTabId.HOME -> {
                             HomeScreen(
@@ -556,22 +664,17 @@ fun LibraryScreen(
                                 rediscover = homeRediscover,
                                 currentSongId = nowPlayingUiState.song?.id,
                                 contentPadding = listInsets,
+                                // `ROW` y no `NONE`: la tarjeta del carrusel es la punta de origen
+                                // del container transform, igual que una fila de "Todas" (ver
+                                // `SongRowContainer` en HomeScreen). Con `NONE` el reproductor
+                                // aparecía con un fundido, sin morph.
                                 onPlaySongs = { songs, index ->
                                     playbackViewModel.playSongs(songs, index)
-                                    onNavigateToNowPlaying(PlayerArtOrigin.NONE)
+                                    onNavigateToNowPlaying(PlayerArtOrigin.ROW)
                                 },
-                                onPlayArtistPick = { artist, songs, index ->
-                                    // Igual que tocar una canción en el detalle del artista: la
-                                    // cola ES su catálogo, así que el contexto reanudable es él.
-                                    libraryViewModel.recordContext(
-                                        PlaybackContext.Artist(
-                                            artist,
-                                            songs.firstOrNull()?.albumArtUri?.toString()
-                                        )
-                                    )
-                                    playbackViewModel.playSongs(songs, index)
-                                    onNavigateToNowPlaying(PlayerArtOrigin.NONE)
-                                },
+                                // "Porque escuchaste a X" propone otros ARTISTAS: su tarjeta navega
+                                // al detalle, no reproduce.
+                                onArtistClick = onArtistClick,
                                 onAlbumClick = onAlbumClick,
                                 onResumeContext = { ctx -> resumeContext(
                                     ctx, scope, browseViewModel, libraryViewModel, playbackViewModel,
@@ -584,6 +687,20 @@ fun LibraryScreen(
                                 },
                                 onPlayAll = {
                                     playbackViewModel.playAllFromLibrary()
+                                    onNavigateToNowPlaying(PlayerArtOrigin.NONE)
+                                },
+                                // Misma puerta que los chips de filtro de las listas: con la
+                                // biblioteca entera en el dispositivo, estas dos acciones no
+                                // separarían nada y no se pintan.
+                                showSourceActions = showCloudSourceChips,
+                                onShuffleOffline = {
+                                    playbackViewModel.shuffleBySource(
+                                        setOf(SongSourceFilter.LOCAL, SongSourceFilter.DOWNLOADED)
+                                    )
+                                    onNavigateToNowPlaying(PlayerArtOrigin.NONE)
+                                },
+                                onShuffleNotDownloaded = {
+                                    playbackViewModel.shuffleBySource(setOf(SongSourceFilter.STREAMING))
                                     onNavigateToNowPlaying(PlayerArtOrigin.NONE)
                                 },
                                 hasFavorites = uiState.favoriteSongs.isNotEmpty(),
@@ -774,6 +891,7 @@ fun LibraryScreen(
                             )
                         }
                     }
+                    } // SharedTransitionGate
                 }
             }
 
@@ -788,15 +906,39 @@ fun LibraryScreen(
                 )
                 // El banner FLOTA sobre la lista (tarjeta suelta, sin fondo de bloque); su
                 // alto medido se suma al contentPadding para que el primer ítem nazca debajo.
+                //
+                // El `onSizeChanged` mide un Box que SIEMPRE existe, NO el `AnimatedVisibility`:
+                // cuando la salida termina, ese composable deja de emitir nodo, así que nunca
+                // reporta el 0 final y la ÚLTIMA medida —un fotograma a medio encoger— se quedaba
+                // grabada en `bannerHeightPx`. Resultado: tras el primer banner de la sesión, las
+                // seis pestañas reservaban un hueco fantasma bajo las tabs para siempre (medido en
+                // captura: 22dp de aire muerto entre la fila de pestañas y el contenido, con el
+                // banner ya retirado). Con el contenedor de por medio, la medida es la del SLOT y
+                // llega a cero sola cuando dentro no queda nada.
+                //
+                // Es un `Column` y no un `Box` a propósito: `AnimatedVisibility` tiene sobrecarga
+                // de `ColumnScope` (la que da el expand/shrink VERTICAL por defecto) y los scopes
+                // de layout de Compose están marcados con `@LayoutScopeMarker`, así que desde
+                // dentro de un `BoxScope` el receiver de fuera deja de ser accesible y no compila.
+                Column(modifier = Modifier.onSizeChanged { bannerHeightPx = it.height }) {
                 AnimatedVisibility(
                     visible = showBanner,
                     // Specs del tema: el default de `AnimatedVisibility` es `fadeIn + expandIn`
-                    // con springs de compose-animation, que no leen el MotionScheme.
-                    enter = appExpandFadeIn(),
-                    exit = appShrinkFadeOut(),
-                    modifier = Modifier.onSizeChanged { bannerHeightPx = it.height }
+                    // con springs de compose-animation, que no leen el MotionScheme. Y el par
+                    // PROPIO del banner, no el genérico: aparece sin que nadie lo pida y empuja la
+                    // lista entera — ver [appBannerEnter].
+                    enter = appBannerEnter(),
+                    exit = appBannerExit()
                 ) {
-                    when (val state = uiState.bannerState) {
+                    // El banner CAMBIA de contenido sin desaparecer —"Escaneando" releva a
+                    // "Biblioteca al día"— y los dos no miden lo mismo: el de progreso lleva la onda
+                    // y dos líneas, el resumen solo dos. Sin esto la altura salta de golpe y con ella
+                    // toda la lista de debajo. Va DENTRO del `AnimatedVisibility` y no fuera: al
+                    // entrar, el tamaño medido no cambia (lo que anima es el recorte de
+                    // `expandVertically`), así que no se pisan; solo actúa en el relevo.
+                    Box(modifier = Modifier.animateContentSize(appEffectsSpec())) {
+                    // Del holder y NO de `uiState` directamente: ver [LastBannerContent].
+                    when (val state = bannerContent.state) {
                         is LibraryBannerState.Error -> {
                             ErrorBanner(state.message) { libraryViewModel.onRefresh() }
                         }
@@ -823,7 +965,7 @@ fun LibraryScreen(
                         }
                         // Idle: si hay descargas pausadas/detenidas con pendientes, mostramos el
                         // banner persistente (con opción de reanudar / cancelar).
-                        else -> downloadBanner?.let { banner ->
+                        else -> bannerContent.download?.let { banner ->
                             DownloadStateBanner(
                                 control = banner.control,
                                 pending = banner.pending,
@@ -833,6 +975,8 @@ fun LibraryScreen(
                             )
                         }
                     }
+                    }
+                }
                 }
             }
         }
@@ -967,28 +1111,65 @@ private fun resumeContext(
 }
 
 /**
- * Alto total de [LibraryTabsRow]: 48dp de la fila de tabs + 16dp de aire teñido inferior.
- * Las listas del pager lo reservan como contentPadding (el contenido pasa por debajo).
+ * Alto de la pestaña en sí: `PrimaryNavigationTabTokens.ContainerHeight`, que es lo que mide un
+ * `Tab` de M3 con contenido de una línea (`SmallTabHeight`). Es el ÁREA TÁCTIL; el dibujo de la
+ * píldora es más chico ([TabPillHeight]).
  */
-private val TabsRowHeight = 64.dp
+private val TabHeight = 48.dp
 
-/** Glifo de cada pestaña, y su separación de la etiqueta cuando la pestaña está activa. */
-private val TabIconSize = 20.sp
-private val TabIconGap = 8.dp
+/**
+ * Glifo de cada pestaña: los **24 del spec** de la navigation bar (`IconSize`), que con
+ * [TabContentPadding] a los lados dejan la píldora inactiva en los **56** de su indicador de
+ * solo-glifo. Sale del contenido, no se fuerza ningún ancho.
+ *
+ * Estuvo en 20sp para que las seis pestañas entraran en 393dp sin desplazar la fila. Desde el 20 ago
+ * 2026 **la fila SCROLLEA a propósito** y la geometría vuelve a ser la del spec — ver
+ * [TabRowEdgePadding], donde está la decisión y su porqué.
+ *
+ * En **sp** como el resto de `MaterialSymbol` de la app: crece con la escala tipográfica del sistema
+ * y con él el ancho de la píldora. El alto no se mueve, lo fija [TabPillHeight].
+ */
+private val TabIconSize = 24.sp
+
+/**
+ * El último contenido VISIBLE del banner, retenido para que su salida tenga algo que animar. Ver el
+ * sitio donde se escribe, en `LibraryScreen`.
+ *
+ * Plano y mutable a propósito: no es estado observable, es memoria de un frame anterior.
+ */
+private class LastBannerContent {
+    var state: LibraryBannerState = LibraryBannerState.Hidden
+    var download: DownloadBannerState? = null
+}
+
+/** Una vuelta del icono del banner en marcha: el ritmo del indicador de sincronización del sistema. */
+private const val BANNER_SPIN_PERIOD_MS = 1000
+
+/**
+ * Aire entre el glifo y la etiqueta de la pestaña activa: los **4dp** del spec de M3 Expressive para
+ * la navigation bar horizontal. Va SOLO delante de la etiqueta — detrás manda [TabContentPadding],
+ * el mismo que a la izquierda del glifo, porque el spec de tabs pide padding consistente en cada
+ * pestaña y una píldora con 12 a un lado y 16 al otro lo incumple.
+ */
+private val TabIconGap = 4.dp
 
 /**
  * Padding horizontal DENTRO de la píldora, alrededor del glifo (y de la etiqueta en la activa).
- * No confundir con [TabPillGap], que es la separación ENTRE píldoras, ni con el `edgePadding` de
- * la fila, que es el margen contra los bordes de la pantalla.
+ * No confundir con [TabPillGap], que es la separación ENTRE píldoras, ni con [TabRowEdgePadding],
+ * que es el margen contra los bordes de la pantalla.
  *
- * **12dp es el techo con seis pestañas, no un valor elegido a ojo.** Con los 16dp del
- * `HorizontalTextPadding` de Material, en 393dp salían 5×60 + 94 de la activa + 24 de márgenes =
- * 418dp y la última pestaña quedaba cortada por el borde (se vio en el dispositivo, en español;
- * en inglés colaba porque "Home"/"Songs" son más cortas que "Inicio"/"Canciones"). Con 12dp la
- * inactiva mide exactamente los 48dp del mínimo táctil y el peor caso —"Canciones" activa— cae en
- * ~376dp. Subirlo obliga a quitar una pestaña.
+ * **16dp**, y las dos guías coinciden en el número por caminos distintos: es el
+ * `HorizontalTextPadding` que el `Tab` de M3 aplica a su etiqueta, y es también lo que centra un
+ * glifo de 24 en el indicador de 56dp de la navigation bar ((56 − 24) / 2).
+ *
+ * **El mismo a los DOS lados, sin excepciones.** El spec de tabs pide padding consistente en cada
+ * pestaña; hubo un `Spacer` extra detrás de la etiqueta activa —para replicar los "20dp tras el
+ * label" de la navigation bar— que dejaba la píldora con 12 a un lado y 16 al otro, y se quitó.
+ *
+ * Estuvo en 12dp mientras el objetivo era que las seis pestañas entraran sin scroll; ver
+ * [TabRowEdgePadding].
  */
-private val TabContentPadding = 12.dp
+private val TabContentPadding = 16.dp
 
 /**
  * Aire a los lados de la píldora de cada pestaña: la mitad de la separación real entre dos
@@ -998,14 +1179,88 @@ private val TabContentPadding = 12.dp
  */
 private val TabPillGap = 2.dp
 
-/** Dónde nace la primera píldora (y dónde acaba la última) respecto al borde de la pantalla. */
-private val TabRowEdgePadding = 12.dp
+/**
+ * Alto de la píldora: **40dp**, el indicador de la variante HORIZONTAL de la navigation bar de M3
+ * Expressive (la de icono y etiqueta en línea, que es la forma de la pestaña activa). La app es un
+ * híbrido de las dos variantes del spec: de la horizontal salen este alto, el [TabIconGap] de 4 y
+ * los 20 de detrás de la etiqueta; de la VERTICAL, la idea de un indicador ancho para las inactivas,
+ * que son solo glifo: **56**, que sale del contenido sin forzar nada ([TabIconSize] 24 + 2×
+ * [TabContentPadding] 16).
+ *
+ * Es solo el DIBUJO: el `Tab` que lo contiene conserva sus 48dp de alto, que son el área táctil.
+ * Por eso [TabRowBottomPadding] no vale 12 sino 8 — ver ahí.
+ */
+private val TabPillHeight = 40.dp
 
 /**
- * Ancho mínimo de una pestaña, gaps incluidos: 48dp de píldora + el aire a cada lado. El 48 NO es
- * estético — es el objetivo táctil mínimo de Material, y con [TabContentPadding] a 12dp una
- * pestaña inactiva mide justo eso (12 + glifo 20 + 12), así que este mínimo es exactamente el que
- * la sostiene. Si alguien baja el padding, la píldora deja de encogerse y sigue siendo pulsable.
+ * Dónde nace la primera píldora (y dónde acaba la última) respecto al borde de la pantalla: **16dp,
+ * el margen del RESTO de la columna** (barra de búsqueda, tarjetas, MiniPlayer), o sea la rejilla de
+ * la pantalla.
+ *
+ * **NO los 52 de `ScrollableTabRowEdgeStartPadding`.** Es la keyline que el spec da para una fila
+ * scrollable, se probó en device el 20 ago y se descartó: en una fila cuyas pestañas inactivas son
+ * píldoras de solo glifo, ese hueco de 52dp no se lee como una keyline sino como un vacío al empezar
+ * — y encima desalinea la primera píldora respecto a todo lo que tiene encima y debajo, que va a 16.
+ * La keyline está pensada para tabs de TEXTO alineadas a la rejilla tipográfica, no para esto.
+ *
+ * Se consume como `edgePadding = TabRowEdgePadding - TabPillGap` a propósito: cada píldora pone su
+ * propio aire de [TabPillGap], así que al `TabRow` hay que pedirle esa cantidad de MENOS para que el
+ * borde VISIBLE quede donde dice la constante.
+ */
+private val TabRowEdgePadding = 16.dp
+
+/**
+ * Aire entre la fila de pestañas y el corte inferior del bloque: **6dp**, para un aire VISIBLE de
+ * 10 — los otros 4 los aporta ya el propio `Tab`, que mide [TabHeight] con una píldora de
+ * [TabPillHeight] centrada dentro. Es el mismo criterio que [TabRowEdgePadding] en horizontal: la
+ * constante describe el margen visible menos lo que el componente ya pone.
+ *
+ * **Por debajo de los 12 visibles del spec**, y a propósito (device, 20 ago 2026): con el bloque
+ * teñido, ese aire de más se lee como una banda vacía bajo las pestañas. El aire que el spec deja
+ * ahí dentro se recuperó FUERA del bloque, entre su corte y el contenido — ver [HeaderContentGap].
+ *
+ * Recorrido en device: 16 → 8 → 0 → 4 → 6 → 8 → 6.
+ */
+private val TabRowBottomPadding = 6.dp
+
+/**
+ * Alto total de [LibraryTabsRow]: la pestaña más el aire teñido de abajo. Las listas del pager lo
+ * reservan como contentPadding (el contenido pasa por debajo del bloque).
+ *
+ * **DERIVADO a propósito.** Estuvo escrito a mano (64dp = 48 + 16) y se quedó desfasado en cuanto
+ * el aire inferior bajó de 16: el KDoc seguía diciendo "+16" y las listas reservaban 10dp de más,
+ * un hueco fantasma que no fallaba en compilación ni se veía como bug, solo como contenido que
+ * empieza más abajo de lo que debe.
+ *
+ * **Declarado DESPUÉS de [TabRowBottomPadding] a propósito**: las propiedades top-level se
+ * inicializan en orden de declaración, así que puesto antes leería un 0 y este alto saldría corto
+ * en runtime, sin error de compilación.
+ */
+private val TabsRowHeight = TabHeight + TabRowBottomPadding
+
+/**
+ * Aire entre el corte del bloque de cabecera y el contenido de la página. Lo reservan las listas del
+ * pager como `contentPadding` superior, así que el contenido SIGUE pasando por debajo del bloque al
+ * scrollear — esto solo decide dónde arranca en reposo.
+ *
+ * **16dp, el mismo margen que el resto de la columna** (barra de búsqueda, tarjetas, MiniPlayer), o
+ * sea la rejilla de la pantalla y no un número propio. Estuvo en 4dp mientras el bloque llevaba 16
+ * de aire interno: entre los dos daban ~20 y el reparto quedaba dentro del área teñida. Al ceñir el
+ * bloque a sus pestañas ([TabRowBottomPadding]) ese aire tenía que reaparecer aquí, o el título de
+ * la página nace pegado al corte.
+ *
+ * Ojo con la trampa que hubo en medio: mientras [TabsRowHeight] estuvo escrito a mano en 64 —10dp
+ * más de lo que el bloque medía— ese hueco fantasma hacía de aire, así que al corregirlo el
+ * contenido subió de golpe. El aire ahora es explícito y el alto es derivado; ninguno de los dos
+ * hace el trabajo del otro.
+ */
+private val HeaderContentGap = 16.dp
+
+/**
+ * Ancho mínimo que el `PrimaryScrollableTabRow` reserva por pestaña: los **48dp del mínimo táctil**.
+ * Es un piso de ÁREA, no el ancho del dibujo — la píldora inactiva mide 56 por su cuenta
+ * ([TabIconSize] + 2×[TabContentPadding]), así que en la práctica este mínimo no llega a activarse;
+ * existe para que no pueda quedarse corto si el glifo cambiara.
  */
 private val TabMinWidth = 48.dp + TabPillGap * 2
 
@@ -1048,22 +1303,24 @@ private fun LibraryTabsRow(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            // Tinte tonal compartido con la cabecera (elevación M3 al scrollear). El padding
-            // INFERIOR va dentro del fondo teñido: es el aire que separa la fila del corte
-            // del bloque al scrollear.
+            // Color compartido con la cabecera: las dos son UNA pieza, la navigation bar de la
+            // pantalla puesta arriba (ver `headerColor`).
+            //
+            // Aire bajo la fila: **6dp**, para 10 visibles con los 4 que aporta el propio `Tab`
+            // (ver [TabRowBottomPadding]). Los 16dp que tuvo desde el 17 jul venían de cuando el
+            // bloque iba del MISMO color que el fondo y ese aire era invisible; al ganar color
+            // propio se convirtió en una banda teñida y vacía.
             .background(containerColor)
-            .padding(bottom = 16.dp)
+            .padding(bottom = TabRowBottomPadding)
     ) {
         // `containerColor = Color.Transparent`: el tinte ya lo pinta el Box de arriba, que es
-        // quien comparte el color animado con la TopBar. Si además lo pintara la fila, el
-        // degradado de elevación se aplicaría dos veces.
+        // quien comparte el color con la TopBar. Si además lo pintara la fila, el degradado de
+        // elevación se aplicaría dos veces.
         PrimaryScrollableTabRow(
             selectedTabIndex = safeIndex,
             containerColor = Color.Transparent,
-            // Margen contra los bordes de la pantalla. Se le resta el aire propio de la píldora
-            // para que lo que quede alineado sea el borde del CONTENEDOR, no el del glifo. Son
-            // 12dp y no los 16dp de la barra de búsqueda: con seis pestañas, esos 4dp por lado son
-            // 8dp que deciden si la última entra o queda cortada contra el borde.
+            // Margen contra los bordes de la pantalla, menos el aire propio de la píldora para que
+            // lo que quede alineado sea el borde del CONTENEDOR y no el del glifo.
             edgePadding = TabRowEdgePadding - TabPillGap,
             // OBLIGATORIO bajarlo: el default de la fila scrollable es
             // `TabRowDefaults.ScrollableTabRowMinTabWidth` = 90dp, y con las inactivas a solo
@@ -1080,10 +1337,10 @@ private fun LibraryTabsRow(
 }
 
 /**
- * Las pestañas en sí. Recuperan el look de la botonera que había antes —**inactiva = solo glifo,
- * activa = glifo + etiqueta dentro de una píldora**— pero montado sobre `Tab`, así que conserva el
- * comportamiento de pestaña (selección, semántica, scroll hasta la activa) y ya no depende de un
- * componente de selección de opciones.
+ * Las pestañas en sí. Conservan el look de la botonera que hubo antes —**inactiva = solo glifo,
+ * activa = glifo + etiqueta dentro de una píldora**— montado sobre `Tab`, así que hay comportamiento
+ * de pestaña (selección, semántica, scroll hasta la activa) y no un componente de selección de
+ * opciones haciendo de navegación.
  *
  * **Todo el contenido va en el slot `icon`, con `text = null`**, y no repartido entre los dos
  * slots. `Tab` coloca text+icon con `TabBaselineLayout`, que alinea el texto por su BASELINE y
@@ -1121,81 +1378,112 @@ private fun LibraryTabs(
             animationSpec = appEffectsSpec(),
             label = "tabPill"
         )
-        Tab(
-            selected = selected,
-            onClick = {
-                if (!selected) {
-                    // Tick de segmento: el háptico del spec para moverse dentro de un grupo
-                    // (LongPress sería un golpe de más).
-                    haptic.performHapticFeedback(HapticFeedbackType.SegmentTick)
-                    onTabSelected(index)
-                }
-            },
-            // EXPLÍCITOS, no los defaults: `Tab` define `unselectedContentColor` como "lo mismo
-            // que el seleccionado", y el contentColor que hereda de `PrimaryTabRow` es `primary`
-            // — o sea que sin esto las seis pestañas se pintarían del color de la activa y ninguna
-            // se leería como inactiva. La activa va sobre la píldora, así que su color es el `on-`
-            // del contenedor, no el acento suelto.
-            selectedContentColor = colorScheme.onSecondaryContainer,
-            unselectedContentColor = colorScheme.onSurfaceVariant,
-            text = null,
-            icon = {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(horizontal = TabContentPadding)
-                ) {
-                    MaterialSymbol(tab.iconName, size = TabIconSize, fill = selected)
-                    // La etiqueta solo en la activa.
+        // Compartido con el ripple que pinta la píldora: el `Tab` recoge las interacciones y la
+        // píldora las dibuja. Sin pasarlo, `Tab` crearía el suyo y el ripple de abajo no se enteraría
+        // de nada.
+        val interactionSource = remember { MutableInteractionSource() }
+        // `LocalRippleConfiguration provides null` APAGA el ripple de `Tab` (es el mecanismo que M3
+        // documenta para eso). Solo cubre al `Tab`; el de la píldora se declara dentro y no lo lee,
+        // porque `indication(...)` recibe la instancia directamente.
+        CompositionLocalProvider(LocalRippleConfiguration provides null) {
+            Tab(
+                selected = selected,
+                onClick = {
+                    if (!selected) {
+                        // Tick de segmento: el háptico del spec para moverse dentro de un grupo
+                        // (LongPress sería un golpe de más).
+                        haptic.performHapticFeedback(HapticFeedbackType.SegmentTick)
+                        onTabSelected(index)
+                    }
+                },
+                // EXPLÍCITOS, no los defaults: `Tab` define `unselectedContentColor` como "lo mismo
+                // que el seleccionado", y el contentColor que hereda de `PrimaryTabRow` es `primary`
+                // — o sea que sin esto las seis pestañas se pintarían del color de la activa y ninguna
+                // se leería como inactiva. La activa va sobre la píldora, así que su color es el `on-`
+                // del contenedor, no el acento suelto.
+                selectedContentColor = colorScheme.onSecondaryContainer,
+                unselectedContentColor = colorScheme.onSurfaceVariant,
+                text = null,
+                icon = {
+                    // **La píldora se dibuja AQUÍ, en el contenido, no en el modifier del `Tab`.** Eso
+                    // es lo que permite que mida [TabPillHeight] (40dp, el indicador de la navigation
+                    // bar horizontal del spec) mientras el `Tab` conserva sus 48dp de alto: el
+                    // `selectable` lo aplica `Tab` a su propio nodo, así que un `padding` vertical por
+                    // fuera recortaría el ÁREA TÁCTIL por debajo del mínimo de 48. Es el mismo reparto
+                    // que hace M3 en la navigation bar, donde el touch target es el ITEM entero y el
+                    // indicador es solo el dibujo.
                     //
-                    // El ancho va con un spec de EFFECTS —crítico, sin rebote— y no con el spatial
-                    // que tenía, y aquí el motivo no es estético sino de FRAMES. `expandHorizontally`
-                    // anima el TAMAÑO, así que cada frame es una pasada de LAYOUT, no un repintado; y
-                    // no una local: al cambiar de ancho una pestaña, el `PrimaryScrollableTabRow`
-                    // recalcula el reparto de todas, la posición del indicador y el scroll, y el
-                    // `Text` de dentro se vuelve a medir. Con `appFastSpatialSpec()` —el token que
-                    // MÁS rebota (dampingRatio 0.6)— la píldora oscilaba alrededor de su ancho final
-                    // un buen rato, y cada oscilación era otra pasada completa de eso: el rebote
-                    // multiplicaba el trabajo caro justo mientras el `HorizontalPager` componía la
-                    // página nueva. Se veía como pérdida de fps al cambiar de pestaña.
-                    //
-                    // Regla general que sale de aquí: **un spec que rebota sobre algo que EMPUJA
-                    // LAYOUT sale caro**. Sobre un `graphicsLayer` (posición, escala, alpha) el
-                    // rebote es gratis; sobre un tamaño, no.
-                    AnimatedVisibility(
-                        visible = selected,
-                        enter = expandHorizontally(
-                            animationSpec = appEffectsSpec()
-                        ) + fadeIn(
-                            animationSpec = appEffectsSpec()
-                        ),
-                        exit = shrinkHorizontally(
-                            animationSpec = appFastEffectsSpec()
-                        ) + fadeOut(
-                            animationSpec = appFastEffectsSpec()
-                        )
+                    // **Y por eso el RIPPLE también se dibuja aquí** (`indication` con el
+                    // `interactionSource` que se le pasa al `Tab`, mientras el suyo va apagado con
+                    // `LocalRippleConfiguration provides null`). `Tab` pone su `selectable` DESPUÉS del
+                    // modifier externo, así que su ripple cubre el nodo entero: 48dp de alto y sin
+                    // recortar, o sea una mancha rectangular alrededor de una píldora de 40. Antes no se
+                    // veía porque el `clip(CircleShape)` vivía en ese modifier externo y lo recortaba;
+                    // al bajar la píldora a 40 el clip se vino aquí y el ripple se quedó suelto. Lo que
+                    // se anima es el CHIP, no su contenedor.
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .height(TabPillHeight)
+                            .clip(CircleShape)
+                            .background(pillColor)
+                            .indication(interactionSource, ripple())
+                            .padding(horizontal = TabContentPadding)
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Spacer(modifier = Modifier.width(TabIconGap))
-                            Text(
-                                text = stringResource(tab.titleRes),
-                                style = MaterialTheme.typography.labelLargeEmphasized,
-                                maxLines = 1,
-                                softWrap = false
+                        MaterialSymbol(tab.iconName, size = TabIconSize, fill = selected)
+                        // La etiqueta solo en la activa.
+                        //
+                        // El ancho va con un spec de EFFECTS —crítico, sin rebote— y no con el spatial
+                        // que tenía, y aquí el motivo no es estético sino de FRAMES. `expandHorizontally`
+                        // anima el TAMAÑO, así que cada frame es una pasada de LAYOUT, no un repintado; y
+                        // no una local: al cambiar de ancho una pestaña, el `PrimaryScrollableTabRow`
+                        // recalcula el reparto de todas, la posición del indicador y el scroll, y el
+                        // `Text` de dentro se vuelve a medir. Con `appFastSpatialSpec()` —el token que
+                        // MÁS rebota (dampingRatio 0.6)— la píldora oscilaba alrededor de su ancho final
+                        // un buen rato, y cada oscilación era otra pasada completa de eso: el rebote
+                        // multiplicaba el trabajo caro justo mientras el `HorizontalPager` componía la
+                        // página nueva. Se veía como pérdida de fps al cambiar de pestaña.
+                        //
+                        // Regla general que sale de aquí: **un spec que rebota sobre algo que EMPUJA
+                        // LAYOUT sale caro**. Sobre un `graphicsLayer` (posición, escala, alpha) el
+                        // rebote es gratis; sobre un tamaño, no.
+                        AnimatedVisibility(
+                            visible = selected,
+                            enter = expandHorizontally(
+                                animationSpec = appEffectsSpec()
+                            ) + fadeIn(
+                                animationSpec = appEffectsSpec()
+                            ),
+                            exit = shrinkHorizontally(
+                                animationSpec = appFastEffectsSpec()
+                            ) + fadeOut(
+                                animationSpec = appFastEffectsSpec()
                             )
+                        ) {
+                            // Un solo spacer, ANTES de la etiqueta. Hubo otro detrás —para replicar los
+                            // "20dp tras el label" de la navigation bar— y se quitó: dejaba la píldora
+                            // con 12dp a la izquierda y 16 a la derecha, y el spec de tabs pide
+                            // explícitamente padding CONSISTENTE en cada pestaña. El aire de los dos
+                            // lados lo pone [TabContentPadding], igual para todas.
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Spacer(modifier = Modifier.width(TabIconGap))
+                                Text(
+                                    text = stringResource(tab.titleRes),
+                                    style = MaterialTheme.typography.labelLargeEmphasized,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
                         }
                     }
-                }
-            },
-            modifier = Modifier
-                // Solo separación HORIZONTAL. Un inset vertical se vería mejor, pero este padding
-                // va ANTES del `selectable` que añade `Tab`, así que recorta también el área
-                // táctil: con 4dp arriba y abajo la pestaña quedaría en 40dp de alto, por debajo
-                // del mínimo de 48dp. La píldora ocupa el alto completo de la fila y el aire se lo
-                // dan la cabecera de búsqueda (arriba) y el padding del bloque (abajo).
-                .padding(horizontal = TabPillGap)
-                .clip(CircleShape)
-                .background(pillColor)
-        )
+                },
+                // Solo separación HORIZONTAL: este modifier va ANTES del `selectable` que añade `Tab`,
+                // así que cualquier inset vertical recortaría el área táctil. El aire vertical de la
+                // píldora sale de que ésta mide 40 dentro de un `Tab` de 48 (ver el slot `icon`).
+                interactionSource = interactionSource,
+                modifier = Modifier.padding(horizontal = TabPillGap)
+            )
+        }
     }
 }
 
@@ -1212,6 +1500,12 @@ private fun BannerCard(
     iconContainer: Color,
     containerColor: Color,
     contentColor: Color,
+    /**
+     * ¿El icono GIRA? Para los estados en curso, como el indicador de sincronización del sistema: un
+     * glifo quieto no distingue "buscando cambios" de "aquí tienes el resultado", y el banner pasa por
+     * los dos. La onda de progreso ya dice que algo pasa, pero está abajo y el ojo va al icono.
+     */
+    iconSpinning: Boolean = false,
     onClick: (() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
@@ -1229,7 +1523,42 @@ private fun BannerCard(
         ) {
             Surface(shape = CircleShape, color = iconContainer, modifier = Modifier.size(40.dp)) {
                 Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                    MaterialSymbol(icon, color = onContainerColor(iconContainer), size = 20.sp, fill = true)
+                    // Giro continuo con `rememberInfiniteTransition`, que en cualquier otro sitio de
+                    // esta app sería un error (ver "CERO productores continuos" en la sección Motion
+                    // de CLAUDE.md). Aquí es legítimo por las dos razones que hacen legítimo al
+                    // shimmer: **solo existe mientras hay trabajo** —el banner se retira al terminar—
+                    // y **cada frame mueve algo**. Lo segundo es lo que lo separa de la cookie del
+                    // play, que se acotó a publicar solo al desplazarse un píxel: aquélla giraba
+                    // 0,17°/frame (un tercio de píxel, invisible), y ésta gira ~3°/frame en un glifo
+                    // de 20sp, o sea varios píxeles. Recortar por píxel aquí no ahorraría un solo
+                    // frame.
+                    val spin = if (iconSpinning) {
+                        val transition = rememberInfiniteTransition(label = "bannerIconSpin")
+                        transition.animateFloat(
+                            initialValue = 0f,
+                            targetValue = 360f,
+                            animationSpec = infiniteRepeatable(
+                                // LINEAL y no un token del scheme: una rotación continua no acelera
+                                // ni frena, o se vería un tirón en cada vuelta. Un giro por segundo
+                                // es el ritmo del indicador de sincronización del sistema, que es la
+                                // referencia que el usuario ya conoce.
+                                animation = tween(BANNER_SPIN_PERIOD_MS, easing = LinearEasing),
+                                repeatMode = RepeatMode.Restart
+                            ),
+                            label = "bannerIconAngle"
+                        )
+                    } else null
+                    MaterialSymbol(
+                        icon,
+                        color = onContainerColor(iconContainer),
+                        size = 20.sp,
+                        fill = true,
+                        // Lectura DIFERIDA dentro del `graphicsLayer`: el ángulo cambia en cada frame
+                        // y leerlo en composición recompondría el banner entero a 60fps.
+                        modifier = spin?.let { angle ->
+                            Modifier.graphicsLayer { rotationZ = angle.value }
+                        } ?: Modifier
+                    )
                 }
             }
             Spacer(Modifier.width(14.dp))
@@ -1282,7 +1611,7 @@ private fun DownloadSummaryBanner(active: Int, completed: Int, total: Int, faile
         val failedText = if (failed > 0) stringResource(R.string.sync_with_errors_suffix, failed) else ""
         Text(
             stringResource(R.string.sync_downloading),
-            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
+            style = MaterialTheme.typography.titleSmallEmphasized
         )
         Text(
             stringResource(R.string.sync_progress, completed, total, failedText),
@@ -1313,7 +1642,7 @@ private fun ErrorBanner(message: String, onRetry: () -> Unit) {
     ) {
         Text(
             stringResource(R.string.sync_error),
-            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
+            style = MaterialTheme.typography.titleSmallEmphasized
         )
         Text(
             stringResource(R.string.sync_error_retry, message),
@@ -1350,7 +1679,7 @@ private fun SyncCompleteBanner(newSongs: Int, downloaded: Int, failed: Int, dele
     ) {
         Text(
             stringResource(R.string.sync_up_to_date),
-            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
+            style = MaterialTheme.typography.titleSmallEmphasized
         )
         Text(
             text,
@@ -1379,7 +1708,7 @@ private fun PrepareProgressBanner(current: Int, total: Int, message: String) {
     ) {
         Text(
             message,
-            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+            style = MaterialTheme.typography.titleSmallEmphasized,
             maxLines = 1
         )
         if (total > 0) {
@@ -1425,7 +1754,7 @@ private fun SyncPausedBanner(message: String) {
     ) {
         Text(
             stringResource(R.string.sync_paused),
-            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
+            style = MaterialTheme.typography.titleSmallEmphasized
         )
         Text(
             message,
@@ -1441,14 +1770,17 @@ private fun SyncPausedBanner(message: String) {
 private fun ScanProgressBanner(count: Int, message: String) {
     val palette = bannerGreen()
     BannerCard(
-        icon = "search",
+        // `sync` girando en vez de la lupa quieta: es el glifo que el sistema usa para lo mismo, y
+        // el movimiento distingue "buscando" de "terminado" sin leer el texto.
+        icon = "sync",
+        iconSpinning = true,
         iconContainer = palette.accent,
         containerColor = palette.container,
         contentColor = palette.accent
     ) {
         Text(
             stringResource(R.string.sync_scanning),
-            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
+            style = MaterialTheme.typography.titleSmallEmphasized
         )
         Text(
             if (count > 0) stringResource(R.string.sync_found, count, message) else message,
@@ -1475,7 +1807,7 @@ private fun ScanProgressBanner(count: Int, message: String) {
  * pestañas, incluida Listas. Ordenar (solo Todas) y el overflow van DENTRO de la píldora
  * como trailing icons del spec — el trailing lo arma `searchInputField` en el caller.
  *
- * El tinte on-scroll lo gobierna el caller (mismo color animado que la fila de tabs).
+ * El color del bloque lo gobierna el caller (el mismo que la fila de tabs: son una sola pieza).
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -1497,6 +1829,9 @@ private fun LibrarySearchHeader(
             .padding(horizontal = 16.dp)
             .padding(top = 8.dp, bottom = 12.dp)
     ) {
+        // SIN `shadowElevation`: se deja el default de Compose (Level0), que se aparta del
+        // `SearchBarTokens.ContainerElevation` del spec (Level 3). Se implementó ese Level 3 el
+        // 20 ago y se quitó el mismo día en device — el porqué, junto a `headerItemColor`.
         SearchBar(
             state = searchBarState,
             inputField = searchInputField,
@@ -1532,7 +1867,7 @@ private fun LibraryOverflowButton(
             }
         }
         // Menú SEGMENTADO (popup + grupo), no el `DropdownMenu` clásico: ver la nota en SortChip.
-        DropdownMenuPopup(
+        AppMenuPopup(
             expanded = showOverflowMenu,
             onDismissRequest = { showOverflowMenu = false }
         ) {

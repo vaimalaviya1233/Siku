@@ -67,17 +67,34 @@ class BrowseViewModel @Inject constructor(
     /** Ver [settlingFlow] y [sampledDuringSync]. */
     private val libraryIsSettling = syncManager.settlingFlow()
 
-    init {
-        // Backfill de fotos pendientes al arrancar la sesión de navegación: cubre bibliotecas
-        // ya sincronizadas donde no correrá ningún scan que dispare el hook de SyncManager.
-        // Idempotente y con rate-limit en el repo; dispararlo dos veces es gratis.
+    /** Ver [startArtistPhotoMaintenance]: una sola vez por instancia, pase lo que pase arriba. */
+    private val photoMaintenanceStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Arranca el mantenimiento de fotos de artista: una pasada de backfill y el re-disparo al
+     * cambiar de red.
+     *
+     * **Es explícito y NO va en un `init`**, que es donde estaba. Este ViewModel se resuelve por
+     * `NavBackStackEntry`, así que el `init` no significa "arrancó la sesión de navegación" sino
+     * "se abrió una pantalla más": los detalles de artista, álbum y género crean cada uno el suyo,
+     * y también lo hacía Ajustes → Descargas, que solo quería leer tres preferencias. Navegar por
+     * tres artistas dejaba tres colectores de red registrados y tres consultas de pendientes
+     * lanzadas. El comentario que había razonaba sobre "dispararlo dos veces", que era cierto
+     * cuando la alternativa era el singleton — no sobre una instancia por pantalla abierta.
+     *
+     * Lo llama solo [com.qhana.siku.ui.screens.LibraryScreen], que es de donde cuelgan las cuatro
+     * superficies que enseñan foto de artista (pestaña Artistas, inicio, búsqueda y de ahí a los
+     * detalles), así que el alcance efectivo no cambia: lo que desaparece es la réplica.
+     *
+     * Sigue sin vivir en el singleton a propósito, y ese motivo no ha cambiado: colgado del proceso,
+     * el colector de red salía a Deezer en cada salto WiFi↔datos aunque la UI no existiera —un
+     * worker levanta el proceso—. Ver [ArtistImageRepository.backfillOnNetworkChanges].
+     */
+    fun startArtistPhotoMaintenance() {
+        if (!photoMaintenanceStarted.compareAndSet(false, true)) return
         viewModelScope.launch(Dispatchers.IO) {
             artistImageRepository.backfillMissingImages()
         }
-        // Re-disparo del backfill al cambiar la red, colgado del ciclo de vida de ESTA pantalla y no
-        // del singleton: antes vivía en un `init` de por vida y salía a Deezer en cada salto
-        // WiFi↔datos aunque nadie hubiera abierto nunca la pestaña Artistas (proceso de un worker).
-        // Ver [ArtistImageRepository.backfillOnNetworkChanges].
         viewModelScope.launch(Dispatchers.IO) {
             artistImageRepository.backfillOnNetworkChanges().collect { }
         }
@@ -121,6 +138,56 @@ class BrowseViewModel @Inject constructor(
     fun toggleAlbumSourceFilter(filter: SongSourceFilter) {
         _albumSourceFilters.value = _albumSourceFilters.value.toMutableSet().apply {
             if (!add(filter)) remove(filter)
+        }
+    }
+
+    /** Ver [startSourceFilterSanitizing]: una sola vez por instancia. */
+    private val filterSanitizingStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Saneo de los filtros de estas dos pestañas, gemelo del de `LibraryViewModel` y por el mismo
+     * motivo: un filtro seleccionado cuyo chip deja de verse es una lista vacía sin nada que tocar
+     * para recuperarla. Aquí faltaba, y con la puerta nueva el caso pasó de raro (desconectar la
+     * nube) a cotidiano: basta con que termine de descargarse la última canción pendiente.
+     *
+     * Las condiciones se leen del MISMO sitio que las de Todas (`SongDao.buildSourceSplitQuery`
+     * vía `BrowseRepository`), no de una copia de la regla.
+     *
+     * **Explícito y no en un `init`**, por el mismo motivo que [startArtistPhotoMaintenance]: este
+     * ViewModel se resuelve por `NavBackStackEntry`, así que el `init` corría también en los
+     * detalles de artista, álbum y género, y en Ajustes → Descargas. Ahí no solo estaba duplicado:
+     * era trabajo INÚTIL. Los filtros que sanea son los de las pestañas Artistas y Álbumes, que esas
+     * pantallas no muestran — en sus instancias los dos conjuntos nacen vacíos, nadie los toca y
+     * nadie los lee, así que no hay nada que sanear y aun así se mantenían dos consultas vivas.
+     *
+     * Lo llama solo [com.qhana.siku.ui.screens.LibraryScreen], que es donde viven esas pestañas.
+     *
+     * **No hacía falta compartir la instancia entre pantallas para arreglarlo**, y eso importa
+     * porque compartirla sí habría roto algo: [artistSeed] es un único `MutableStateFlow` y
+     * [requestArtistSeed] cancela la petición anterior, de modo que al ir de un artista a otro —con
+     * las dos pantallas compuestas a la vez durante el shared axis Z— el detalle que se va se
+     * repintaría con el color del que entra a mitad de la animación.
+     */
+    fun startSourceFilterSanitizing() {
+        if (!filterSanitizingStarted.compareAndSet(false, true)) return
+        viewModelScope.launch {
+            combine(browseRepository.hasSourceSplit(), browseRepository.hasLocalSongs()) { split, local ->
+                (split && local) to split
+            }
+                // Igual que [artists] y [albums], y aquí faltaba: son dos `EXISTS` sobre `songs`, o
+                // sea consultas baratas —paran en la primera fila y hay índice en `sourceType`—,
+                // pero Room las re-ejecuta en CADA invalidación de la tabla, y durante un sync
+                // masivo eso son decenas por segundo. El `distinctUntilChanged` de abajo descarta el
+                // resultado repetido; no evita que la consulta corra.
+                .sampledDuringSync(libraryIsSettling)
+                .distinctUntilChanged()
+                .collect { (showLocal, showCloud) ->
+                    val keep = { f: SongSourceFilter ->
+                        if (f == SongSourceFilter.LOCAL) showLocal else showCloud
+                    }
+                    _artistSourceFilters.value = _artistSourceFilters.value.filterTo(mutableSetOf(), keep)
+                    _albumSourceFilters.value = _albumSourceFilters.value.filterTo(mutableSetOf(), keep)
+                }
         }
     }
 

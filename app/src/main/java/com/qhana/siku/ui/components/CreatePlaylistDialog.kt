@@ -6,7 +6,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.qhana.siku.R
 
@@ -19,7 +18,7 @@ fun CreatePlaylistDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.playlist_create_title), fontWeight = FontWeight.Bold) },
+        title = { Text(stringResource(R.string.playlist_create_title)) },
         text = {
             Column {
                 Text(stringResource(R.string.playlist_create_prompt))
@@ -67,7 +66,7 @@ fun RenamePlaylistDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.playlist_rename_title), fontWeight = FontWeight.Bold) },
+        title = { Text(stringResource(R.string.playlist_rename_title)) },
         text = {
             // FILLED, igual que el de crear (ver la nota de arriba sobre la shape).
             TextField(

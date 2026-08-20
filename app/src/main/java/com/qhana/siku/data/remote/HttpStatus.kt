@@ -23,6 +23,13 @@ package com.qhana.siku.data.remote
  * reintentable y [isRetriableTransport] no.
  */
 internal object HttpStatus {
+    /**
+     * El servidor honró un `Range` y está mandando SOLO el tramo pedido. Es la diferencia entre
+     * reanudar y volver a empezar, así que quien pida un rango tiene que comprobarlo: un 200 en esa
+     * misma petición significa "te mando el archivo entero desde el byte 0", que es una respuesta
+     * válida y no un error, pero que invalida cualquier suposición sobre dónde encaja el cuerpo.
+     */
+    const val PARTIAL_CONTENT = 206
     const val UNAUTHORIZED = 401
     const val FORBIDDEN = 403
     const val NOT_FOUND = 404

@@ -25,7 +25,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -141,8 +140,10 @@ fun AmbientPlayerScreen(
         Row(modifier = Modifier.fillMaxSize().padding(48.dp), horizontalArrangement = Arrangement.spacedBy(48.dp), verticalAlignment = Alignment.CenterVertically) {
             AmbientAlbumArt(song = currentSong, modifier = Modifier.weight(0.45f).aspectRatio(1f))
             Column(modifier = Modifier.weight(0.55f).fillMaxHeight(), verticalArrangement = Arrangement.Center) {
-                Text(text = currentSong?.title ?: stringResource(R.string.ambient_no_playback), color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Visible, modifier = Modifier.basicMarquee(repeatDelayMillis = 10000, initialDelayMillis = 1000))
-                Text(text = currentSong?.artist ?: "", color = Color.White.copy(alpha = 0.7f), fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                // Roles del spec, no tamaños sueltos: `headlineMediumEmphasized` son exactamente
+                // los 28sp/Medium que estaban escritos a mano, y `bodyLarge` los 16sp del artista.
+                Text(text = currentSong?.title ?: stringResource(R.string.ambient_no_playback), color = Color.White, style = MaterialTheme.typography.headlineMediumEmphasized, maxLines = 1, overflow = TextOverflow.Visible, modifier = Modifier.basicMarquee(repeatDelayMillis = 10000, initialDelayMillis = 1000))
+                Text(text = currentSong?.artist ?: "", color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Spacer(modifier = Modifier.height(32.dp))
                 UnifiedProgressBar(currentPosition = currentPosition, duration = duration, onSeek = { musicController.seekTo(it) }, trackColor = Color.White, inactiveTrackColor = Color.White.copy(alpha = 0.2f), textColor = Color.White.copy(alpha = 0.5f), showThumb = true, trackHeight = 4.dp, modifier = Modifier.fillMaxWidth())
                 Spacer(modifier = Modifier.height(32.dp))

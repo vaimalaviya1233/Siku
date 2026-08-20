@@ -12,22 +12,33 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.pluralStringResource
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.qhana.siku.R
 import com.qhana.siku.data.model.Playlist
 import com.qhana.siku.data.repository.PlaylistCoverMeta
+import com.qhana.siku.ui.components.AppMenuPopup
 import com.qhana.siku.ui.components.ACCENT_SECONDARY_ALPHA
 import com.qhana.siku.ui.components.GroupedListRow
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.MenuItemIcon
-import com.qhana.siku.ui.components.rememberListItemShape
 import com.qhana.siku.ui.components.rememberRowActionColors
+
+/**
+ * Margen lateral de TODO lo que hay en esta pestaña: la píldora de Favoritos, el encabezado con su
+ * acción, y las filas del grupo (que lo traen de `GroupedListRow`, con el mismo valor).
+ *
+ * Existe como constante porque el borde derecho es el que delata cualquier desajuste: los tres
+ * bloques se apilan verticalmente y el ojo los lee como una columna, así que 4dp de diferencia en uno
+ * se ven. **Si cambia el de `GroupedListRow`, hay que cambiar este** — es la pareja sincronizada de
+ * siempre; no se puede leer de allí porque es el padding interno de un componente compartido por
+ * varias pestañas.
+ */
+private val ListHorizontalMargin = 16.dp
 
 /**
  * Pestaña Listas del home: Favoritos fijo arriba (contenedor de acento con corazón) y las
@@ -65,8 +76,9 @@ fun PlaylistList(
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = combinedPadding
-        // El gap de 2dp entre filas lo pone GroupedListRow (padding vertical 1dp por fila), igual
-        // que Todas/Artistas; sumar aquí spacedBy(2dp) lo duplicaría solo en esta lista.
+        // El gap entre filas lo pone GroupedListRow desde el token del spec
+        // (`ListItemDefaults.SegmentedGap`, media parte por fila), igual que Todas/Artistas;
+        // sumar aquí un `spacedBy` lo duplicaría solo en esta lista.
     ) {
         // Favoritos siempre primero
         item(key = "favorites") {
@@ -76,46 +88,107 @@ fun PlaylistList(
             )
         }
 
-        // Header de sección "Tus listas" + acción de crear ("+" tonal). Reemplazó al FAB
-        // flotante de la pestaña Listas (que quedaba "colgando") — la creación ahora vive
-        // junto al grupo que puebla. Siempre visible (aún sin listas, invita a crear una).
+        // Header de sección "Tus listas" + acción de crear. Reemplazó al FAB flotante de la pestaña
+        // Listas (que quedaba "colgando") — la creación vive junto al grupo que puebla. Siempre
+        // visible (aún sin listas, invita a crear una).
+        //
+        // **Botón con TEXTO y no un "+" pelado** (17 ago 2026): un glifo suelto al final de un
+        // encabezado obliga a deducir qué añade, y en la única pantalla donde crear algo es la acción
+        // principal eso es pedir de más. El texto lo dice y de paso le da área táctil de sobra. Se
+        // reutiliza `playlist_create_action`, que ya existía como descripción de accesibilidad: al
+        // pasar a ser la etiqueta visible, esa `semantics` sobra y se fue.
         item(key = "playlists_header") {
-            val createDesc = stringResource(R.string.playlist_create_action)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 20.dp, end = 16.dp, top = 4.dp, bottom = 8.dp),
+                    // MISMO margen lateral que las tarjetas de abajo ([ListHorizontalMargin]): el
+                    // encabezado y su acción tienen que caer sobre los mismos dos bordes verticales
+                    // que Favoritos y el grupo de listas, o la columna se lee torcida. Estuvo en
+                    // `start = 20.dp` y el título sobresalía 4dp hacia dentro respecto de las
+                    // tarjetas.
+                    .padding(
+                        start = ListHorizontalMargin,
+                        end = ListHorizontalMargin,
+                        top = 4.dp,
+                        bottom = 8.dp
+                    ),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     text = stringResource(R.string.playlist_section_title),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.titleMediumEmphasized,
                     color = MaterialTheme.colorScheme.onSurface,
+                    // Una línea y elipsis, con `weight` para que sea el TÍTULO el que ceda: hoy es
+                    // un literal corto, pero una traducción larga o una pantalla chica lo envolverían
+                    // a dos líneas y estirarían el encabezado. Que se recorte el rótulo es correcto;
+                    // que se recorte la acción, no.
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                FilledTonalIconButton(
+                Spacer(modifier = Modifier.width(8.dp))
+                // Tamaño de glifo y separación DERIVADOS de la altura del botón, no literales: el
+                // spec de M3 saca los dos de ella (`iconSizeFor` / `iconSpacingFor`), igual que el
+                // botón primario del onboarding.
+                val createButtonHeight = ButtonDefaults.MinHeight
+                // **TextButton y no `FilledTonalButton`** (19 ago 2026): es la acción de un
+                // ENCABEZADO DE SECCIÓN, que en M3 va sin contenedor. Relleno tonal, esta pantalla
+                // tenía TRES superficies `secondaryContainer` a la vez —la píldora de la pestaña
+                // activa (navegación), la tarjeta de Favoritos (contenido) y este botón (acción)—,
+                // o sea el mismo color diciendo tres cosas distintas y ninguna jerarquía entre
+                // ellas. Sin contenedor quedan dos, y cada una conserva su significado.
+                //
+                // La acción NO pierde alcance: sigue en el encabezado, a la vista, con el mismo
+                // área táctil; lo que pierde es la mancha de color con la que competía contra el
+                // contenido de la pestaña.
+                TextButton(
                     onClick = onCreatePlaylist,
-                    shapes = IconButtonDefaults.shapes(),
-                    modifier = Modifier
-                        .size(40.dp)
-                        .semantics { contentDescription = createDesc }
+                    // Shape-morph al presionar, como el resto de botones de la app.
+                    shapes = ButtonDefaults.shapes()
                 ) {
-                    MaterialSymbol("add", size = 22.sp, color = MaterialTheme.colorScheme.onSecondaryContainer)
+                    MaterialSymbol(
+                        // `playlist_add` y no `add` a secas: el glifo dice QUÉ se añade, que es lo
+                        // mismo que hace la etiqueta de al lado. Es el que ya usa "añadir canciones"
+                        // en el detalle de lista.
+                        "playlist_add",
+                        // Sin `color` explícito: lo hereda del `LocalContentColor` que ya provee el
+                        // botón —el mismo que usa el `Text` de al lado—. Escrito a mano
+                        // (`onSecondaryContainer`) era el valor correcto pero DUPLICADO, así que un
+                        // cambio de `colors` en el botón dejaría el glifo con el color viejo y el
+                        // texto con el nuevo. Mismo criterio que la flecha del onboarding.
+                        size = ButtonDefaults.iconSizeFor(createButtonHeight).value.sp
+                    )
+                    Spacer(modifier = Modifier.width(ButtonDefaults.iconSpacingFor(createButtonHeight)))
+                    Text(
+                        text = stringResource(R.string.playlist_create_action),
+                        style = MaterialTheme.typography.labelLargeEmphasized
+                    )
                 }
+            }
+        }
+
+        // Sin listas propias, la sección quedaba en BLANCO bajo su encabezado — con Favoritos
+        // arriba, la pantalla se leía como si algo hubiera fallado al cargar. El mensaje no repite
+        // la acción: "Crear lista" está a la vista justo encima, en el encabezado, y un segundo
+        // botón a dos dedos del primero es la misma decisión ofrecida dos veces.
+        if (playlists.isEmpty()) {
+            item(key = "playlists_empty", contentType = "emptyState") {
+                NoPlaylistsState()
             }
         }
 
         // Resto de playlists
         itemsIndexed(playlists, key = { _, item -> item.id }) { index, playlist ->
-            val shape = rememberListItemShape(index = index, count = playlists.size)
             val meta = coverMeta[playlist.id]
 
             PlaylistItem(
                 playlist = playlist,
                 songCount = meta?.songCount ?: 0,
                 arts = meta?.arts.orEmpty(),
-                shape = shape,
+                // El reparto de esquinas del grupo lo hace el `SegmentedListItem` de dentro
+                // (`ListItemDefaults.segmentedShapes`), que además aporta el morph al presionar.
+                index = index,
+                count = playlists.size,
                 onClick = { onPlaylistClick(playlist.id) },
                 onPlay = { onPlayPlaylist(playlist.id) },
                 onRename = { playlistToRename = playlist },
@@ -159,6 +232,49 @@ fun PlaylistList(
     }
 }
 
+/**
+ * Estado vacío de la sección "Tus listas": glifo, título y una línea que dice para qué sirven.
+ *
+ * **Sin botón**, al revés que [EmptyPlaylistState] en el detalle de lista. Allí es obligatorio —
+ * con la lista vacía no se dibuja la cabecera con sus acciones, así que sin él no habría NINGUNA
+ * forma de añadir canciones—; aquí "Crear lista" vive en el encabezado que este bloque tiene
+ * inmediatamente encima, y repetirla sería ofrecer la misma decisión dos veces separadas por unos
+ * pocos dp.
+ *
+ * Mismas medidas y roles que los otros estados vacíos de la app (glifo de 64sp en `outline`,
+ * título `titleMedium`, apoyo `bodyMedium` en `onSurfaceVariant`): son el lenguaje de "aquí no hay
+ * nada" y tienen que verse iguales en toda la biblioteca.
+ */
+@Composable
+private fun NoPlaylistsState() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = ListHorizontalMargin, vertical = 48.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        MaterialSymbol(
+            "queue_music",
+            fill = true,
+            color = MaterialTheme.colorScheme.outline,
+            size = 64.sp
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            text = stringResource(R.string.playlist_none_created),
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = stringResource(R.string.playlist_none_created_subtitle),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
+        )
+    }
+}
+
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun FavoritesItem(
@@ -170,7 +286,7 @@ private fun FavoritesItem(
             .fillMaxWidth()
             // Grupo propio: margen segmentado + aire antes del grupo de listas (M3 Expressive
             // separa grupos con un gap claro, no con los 2dp internos entre filas).
-            .padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+            .padding(start = ListHorizontalMargin, end = ListHorizontalMargin, bottom = 12.dp),
         onClick = onClick,
         // PÍLDORA (lados totalmente redondos): distingue a Favoritos como acceso especial,
         // separado del grupo segmentado de listas de abajo.
@@ -202,8 +318,7 @@ private fun FavoritesItem(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = stringResource(R.string.common_favorites),
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.bodyLargeEmphasized,
                     color = MaterialTheme.colorScheme.onSecondaryContainer
                 )
                 Text(
@@ -222,18 +337,20 @@ private fun PlaylistItem(
     playlist: Playlist,
     songCount: Int,
     arts: List<String>,
-    shape: androidx.compose.ui.graphics.Shape,
+    index: Int,
+    count: Int,
     onClick: () -> Unit,
     onPlay: () -> Unit,
     onRename: () -> Unit,
     onDelete: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // Fila agrupada COMPARTIDA (GroupedListRow envuelve el ListItem real de M3): padding, anatomía
-    // y gap salen del spec, los mismos que Todas/Cola/Artistas. El collage de carátulas va en el
-    // slot leading.
+    // Fila agrupada COMPARTIDA (GroupedListRow es el `SegmentedListItem` de M3): padding, anatomía,
+    // gap y morph al presionar salen del spec, los mismos que Artistas. El collage de carátulas va
+    // en el slot leading.
     GroupedListRow(
-        shape = shape,
+        index = index,
+        count = count,
         onClick = onClick,
         modifier = modifier,
         leadingContent = { PlaylistThumb(arts = arts) },
@@ -282,7 +399,7 @@ private fun PlaylistItemMenu(onRename: () -> Unit, onDelete: () -> Unit) {
     // Píldora vertical tonal, MISMO componente y colores que el ⋮ de "Todas"/Artistas
     // (rememberRowActionColors sobre el fondo real de la fila): las listas de navegación comparten
     // trailing. Antes era un IconButton pelado de 24sp sin contenedor, que rompía esa consistencia.
-    val colors = rememberRowActionColors(MaterialTheme.colorScheme.surfaceContainerHigh)
+    val colors = rememberRowActionColors(MaterialTheme.colorScheme.surface)
     Box {
         FilledIconButton(
             onClick = { showMenu = true },
@@ -298,7 +415,7 @@ private fun PlaylistItemMenu(onRename: () -> Unit, onDelete: () -> Unit) {
             MaterialSymbol("more_vert", size = 18.sp, color = colors.content)
         }
         // Menú SEGMENTADO (popup + grupo), no el `DropdownMenu` clásico: ver la nota en SortChip.
-        DropdownMenuPopup(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+        AppMenuPopup(expanded = showMenu, onDismissRequest = { showMenu = false }) {
             DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
                 DropdownMenuItem(
                     onClick = {

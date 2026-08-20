@@ -36,6 +36,21 @@ object JankProbe {
     /** Se resuelve una vez en [start]; en release solo es `true` con la propiedad de sistema puesta. */
     @PublishedApi internal var enabled = false
 
+    /**
+     * ¿La sonda está activa?
+     *
+     * El contrato de [mark] y compañía —apagadas cuestan un `if`— vale para la MARCA, no para lo que
+     * la envuelva. Un `LaunchedEffect` con clave o un `snapshotFlow(...).collect` puestos solo para
+     * sondear cuestan igual con la sonda apagada: el primero cancela y relanza una corrutina en cada
+     * cambio de clave, el segundo deja un colector vivo. Envolver ESE efecto en
+     * `if (JankProbe.isEnabled)` es lo que devuelve el coste a cero.
+     *
+     * Es estable dentro de una sesión (se resuelve una sola vez en [start], antes de la primera
+     * composición), así que usarlo como condición en composición no cambia la estructura del árbol a
+     * mitad de camino ni desalinea los `remember` que vengan detrás.
+     */
+    val isEnabled: Boolean get() = enabled
+
     private val marks = ArrayDeque<String>()
     private var armedAtMs = 0L
     private var lastFrameNanos = 0L

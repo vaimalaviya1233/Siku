@@ -109,7 +109,6 @@ fun AlbumsScreen(
                 TonalChip {
                     Text(
                         text = pluralStringResource(R.plurals.album_count, albums.size, albums.size),
-                        style = MaterialTheme.typography.labelLarge,
                         color = colorScheme.onSecondaryContainer
                     )
                 }

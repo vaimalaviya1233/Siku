@@ -22,6 +22,6 @@ rootProject.name = "SikuMusic"
 include(":app")
 include(":core")
 // Módulo de PRUEBA que no entra en el APK: solo existe para GENERAR el baseline profile
-// (`./gradlew :baselineprofile:generateBaselineProfile` con un device/emulador conectado).
+// (`./gradlew :app:generateBaselineProfile` con un device/emulador conectado).
 // Ver `baselineprofile/build.gradle.kts`.
 include(":baselineprofile")

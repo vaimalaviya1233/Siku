@@ -1,10 +1,12 @@
 package com.qhana.siku.data.repository
 
+import com.qhana.siku.data.config.AppConfig
 import com.qhana.siku.data.local.AlbumSummary
 import com.qhana.siku.data.local.ArtistDao
 import com.qhana.siku.data.local.ArtistEntity
 import com.qhana.siku.data.local.ArtistSummary
 import com.qhana.siku.data.local.GenreSummary
+import com.qhana.siku.data.local.RelatedArtist
 import com.qhana.siku.data.model.AlbumSortOrder
 import com.qhana.siku.data.model.ArtistSortOrder
 import com.qhana.siku.data.local.SongDao
@@ -29,6 +31,20 @@ class BrowseRepository @Inject constructor(
         /** Un género ya reproducido merece su collage aunque tenga una sola canción. */
         const val GENRE_ARTS_MIN_COUNT = 1
     }
+
+    /**
+     * ¿Sigue teniendo sentido elegir origen? Misma consulta —y por tanto misma definición— que la
+     * que consume la pestaña Todas por `ISongRepository`; ver [SongDao.buildSourceSplitQuery]. La
+     * necesitan Artistas y Álbumes para SANEAR sus propios filtros: si la última canción sin
+     * descargar termina de bajarse con el chip "Nube" puesto, la lista quedaría vacía y sin ningún
+     * control a la vista para deshacerlo.
+     */
+    fun hasSourceSplit(): Flow<Boolean> =
+        songDao.hasSongsMatchingFlow(SongDao.buildSourceSplitQuery())
+
+    /** ¿Hay canciones de la fuente local? Condición extra del chip "Local". */
+    fun hasLocalSongs(): Flow<Boolean> =
+        songDao.hasSongsMatchingFlow(SongDao.buildExistsQuery(setOf(SongSourceFilter.LOCAL)))
 
     fun getArtists(
         sort: ArtistSortOrder,
@@ -113,6 +129,13 @@ class BrowseRepository @Inject constructor(
         }
         return flow.map { list -> list.map(SongEntity::toSong) }
     }
+
+    /**
+     * Artistas que comparten género con [seedArtist], para "Porque escuchaste a X". Ver
+     * [SongDao.getRelatedArtistsFlow] — incluido el límite de lo que este criterio puede relacionar.
+     */
+    fun getRelatedArtists(seedArtist: String, limit: Int): Flow<List<RelatedArtist>> =
+        songDao.getRelatedArtistsFlow(seedArtist, AppConfig.UNKNOWN_ARTIST, limit)
 
     /** Limpia el cache de artistas (fotos Deezer + selecciones manuales). Se usa en logout. */
     suspend fun clearArtistCache() = artistDao.deleteAll()

@@ -1046,6 +1046,24 @@ class MusicPreferences(context: Context) {
         prefFlow { it[KEY_NOW_PLAYING_PROGRESS_THICKNESS] ?: DEFAULT_PROGRESS_THICKNESS_DP }
 
     /**
+     * HANDLE (el palo vertical) de la barra de progreso del NowPlaying, en los dos modos.
+     * `true` = permanente, como en las barras del spec Expressive (y el diseño actual, de ahí el
+     * default); `false` = aparece solo mientras se arrastra, que es la otra forma que la barra ya
+     * sabía dibujar — no desaparece del todo porque al buscar hace falta ver dónde va a caer el
+     * dedo, y la geometría del hueco fill↔palo↔riel está construida para interpolar entre las dos.
+     */
+    fun saveNowPlayingProgressHandle(enabled: Boolean) = update {
+        it[KEY_NOW_PLAYING_PROGRESS_HANDLE] = enabled
+    }
+
+    fun loadNowPlayingProgressHandle(): Boolean =
+        cache[KEY_NOW_PLAYING_PROGRESS_HANDLE] ?: DEFAULT_PROGRESS_HANDLE
+
+    /** Reactivo por el mismo motivo que [nowPlayingWavyProgressFlow] (Ajustes ↔ NowPlaying). */
+    val nowPlayingProgressHandleFlow: Flow<Boolean> =
+        prefFlow { it[KEY_NOW_PLAYING_PROGRESS_HANDLE] ?: DEFAULT_PROGRESS_HANDLE }
+
+    /**
      * Forma del MiniPlayer: `true` = rectángulo redondeado, `false` = píldora (el diseño actual y
      * el default, para no cambiarle la app a nadie que ya la tenga instalada).
      *
@@ -1235,6 +1253,14 @@ class MusicPreferences(context: Context) {
          * módulo no puede importar un token de Compose. Si uno cambia, cambian los dos.
          */
         const val DEFAULT_PROGRESS_THICKNESS_DP = 12
+        private val KEY_NOW_PLAYING_PROGRESS_HANDLE =
+            booleanPreferencesKey("now_playing_progress_handle")
+
+        /**
+         * El palo viene PUESTO: es el diseño que ya tiene la app publicada y el de las barras de
+         * progreso del spec Expressive. Apagarlo lo deja como affordance de búsqueda.
+         */
+        const val DEFAULT_PROGRESS_HANDLE = true
         private val KEY_MINI_PLAYER_ROUNDED_RECT = booleanPreferencesKey("mini_player_rounded_rect")
         private val KEY_PLAYER_GESTURES = booleanPreferencesKey("player_gestures")
 

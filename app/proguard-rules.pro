@@ -38,4 +38,21 @@
 -dontwarn com.google.crypto.tink.**
 -dontwarn com.nimbusds.**
 
+# --- Logging de diagnóstico fuera de la release ---
+# `AppLogger` ya gatea con BuildConfig.DEBUG lo que de verdad cuesta —el consumidor del canal, el
+# writer y toda la I/O de archivo—, pero su llamada a logcat quedaba fuera del gate, y con ella la
+# construcción de cada string. `MusicController` la invoca en cada evento de reproducción.
+#
+# Se quitan solo los tres niveles informativos. `w` y `e` SE QUEDAN: son los que sirven cuando llega
+# el informe de fallo de un usuario, que es la única ventana de diagnóstico que hay en una app
+# distribuida por GitHub y sin telemetría.
+#
+# `assumenosideeffects` deja además que R8 elimine el cálculo de los argumentos, así que las
+# concatenaciones que solo alimentaban un `Log.d` desaparecen con él.
+-assumenosideeffects class android.util.Log {
+    public static int d(...);
+    public static int v(...);
+    public static int i(...);
+}
+
 # Media3, Compose, Room, Hilt, Coil y OkHttp traen consumer rules propias.

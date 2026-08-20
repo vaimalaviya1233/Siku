@@ -200,11 +200,31 @@ class ArtistImageRepository @Inject constructor(
      * Backfill data-driven de TODAS las fotos pendientes de la biblioteca: la lista sale de
      * la BD, no de qué filas llegue a mostrar la UI. Reutiliza [ensureArtistImage], así que
      * hereda idempotencia, espera de not-found y rate-limit — es seguro dispararlo varias veces
-     * y desde varios sitios (init de BrowseViewModel, fin de cada sync, cambio de red). El [Semaphore] hace
-     * de límite de concurrencia real: se lanza una corrutina por artista pero solo
-     * [MAX_CONCURRENT_FETCHES] tocan red a la vez.
+     * y desde varios sitios (la biblioteca al componerse, el fin de cada sync, un cambio de red).
+     * El [Semaphore] hace de límite de concurrencia real: se lanza una corrutina por artista pero
+     * solo [MAX_CONCURRENT_FETCHES] tocan red a la vez.
+     *
+     * **Una pasada a la vez** ([backfillRunning]): las llamadas que caen con otra en marcha se van
+     * en el acto. `ensureArtistImage` ya impedía que se duplicaran las PETICIONES —tiene su propio
+     * `attemptedThisSession`—, pero no el trabajo de alrededor: dos disparos casi simultáneos hacían
+     * dos veces la consulta de pendientes y lanzaban dos veces una corrutina por artista, que en una
+     * biblioteca grande son cientos que solo sirven para descubrir que no hay nada que hacer. No se
+     * pierde nada por saltar: quien llega segundo quiere exactamente lo que el primero está
+     * haciendo, y los disparos posteriores (red, sync) siguen cubriendo lo que quede.
      */
     suspend fun backfillMissingImages(): Unit = coroutineScope {
+        if (!backfillRunning.compareAndSet(false, true)) return@coroutineScope
+        try {
+            runBackfill()
+        } finally {
+            backfillRunning.set(false)
+        }
+    }
+
+    /** Ver [backfillMissingImages]: una pasada a la vez. */
+    private val backfillRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private suspend fun runBackfill(): Unit = coroutineScope {
         val pending = artistDao.getArtistNamesNeedingImage(
             now = System.currentTimeMillis(),
             baseTtlMs = NOT_FOUND_BASE_TTL_MS,

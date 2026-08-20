@@ -3,7 +3,10 @@ package com.qhana.siku.ui
 import android.view.View
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.core.Transition
+import androidx.compose.animation.core.ExperimentalTransitionApi
+import androidx.compose.animation.core.createChildTransition
 import androidx.compose.material3.ColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -95,9 +98,12 @@ enum class ContainerOriginRole {
 }
 
 /**
- * La fila que participa en el morph del reproductor AHORA MISMO: qué canción y si está oculta. Lo
- * calcula [com.qhana.siku.ui.MusicPlayerScreen] a partir del origen congelado del morph, la
- * transición de la capa y la fila en preparación (`MusicAppState.pendingRowOrigin`).
+ * La superficie que participa en el morph del reproductor AHORA MISMO: qué canción y si está oculta.
+ * Lo calcula [com.qhana.siku.ui.MusicPlayerScreen] a partir del origen congelado del morph, la
+ * transición de la capa y la superficie en preparación (`MusicAppState.pendingRowOrigin`).
+ *
+ * La identidad es la CANCIÓN. En una lista eso es exacto (una canción, una fila); en el inicio admite
+ * un empate entre carruseles, asumido a propósito — ver `SongRowContainer`.
  */
 data class RowOrigin(val songId: String, val hidden: Boolean)
 
@@ -117,7 +123,12 @@ data class RowOrigin(val songId: String, val hidden: Boolean)
 @Stable
 class RowOriginHost internal constructor(
     private val current: State<RowOrigin?>,
-    private val appState: MusicAppState?
+    private val appState: MusicAppState?,
+    /**
+     * La transición de la CAPA del reproductor, para que la punta de la fila cuelgue de ella
+     * ([rowVisibility]). Null fuera de la app (host por defecto): entonces la fila no puede ser punta.
+     */
+    val layerTransition: Transition<PlayerLayerState>? = null
 ) {
     fun roleOf(songId: String): ContainerOriginRole? {
         val origin = current.value ?: return null
@@ -125,8 +136,47 @@ class RowOriginHost internal constructor(
         return if (origin.hidden) ContainerOriginRole.HIDDEN else ContainerOriginRole.VISIBLE
     }
 
-    fun onRowPlaced(songId: String) { appState?.onRowPlaced(songId) }
-    fun onRowDisposed(songId: String) { appState?.onRowDisposed(songId) }
+    fun onRowPlaced(songId: String, instance: Any) { appState?.onRowPlaced(songId, instance) }
+    fun onRowDisposed(songId: String, instance: Any) { appState?.onRowDisposed(songId, instance) }
+
+    /**
+     * La visibilidad de la punta de una fila, **como transición HIJA de la de la capa** — y ese
+     * parentesco es el arreglo entero de "la fila se queda en blanco al cerrar" (19 ago 2026).
+     *
+     * La animación de bounds de un `sharedBounds` solo corre mientras
+     * `SharedTransitionScope.isTransitionActive`, que a su vez pregunta a `BoundsAnimation.isRunning`;
+     * y ése **sube por `parentTransition` hasta la Transition RAÍZ** de la punta que es DESTINO y
+     * compara su `currentState` con su `targetState`. De ahí salía una asimetría que no se veía
+     * leyendo el código:
+     *
+     *  - **Abriendo**, el destino es el REPRODUCTOR, cuya raíz es la transición de la capa: dura lo
+     *    que el morph, así que había ventana y el container transform se veía.
+     *  - **Cerrando**, el destino es la FILA. Con un `updateTransition` propio —que es lo que había—
+     *    su raíz era ella misma, sin relación con la capa, y la ventana no daba: **el bounds SALTABA**.
+     *    Medido cuadro a cuadro: el reproductor pasaba de pantalla completa a nada en UN frame (16 ms)
+     *    y solo viajaba la carátula (que va por otro camino, `sharedElementWithCallerManagedVisibility`,
+     *    con su propia transición interna). El hueco de la fila era el reproductor ya encogido a su
+     *    tamaño, tapándola mientras se disolvía.
+     *
+     * La prueba que lo aisló: **desde la PÍLDORA funcionaba en los dos sentidos**, y la píldora es la
+     * otra punta de origen — la única diferencia con la fila es que la suya cuelga del
+     * `AnimatedContent` de la capa, o sea de la misma raíz. Colgar aquí la de la fila borra esa
+     * asimetría: las dos puntas de origen corren contra el mismo reloj.
+     *
+     * El mapeo es el INVERSO del que usa el reproductor (`PlayerOverlay.playerVisibility`) y no una
+     * traducción de [ContainerOriginRole], a propósito: es la MISMA regla que ya escribía
+     * `RowOrigin.hidden` (`hidden = playerExpanded`), leída del sitio del que ya salía. El frame de
+     * PREPARACIÓN encaja solo: la capa todavía es `Collapsed`, que mapea a `Visible`, que es el papel
+     * que le toca.
+     *
+     * Devuelve `null` sin capa (fuera de la app): sin reloj no hay punta que declarar.
+     */
+    @OptIn(ExperimentalTransitionApi::class)
+    @Composable
+    fun rowVisibility(): Transition<EnterExitState>? =
+        layerTransition?.createChildTransition(label = "rowOrigin") { layer ->
+            if (layer == PlayerLayerState.Expanded) EnterExitState.PostExit else EnterExitState.Visible
+        }
 }
 
 /** Host vacío por defecto: una instancia estable, para que el local nunca cambie de objeto. */
@@ -134,6 +184,37 @@ private val NoRowOrigin = RowOriginHost(mutableStateOf(null), appState = null)
 
 /** Ver [RowOriginHost]. Estático: su valor es un objeto estable que no cambia; lo que cambia va dentro en `State`. */
 val LocalRowOrigin = staticCompositionLocalOf { NoRowOrigin }
+
+/**
+ * ¿El subárbol del REPRODUCTOR está EN PANTALLA ahora mismo?
+ *
+ * El NowPlaying se compone UNA vez —cuando aparece la primera canción— y se queda compuesto para
+ * siempre (ver `PlayerOverlay`): componerlo en cada apertura costaba 25-58 ms en el frame del tap,
+ * justo el que arranca el *container transform*. El precio de esa permanencia es que todo lo que el
+ * subárbol pone en marcha sigue en marcha con el reproductor cerrado, y la regla **"cero productores
+ * continuos de frames en superficies persistentes"** (ver la sección Motion de CLAUDE.md, y el buffer
+ * stuffing que costó la saga del 17 ago) vale IGUAL para lo que no se ve: un giro de cookie o una onda
+ * animándose detrás de la biblioteca gastan lo mismo y ensucian la misma cola de SurfaceFlinger.
+ *
+ * Por eso vale `false` mientras el reproductor está guardado, y lo leen los tres relojes del player
+ * (el giro del botón de play, la fase de la onda y su interpolación del progreso) y el marquee del
+ * título. **Sigue valiendo `true` durante el morph**: lo que se está encogiendo hacia la píldora tiene
+ * que seguir vivo hasta que aterrice.
+ *
+ * **Se REPUBLICA en `NowPlayingScreen` con un `false` extra: cuando una de sus hojas a pantalla
+ * completa lo tapa** (letras, cola, ecualizador — ver [com.qhana.siku.ui.components.SheetOverlay]).
+ * Es el mismo razonamiento llevado al otro caso en que el reproductor no se ve, y el que más dura:
+ * una hoja se deja abierta minutos. Ese provider envuelve SOLO el layout del reproductor, así que lo
+ * que se lee fuera de él —el `keepScreenOn` de las letras, que con la hoja abierta tiene que seguir
+ * encendido; el reseteo del estado al guardarse; `rememberAudioFormat`— sigue significando "el
+ * reproductor está abierto" y no cambia de valor por una hoja.
+ *
+ * Va por CompositionLocal —y `compositionLocalOf`, no `static`, para que solo recompongan sus
+ * lectores— por el mismo motivo que [LocalRowOrigin]: los tres relojes están a cinco firmas de
+ * distancia y atravesarlas todas por un detalle de la animación no compensa. Default `true`: quien no
+ * viva bajo el reproductor (el modo ambiental, cualquier pantalla suelta) se comporta como siempre.
+ */
+val LocalPlayerOnScreen = compositionLocalOf { true }
 
 /**
  * El [SharedTransitionScope] de la app, publicado por la misma razón que [LocalRowOrigin]:
@@ -202,13 +283,85 @@ fun ProvideAppSharedTransitionScope(
 }
 
 /**
+ * Deja fuera de los shared elements un subárbol que está compuesto y COLOCADO pero que el usuario **no
+ * está viendo**. Es la contrapartida de [ProvideAppSharedTransitionScope]: aquél publica el scope,
+ * éste lo retira donde no toca.
+ *
+ * ## El bug que lo trajo (19 ago 2026): "el morph no ocurre, pero solo en ciertas canciones"
+ *
+ * Reporte: abrir «16» de Allison o «A Light That Never Comes» desde "Todas" abría el reproductor sin
+ * animación, y las canciones vecinas iban bien — **independiente de su posición en la lista**. Eso
+ * descarta el scroll, la fila y el reciclado: lo que tenían de especial esas dos es que además salían
+ * en el carrusel **"Lo que más escuchas" de la pestaña INICIO**.
+ *
+ * El `HorizontalPager` de la biblioteca va con `beyondViewportPageCount = 1`, así que la pestaña
+ * vecina no solo está compuesta: está **colocada** (fuera del viewport, pero colocada, que es lo que
+ * cuenta para un shared element). Y el papel de punta se decide por CANCIÓN
+ * ([RowOriginHost.roleOf]), no por superficie — así que al tocar la fila, la tarjeta invisible del
+ * Inicio tomaba el papel `VISIBLE` **a la vez** que la fila. Dos puntas de la misma key declarándose
+ * las dos como destino, y ahí Compose no anima nada: el contenido aparece quieto en su posición
+ * final. Es exactamente el fallo que `ContainerTransformOrigin` ya documenta ("de las dos puntas de
+ * una key solo UNA puede ser destino"), entrando por una puerta que nadie había mirado.
+ *
+ * El empate ENTRE CARRUSELES del inicio está asumido a propósito (ver `SongRowContainer`), pero aquél
+ * es entre dos superficies que el usuario VE; éste es contra una que no existe para él, y encima
+ * gana a veces. No es lo mismo y no estaba decidido.
+ *
+ * ## La regla
+ *
+ * **Una superficie que no se ve no puede ser punta de un shared element.** Es la misma familia que
+ * las otras dos anulaciones del repo —las filas de las hojas del reproductor, y el gate por VENTANA
+ * de [appSharedTransitionScope]— y se resuelve igual: retirando el scope, que es el interruptor
+ * general (sin él, ni el contenedor ni la carátula declaran nada, y las filas ni preguntan por su
+ * papel).
+ *
+ * Cubre de paso lo que habría pasado con artista y álbum: el carrusel de artistas del Inicio y la
+ * grilla de la pestaña Artistas declaran la MISMA key (`artist_photo_<nombre>`) y son vecinas de
+ * pestaña, así que el mismo empate esperaba ahí para el día que alguien navegara a un detalle.
+ *
+ * Retirar el scope invalida solo a sus LECTORES (es `compositionLocalOf`, no static), o sea las
+ * superficies que declaran puntas — no la página entera.
+ *
+ * ## Una SOLA llamada a `content()`, y eso es load-bearing
+ *
+ * La primera versión (19 ago) era `if (visible) content() else CompositionLocalProvider(…) { content() }`,
+ * y eso **recreaba la pestaña entera en cada cambio**: las dos ramas de un `if` son grupos DISTINTOS
+ * del slot table, así que cambiar de rama no cambia un valor — descarta el subárbol y lo compone
+ * desde cero. Medido con Perfetto en el frame de un cambio de pestaña: 22 `Compose:onForgotten`,
+ * 20 `Composer.dispose`, 94 `Constructing StaticLayout` (todos los textos de la página medidos de
+ * nuevo) y 16 `AsyncImagePainter.onRemembered` (las carátulas visibles vueltas a pedir), con
+ * `measureAndLayout` en 21 ms de los 34 del frame. Y al cambiar de página cambian de estado DOS
+ * páginas, así que se pagaba dos veces. Ver [[project_aug19_jank_cambio_pestana]].
+ *
+ * Con el provider incondicional la estructura no se mueve: lo único que cambia es el VALOR del local,
+ * que es justo lo que la nota de arriba prometía.
+ *
+ * @param visible si este subárbol es el que el usuario está viendo. Con `false` no declara nada.
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+fun SharedTransitionGate(visible: Boolean, content: @Composable () -> Unit) {
+    val scope = LocalAppSharedTransitionScope.current
+    CompositionLocalProvider(
+        LocalAppSharedTransitionScope provides scope.takeIf { visible },
+        content = content
+    )
+}
+
+/**
  * El [RowOriginHost] de la app: el origen de fila calculado por `MusicPlayerScreen` en un `State`, con
  * los avisos cableados a [appState]. Único constructor público — así el host y el estado que publica
  * nacen juntos.
  */
 @Composable
-fun rememberRowOriginHost(rowOrigin: State<RowOrigin?>, appState: MusicAppState): RowOriginHost =
-    remember(rowOrigin, appState) { RowOriginHost(rowOrigin, appState) }
+fun rememberRowOriginHost(
+    rowOrigin: State<RowOrigin?>,
+    appState: MusicAppState,
+    layerTransition: Transition<PlayerLayerState>
+): RowOriginHost =
+    remember(rowOrigin, appState, layerTransition) {
+        RowOriginHost(rowOrigin, appState, layerTransition)
+    }
 
 /**
  * State holder de la app (patrón `rememberAppState` de Now in Android): agrupa el NavController,
@@ -315,14 +468,22 @@ class MusicAppState(
     private var pendingRowOriginPlain: String? = null
 
     /**
-     * Filas de canción COLOCADAS ahora mismo en la ventana de la app, por id. Lo mantienen las propias
-     * filas (`SongRowContainer`: alta en cada `onPlaced`, baja al descomponerse) y lo consulta
-     * [openPlayer] para decidir, en el instante del tap y sin esperar a nada, si hay una fila que pueda
-     * ser origen. Colocadas y no compuestas: el prefetch de `LazyColumn` compone filas que no se ven, y
-     * una fila que no se coloca nunca daría la señal de [onRowPlaced] con la que se abre. Conjunto plano
-     * y no estado de snapshot: nadie reacciona a él, se consulta.
+     * Superficies de canción COLOCADAS ahora mismo en la ventana de la app, por id de canción. Las
+     * mantienen ellas mismas (`SongRowContainer`: alta en cada `onPlaced`, baja al descomponerse) y lo
+     * consulta [openPlayer] para decidir, en el instante del tap y sin esperar a nada, si hay una que
+     * pueda ser origen. Colocadas y no compuestas: el prefetch de `LazyColumn` compone filas que no se
+     * ven, y una que no se coloca nunca daría la señal de [onRowPlaced] con la que se abre. Estructura
+     * plana y no estado de snapshot: nadie reacciona a ella, se consulta.
+     *
+     * **Guarda un CONJUNTO DE INSTANCIAS por canción, no un booleano, y eso importa desde que las
+     * tarjetas del inicio son origen** (17 ago 2026). Los carruseles no deduplican entre sí, así que la
+     * misma canción puede tener DOS superficies vivas —"Lo que más escuchas" y el carrusel del artista
+     * solapan por construcción—. Con un `HashSet<String>` plano, reciclar una de ellas al scrollear
+     * borraba el id aunque la otra siguiera en pantalla, y el siguiente tap sobre la superviviente
+     * abría SIN animación (la comprobación de [openPlayer] decía que no había origen colocado). Con un
+     * token por instancia el alta es idempotente y la baja solo cuenta cuando se va la última.
      */
-    private val placedRows = HashSet<String>()
+    private val placedRows = HashMap<String, MutableSet<Any>>()
 
     /**
      * Entrada del back stack a la que volver para RE-ABRIR el player, cuando se navegó a un detalle
@@ -351,11 +512,12 @@ class MusicAppState(
     fun openPlayer(origin: PlayerArtOrigin = PlayerArtOrigin.NONE) {
         JankProbe.arm { "openPlayer($origin) song=${currentSong.value?.title}" }
         if (origin == PlayerArtOrigin.ROW) {
-            // La fila de origen es la canción ANUNCIADA en este mismo handler (announceSelection corre
-            // antes que este método en todos los call sites de ROW). `.value` y no un colector: es lo
-            // que garantiza que sea la tocada y no la anterior. Ver [playerOriginSongId].
+            // La superficie de origen es la de la canción ANUNCIADA en este mismo handler
+            // (announceSelection corre antes que este método en todos los call sites de ROW).
+            // `.value` y no un colector: es lo que garantiza que sea la tocada y no la anterior.
+            // Ver [playerOriginSongId].
             val rowId = currentSong.value?.id
-            if (rowId != null && rowId in placedRows) {
+            if (rowId != null && placedRows.containsKey(rowId)) {
                 playerArtOrigin = PlayerArtOrigin.ROW
                 playerOriginSongId = rowId
                 pendingRowOrigin = rowId
@@ -375,8 +537,8 @@ class MusicAppState(
      * que ofrecer y el reproductor puede expandirse. Esas dos escrituras van juntas para que la fila
      * pase de VISIBLE a HIDDEN en la misma composición, sin un frame en `null` que la desdeclare.
      */
-    fun onRowPlaced(songId: String) {
-        placedRows.add(songId)
+    fun onRowPlaced(songId: String, instance: Any) {
+        placedRows.getOrPut(songId) { HashSet() }.add(instance)
         // La copia plana, no el State: esto corre en el layout de cada fila, en cada colocación.
         if (pendingRowOriginPlain != songId) return
         JankProbe.mark { "fila origen colocada → expandir" }
@@ -385,14 +547,19 @@ class MusicAppState(
     }
 
     /** Ver [placedRows]: ¿hay una fila de esta canción colocada en pantalla ahora mismo? */
-    fun isRowPlaced(songId: String): Boolean = songId in placedRows
+    fun isRowPlaced(songId: String): Boolean = placedRows.containsKey(songId)
 
     /**
-     * Ver [placedRows]. Si la fila que se estaba preparando desaparece antes de avisar (la lista se
-     * recompuso justo en ese frame), no hay a quién esperar: se abre sin origen en vez de quedarse
-     * esperando a una punta que ya no existe.
+     * Ver [placedRows]. Si la ÚLTIMA superficie de la canción que se estaba preparando desaparece
+     * antes de avisar (la lista se recompuso justo en ese frame), no hay a quién esperar: se abre sin
+     * origen en vez de quedarse esperando a una punta que ya no existe. Mientras quede otra viva no
+     * pasa nada — de eso va el conjunto de instancias.
      */
-    fun onRowDisposed(songId: String) {
+    fun onRowDisposed(songId: String, instance: Any) {
+        val instances = placedRows[songId] ?: return
+        instances.remove(instance)
+        // Solo cuando se va la ÚLTIMA superficie de esa canción: ver [placedRows].
+        if (instances.isNotEmpty()) return
         placedRows.remove(songId)
         if (pendingRowOrigin == songId) {
             pendingRowOrigin = null

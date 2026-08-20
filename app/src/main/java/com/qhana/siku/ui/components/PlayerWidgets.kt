@@ -17,10 +17,10 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
+import com.materialkolor.contrast.Contrast
 import com.materialkolor.hct.Hct
 import com.qhana.siku.ui.theme.appSpatialSpec
 
@@ -29,6 +29,12 @@ import com.qhana.siku.ui.theme.appSpatialSpec
  * Píldora de contenedor SÓLIDO plano (sin sombra ni translucidez), mismo tratamiento
  * que la barra de acciones. El contenido debe usar [onContainerColor] para garantizar
  * contraste sobre el color de contenedor.
+ *
+ * **El estilo del label lo PONE el chip** (`labelLarge`), no cada caller: es el mismo que los
+ * chips de M3 comparten con los botones (`AssistChipTokens.LabelTextFont`), y como acá el chip es
+ * una `Surface` propia y no un componente de la librería, nada lo aplicaba solo. Cada caller lo
+ * escribía a mano y habían divergido — el MISMO dato ("128 canciones") salía en `labelLarge` en la
+ * cabecera de la lista y en `labelMedium` en la del detalle.
  */
 @Composable
 fun TonalChip(
@@ -44,9 +50,14 @@ fun TonalChip(
         Row(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center,
-            content = content
-        )
+            horizontalArrangement = Arrangement.Center
+        ) {
+            // `content` lleva receptor `RowScope`, así que se invoca DENTRO de la lambda del Row
+            // (la lambda de `ProvideTextStyle` no tiene receptor propio y el de fuera sigue a la
+            // vista). `ProvideTextStyle` no emite nodo de layout: los `weight` del caller siguen
+            // valiendo contra el Row.
+            ProvideTextStyle(MaterialTheme.typography.labelLarge) { content() }
+        }
     }
 }
 
@@ -183,14 +194,6 @@ private const val TONAL_LAYER_MIN_CONTRAST = 4.5f
 internal const val HCT_TONE_MIN = 0.0
 internal const val HCT_TONE_MAX = 100.0
 
-/**
- * Paso con el que [ensureContrast] barre la luminosidad buscando el ratio pedido. Es la resolución
- * de una BÚSQUEDA, no un valor de diseño: fino de más solo cuesta iteraciones (25 como mucho para
- * recorrer la escala entera, sobre un `remember`), y grueso de más devolvería un color más extremo
- * de lo necesario, o sea un acento apagado sin motivo.
- */
-private const val CONTRAST_SEARCH_STEP = 0.04f
-
 /** Par contenedor/contenido de una superficie derivada del fondo que tiene debajo. */
 @Immutable
 data class TonalLayerColors(val container: Color, val content: Color)
@@ -250,13 +253,28 @@ fun contrastRatio(a: Color, b: Color): Float {
 
 /**
  * Garantiza contraste WCAG >= [minRatio] de [content] sobre [container] CONSERVANDO el matiz del
- * acento: si el par ya cumple, se devuelve tal cual; si no, se empuja la luminosidad HSL de [content]
- * hacia el extremo (oscuro si el fondo es claro, claro si es oscuro) hasta alcanzar el ratio.
+ * acento: si el par ya cumple, se devuelve tal cual; si no, se le fija a [content] el TONO HCT que
+ * da el ratio pedido contra el fondo, hacia el extremo que ese fondo admita.
+ *
+ * **Va en HCT y no en HSL, y esa es la corrección del 17 ago.** Hasta esa fecha barría la luminosidad
+ * HSL conservando `h` y `s`, y eso se rompe con cualquier color CERCA DE BLANCO —que es justo lo que
+ * suelen ser los roles `on*` que entran aquí—: en HSL la saturación se calcula sobre `2 − max − min`,
+ * así que un color casi blanco tiene saturación **1.0** y su matiz lo decide una diferencia de 1/255
+ * entre canales. El `onPrimaryContainer` típico de Material You a tono alto es `#FFFBFF` (el azul a
+ * tope lo pone el gamut mapping de HCT), o sea HSL `h=300, s=1.0` — matiz MAGENTA con saturación
+ * máxima donde el ojo ve blanco. Bajar la L materializaba ese matiz fantasma: medido, el glifo del
+ * botón "siguiente" del MiniPlayer salía `#4E004E` (morado saturado) sobre una barra MARRÓN.
+ * En HCT ese mismo `#FFFBFF` tiene croma ~4, que es la verdad, y mover el tono devuelve un neutro.
  *
  * Por qué no basta [accentTone] con L fija (0.15/0.92): la luminosidad HSL NO es la luminancia
- * perceptual, así que un mismo L da ratios distintos por matiz/saturación — no garantiza 3:1. Aquí
- * se MIDE el ratio real y se ajusta. Negro/blanco (L→0/1) dan >=4.5:1 contra cualquier fondo, así que
- * el barrido siempre termina cumpliendo. 3:1 = mínimo WCAG para iconos/componentes y texto grande.
+ * perceptual, así que un mismo L da ratios distintos por matiz/saturación — no garantiza 3:1. El tono
+ * HCT sí es luminancia perceptual, y `Contrast` resuelve el tono exacto sin barrer.
+ * 3:1 = mínimo WCAG para iconos/componentes y texto grande.
+ *
+ * **No siempre puede cumplir, y no lo finge:** contra un fondo de tono medio el ratio es inalcanzable
+ * por los dos lados (ni negro ni blanco llegan a 4.5:1), y entonces se devuelve el extremo, o sea el
+ * máximo que ese lado da. Es la misma acotación que ya hacen `rememberMiniPlayerColors` y
+ * `rememberTonalLayerColors`.
  */
 fun ensureContrast(content: Color, container: Color, minRatio: Float = 3f): Color {
     if (contrastRatio(content, container) >= minRatio) return content
@@ -264,16 +282,20 @@ fun ensureContrast(content: Color, container: Color, minRatio: Float = 3f): Colo
     // el blanco contra el fondo (cruce en ~0.18), se aclara si al revés. Así un fondo medio recibe
     // icono oscuro (la dirección que sí llega a 3:1), no claro.
     val goingDark = contrastRatio(Color.Black, container) >= contrastRatio(Color.White, container)
-    val hsl = FloatArray(3)
-    androidx.core.graphics.ColorUtils.colorToHSL(content.toArgb(), hsl)
-    var l = hsl[2]
-    while (true) {
-        l = (if (goingDark) l - CONTRAST_SEARCH_STEP else l + CONTRAST_SEARCH_STEP)
-            .coerceIn(0f, 1f)
-        hsl[2] = l
-        val candidate = Color(androidx.core.graphics.ColorUtils.HSLToColor(hsl))
-        if (contrastRatio(candidate, container) >= minRatio || l <= 0f || l >= 1f) return candidate
-    }
+    val containerTone = Hct.fromInt(container.toArgb()).tone
+    // `*Unsafe` devuelve un tono fuera de [0,100] cuando el ratio es inalcanzable por ese lado; ese
+    // valor sirve igual, porque lo único que se hace con él es acotarlo.
+    val tone = (
+        if (goingDark) Contrast.darkerUnsafe(containerTone, minRatio.toDouble())
+        else Contrast.lighterUnsafe(containerTone, minRatio.toDouble())
+    ).coerceIn(HCT_TONE_MIN, HCT_TONE_MAX)
+    val hct = Hct.fromInt(content.toArgb())
+    val toned = Color(Hct.from(hct.hue, hct.chroma, tone).toInt())
+    // `Hct.from` prioriza el TONO y cede croma cuando el matiz no cabe en sRGB, así que la luminancia
+    // sale la del tono pedido; el redondeo de esa proyección puede dejarlo unas milésimas corto y por
+    // eso se MIDE. Al ceder el croma (gris puro del mismo tono) el ratio es exacto por construcción.
+    return if (contrastRatio(toned, container) >= minRatio || tone <= HCT_TONE_MIN || tone >= HCT_TONE_MAX) toned
+    else Color(Hct.from(hct.hue, 0.0, tone).toInt())
 }
 
 /**
@@ -441,12 +463,12 @@ fun UnifiedProgressBar(
         ) {
             Text(
                 text = formatTime(if (isDragging) (sliderPosition * duration).toLong() else currentPosition),
-                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
+                style = MaterialTheme.typography.labelSmall,
                 color = textColor
             )
             Text(
                 text = formattedDuration,
-                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
+                style = MaterialTheme.typography.labelSmall,
                 color = textColor
             )
         }

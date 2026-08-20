@@ -74,6 +74,7 @@
     <string name="playlist_create_placeholder">My awesome playlist</string>
     <string name="playlist_add_sheet_title">Add to playlist</string>
     <string name="playlist_none_created">You have no playlists yet</string>
+    <string name="playlist_none_created_subtitle">Group your songs however you like</string>
     <string name="playlist_rename_title">Rename</string>
     <string name="playlist_delete_title">Delete playlist</string>
     <string name="playlist_delete_confirm">Are you sure you want to delete \"%1$s\"? This can\'t be undone.</string>
@@ -98,6 +99,10 @@
     <!-- ==================== Detail actions (artist/album/playlist) ==================== -->
     <string name="detail_play_all">Play all</string>
     <string name="detail_shuffle">Shuffle</string>
+    <string name="detail_play_options">Playback options</string>
+    <string name="detail_play_reversed">Play in reverse order</string>
+    <string name="detail_play_title_asc">Play A to Z</string>
+    <string name="detail_play_title_desc">Play Z to A</string>
     <string name="detail_add_all_to_queue">Add all to queue</string>
 
     <!-- ==================== Download manager ==================== -->
@@ -616,9 +621,9 @@
     <!-- Playlist backup (Phase 6) -->
     <string name="backup_header">Backup</string>
     <string name="backup_desc">Saves your playlists and favorites in the app folder on OneDrive so you can restore them on another device. Restoring never deletes anything: it only adds what\'s missing.</string>
-    <string name="backup_export">Export playlists</string>
+    <string name="backup_export">Export</string>
     <string name="backup_export_desc">Uploads your playlists to OneDrive and replaces the previous backup.</string>
-    <string name="backup_import">Restore playlists</string>
+    <string name="backup_import">Restore</string>
     <string name="backup_import_desc">Fetches the OneDrive backup and merges it with your current playlists.</string>
     <string name="backup_export_success">%1$d playlists saved to OneDrive</string>
     <string name="backup_import_success">%1$d songs added · %2$d new playlists</string>
@@ -644,10 +649,12 @@
     <string name="settings_wavy_progress">Wavy progress bar</string>
     <string name="settings_wavy_progress_desc">Uses the animated Material 3 wave in the player. The mini player keeps the thin bar.</string>
     <string name="settings_progress_bar_header">Progress bar</string>
-    <string name="settings_progress_bar_desc">Mode (flat or wavy) and thickness, with live preview.</string>
+    <string name="settings_progress_bar_desc">Mode (flat or wavy), handle and thickness, with live preview.</string>
     <string name="settings_progress_thickness">Bar thickness</string>
     <string name="settings_progress_thickness_desc">Applies to both the flat and the wavy player bar.</string>
     <string name="settings_progress_thickness_value">%1$d dp</string>
+    <string name="settings_progress_handle">Position handle</string>
+    <string name="settings_progress_handle_desc">Keeps the position handle always visible on the player bar. Turn it off and it only shows while you drag.</string>
     <string name="settings_mini_player_rect">Rectangular mini player</string>
     <string name="settings_mini_player_rect_desc">Uses rounded corners on the floating bar instead of the pill shape.</string>
     <string name="settings_player_gestures">Player gestures</string>
@@ -713,6 +720,8 @@
     <string name="home_action_shuffle">Shuffle</string>
     <string name="home_action_play_order">In order</string>
     <string name="home_action_favorites">Favorites</string>
+    <string name="home_action_offline">Offline</string>
+    <string name="home_action_not_downloaded">Not downloaded</string>
     <string name="home_greeting_morning">Good morning</string>
     <string name="home_greeting_afternoon">Good afternoon</string>
     <string name="home_greeting_evening">Good evening</string>

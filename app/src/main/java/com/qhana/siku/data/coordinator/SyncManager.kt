@@ -202,9 +202,11 @@ class SyncManager @Inject constructor(
      * Canciones con bytes EN VUELO ahora mismo, por id, sea cual sea la vía (pipeline masivo,
      * descarga individual del worker, prioritaria por reproducción).
      *
-     * Hace falta porque el archivo temporal se deriva del id (`<id>.<ext>.tmp`): dos descargas
+     * Hace falta porque el archivo de trabajo se deriva del id (`<id>.part`): dos descargas
      * simultáneas de la misma canción escriben el MISMO archivo y el renombrado final puede
-     * consagrar una mezcla de las dos que pase el control de tamaño. Ninguno de los dedupes que
+     * consagrar una mezcla de las dos que pase el control de tamaño. Con los tramos por `Range`
+     * el riesgo es todavía mayor: cada una tendría su propio reparto del archivo y su propio
+     * sidecar, y el último en escribirlo describiría bytes que no puso. Ninguno de los dedupes que
      * ya existían lo cubría — `attempted` es local a una corrida del productor y `priorityInFlight`
      * solo mira las prioritarias—, así que bastaba con pulsar "descargar" sobre una canción que el
      * sync masivo estaba bajando.
@@ -554,6 +556,19 @@ class SyncManager @Inject constructor(
                     // así que con descargas en vuelo se pospone al próximo sync — no cuesta nada.
                     if (!stopSignal.value && downloadsInFlight.isEmpty()) {
                         artworkHealingManager.pruneCovers()
+                    }
+
+                    // Descargas a medias sin dueño. Desde que los parciales SOBREVIVEN a un fallo
+                    // —que es lo que permite reanudarlos en vez de volver a empezar— pueden
+                    // quedarse huérfanos: basta con que el usuario borre de la biblioteca una
+                    // canción que se estaba bajando, y un parcial de un FLAC grande son cientos de
+                    // MB. El de una canción que sigue pendiente NO se toca: ese es trabajo por
+                    // terminar, no basura.
+                    if (!stopSignal.value) {
+                        musicDownloader.prunePartialDownloads(
+                            knownIds = musicRepository.getAllSongIds().toHashSet(),
+                            protectedIds = downloadsInFlight.toHashSet()
+                        )
                     }
                 }
 
@@ -960,7 +975,7 @@ class SyncManager @Inject constructor(
         }
 
         // Ya la está bajando otra vía (el pipeline masivo, o una petición individual anterior):
-        // duplicarla haría que las dos escribieran el mismo `.tmp`. Cancelled y no Error porque
+        // duplicarla haría que las dos escribieran el mismo `.part`. Cancelled y no Error porque
         // no ha fallado nada — hay una descarga en curso que va a dejar el archivo en su sitio.
         if (!downloadsInFlight.add(song.id)) {
             Log.d(TAG, "Descarga de '${song.title}' ya en vuelo; no se duplica")
@@ -1088,6 +1103,13 @@ class SyncManager @Inject constructor(
         val parallelismState = ParallelismState(parallelism)
         val workerJobs = java.util.Collections.synchronizedList(mutableListOf<Job>())
 
+        // Descargas BAJANDO BYTES ahora mismo. No es lo mismo que workers vivos: al final de la
+        // cola quedan decenas de workers esperando un canal que ya no da nada. Confundirlos era lo
+        // que rompía la medición del supervisor (ver [launchParallelismSupervisor]) y lo que hace
+        // falta para saber cuántas conexiones sobran.
+        val downloadingNow = AtomicInteger(0)
+        val finalStretchBudget = FinalStretchBudget()
+
         fun spawnWorker() {
             val job = launch {
                 var retired = false
@@ -1128,9 +1150,11 @@ class SyncManager @Inject constructor(
                         // El remove va en finally: si el worker se cancela (logout/pull-to-refresh)
                         // durante la descarga, hay que sacar la canción del mapa igual, o el
                         // publicador lo vería no-vacío para siempre y no publicaría el estado final.
+                        downloadingNow.incrementAndGet()
                         val stage = try {
-                            downloadWithTransientRetry(song, onProgress)
+                            downloadWithTransientRetry(song, finalStretchBudget, onProgress)
                         } finally {
+                            downloadingNow.decrementAndGet()
                             downloadsInFlight.remove(song.id)
                             activeDownloadsMap.remove(song.id)
                             markDownloadsDirty()
@@ -1175,7 +1199,13 @@ class SyncManager @Inject constructor(
                 } finally {
                     // Quien se retiró ya se descontó al reclamar el hueco; el resto llega aquí al
                     // cerrarse el canal (fin normal) o por cancelación.
-                    if (!retired) parallelismState.active.decrementAndGet()
+                    if (!retired) {
+                        parallelismState.active.decrementAndGet()
+                        // Su conexión queda libre: en el tramo final se la reparten los archivos
+                        // que siguen bajando. Quien se RETIRÓ no la cede — su hueco existía justo
+                        // porque el supervisor decidió que sobraban conexiones.
+                        finalStretchBudget.release(1)
+                    }
                 }
             }
             workerJobs.add(job)
@@ -1186,7 +1216,7 @@ class SyncManager @Inject constructor(
             spawnWorker()
         }
         val parallelismSupervisor =
-            launchParallelismSupervisor(parallelismState, bytesDownloaded, ::spawnWorker)
+            launchParallelismSupervisor(parallelismState, bytesDownloaded, downloadingNow, ::spawnWorker)
 
         // Productor
         producerActive.set(true)
@@ -1296,6 +1326,12 @@ class SyncManager @Inject constructor(
         } finally {
             producerActive.set(false)
             workChannel.close()
+            // TRAMO FINAL: ya no entrarán canciones nuevas, así que las conexiones que no estén
+            // bajando nada se pueden repartir DENTRO de los archivos que quedan (ver
+            // [FinalStretchBudget]). Es el momento exacto en que abrirlo es seguro: mientras el
+            // productor podía servir trabajo, una conexión prestada habría que reclamarla de vuelta
+            // —abandonando un tramo a medias— para no dejar sin nada a la canción que entra.
+            finalStretchBudget.open(parallelismState.target.get() - downloadingNow.get())
         }
 
         // El supervisor se para ANTES de esperar a los workers: si siguiera vivo podría lanzar uno
@@ -1388,6 +1424,47 @@ class SyncManager @Inject constructor(
     }
 
     /**
+     * Las conexiones que sobran cuando la cola ya no tiene canciones nuevas que servir, para que se
+     * las repartan por tramos los archivos que siguen bajando.
+     *
+     * **El problema que resuelve.** OneDrive limita por CONEXIÓN, no por cuenta, así que el caudal
+     * del sync es proporcional al número de descargas simultáneas. Con la cola llena eso da ~16-28
+     * MB/s; cuando quedan dos archivos grandes quedan dos conexiones y treinta paradas, y el final
+     * de cada sync se arrastra a ~1 MB/s con el enlace ocioso. Repartir esas conexiones DENTRO de
+     * lo que queda mantiene el caudal hasta el último byte.
+     *
+     * **Solo se abre al cerrarse el canal**, y esa restricción es la que lo mantiene simple: sin
+     * canciones nuevas entrando, un permiso prestado no hay que reclamarlo de vuelta, así que nadie
+     * tiene que abandonar un tramo a medias.
+     *
+     * `open` FIJA el valor en vez de sumarlo: los workers que terminaron antes de abrirse ya están
+     * contados en el `target - descargando` con el que se abre, y sumarlos otra vez repartiría
+     * conexiones que no existen.
+     */
+    private class FinalStretchBudget : com.qhana.siku.data.manager.ExtraConnectionBudget {
+        private val available = AtomicInteger(0)
+        private val opened = AtomicBoolean(false)
+
+        fun open(spare: Int) {
+            available.set(spare.coerceAtLeast(0))
+            opened.set(true)
+        }
+
+        override fun tryAcquire(): Boolean {
+            if (!opened.get()) return false
+            while (true) {
+                val current = available.get()
+                if (current <= 0) return false
+                if (available.compareAndSet(current, current - 1)) return true
+            }
+        }
+
+        override fun release(count: Int) {
+            if (count > 0) available.addAndGet(count)
+        }
+    }
+
+    /**
      * Remide la corrida y cambia el número de descargas en paralelo EN CALIENTE.
      *
      * **Por qué en caliente y no entre corridas**: el paralelismo se fijaba una vez al empezar, así
@@ -1419,6 +1496,7 @@ class SyncManager @Inject constructor(
     private fun CoroutineScope.launchParallelismSupervisor(
         state: ParallelismState,
         bytesDownloaded: java.util.concurrent.atomic.AtomicLong,
+        downloadingNow: AtomicInteger,
         spawnWorker: () -> Unit
     ): Job = launch {
         var windowStartMs = System.currentTimeMillis()
@@ -1434,7 +1512,13 @@ class SyncManager @Inject constructor(
             val bytes = bytesDownloaded.get()
             val windowSec = (now - windowStartMs) / MILLIS_PER_SECOND
             val windowMB = (bytes - windowStartBytes) / BYTES_PER_MB
-            val workers = state.active.get()
+            // Conexiones que de verdad estuvieron bajando, NO workers vivos. Con la cola vaciándose
+            // conviven decenas de workers ociosos con dos descargas grandes, y dividir el caudal
+            // entre todos daba un "por conexión" ridículo: el objetivo saltaba al techo, se
+            // lanzaban workers para un canal ya cerrado y —lo peor— ese número se PERSISTÍA, así
+            // que lo aprendido convergía siempre a "arrancá con el máximo" y el arranque prudente
+            // de initialParallelism() no llegaba a existir.
+            val workers = downloadingNow.get()
             val throttled = requestCoordinator.throttleEvents > windowThrottles
             // Una espera de red DENTRO de la ventana infla el reloj sin bajar bytes. Una espera
             // larga se descarta sola (la ventana siguiente no tiene bytes), pero la que la parte por
@@ -1463,6 +1547,11 @@ class SyncManager @Inject constructor(
             val desired = kotlin.math.ceil(linkMBps / perConn).toInt()
                 .coerceIn(MIN_PARALLEL_WIFI, MAX_PARALLEL_WIFI)
             if (desired == state.target.get()) continue
+            // Con el canal cerrado no hay canciones que repartir: lanzar workers solo crearía
+            // corrutinas que mueren en el acto y engordan la lista del join. Lo que sí sigue
+            // sirviendo es lo aprendido arriba, que es de lo que vive la próxima corrida — y lo
+            // que aprovecha el tramo final es el reparto por tramos, no más workers.
+            if (!producerActive.get()) continue
 
             Log.i(
                 TAG,
@@ -1511,9 +1600,10 @@ class SyncManager @Inject constructor(
      */
     private suspend fun downloadWithTransientRetry(
         song: Song,
+        budget: com.qhana.siku.data.manager.ExtraConnectionBudget?,
         onProgress: (Float) -> Unit
     ): MusicDownloader.DownloadStage {
-        var stage = runDownloadWithRetry(song, isPriority = false, onProgress = onProgress)
+        var stage = runDownloadWithRetry(song, isPriority = false, onProgress = onProgress, budget = budget)
         var attempt = 1
         while (attempt < MAX_SONG_ATTEMPTS &&
             stage is MusicDownloader.DownloadStage.Error &&
@@ -1528,7 +1618,7 @@ class SyncManager @Inject constructor(
                 queueStopReason.compareAndSet(null, IncompleteReason.NETWORK_LOST)
                 return stage
             }
-            stage = runDownloadWithRetry(song, isPriority = false, onProgress = onProgress)
+            stage = runDownloadWithRetry(song, isPriority = false, onProgress = onProgress, budget = budget)
             attempt++
         }
         return stage
@@ -1664,7 +1754,7 @@ class SyncManager @Inject constructor(
         // Tope de almacenamiento: desalojo LRU para que quepa la prioritaria. Si ni vaciando
         // cabe (canción > tope entero), se deja en streaming (Cancelled no registra fallo).
         if (!ensureRoomForDownload(song.size, excludeId = song.id)) return MusicDownloader.Result.Cancelled
-        // Ver `downloadsInFlight`: nadie más puede estar escribiendo el `.tmp` de esta canción.
+        // Ver `downloadsInFlight`: nadie más puede estar escribiendo el `.part` de esta canción.
         if (!downloadsInFlight.add(song.id)) return MusicDownloader.Result.Cancelled
         return try {
             activeDownloadsMap[song.id] = ActiveDownload(song, 0f, individual = isPriority)
@@ -1719,7 +1809,8 @@ class SyncManager @Inject constructor(
         song: Song,
         isPriority: Boolean,
         onProgress: (Float) -> Unit,
-        forceFreshUrl: Boolean = false
+        forceFreshUrl: Boolean = false,
+        budget: com.qhana.siku.data.manager.ExtraConnectionBudget? = null
     ): MusicDownloader.DownloadStage {
         // Bytes ya en disco (con CUALQUIER extensión, incluida la basura `.0` histórica):
         // no hay nada que pedir a la red — ni getItem ni GET. El finalize re-analiza y
@@ -1734,12 +1825,12 @@ class SyncManager @Inject constructor(
         }
         val firstUrl = resolveDownloadUrl(song, forceRefresh = forceFreshUrl)
             ?: return MusicDownloader.DownloadStage.Error("No URL resolvable for ${song.title}")
-        val first = musicDownloader.downloadFile(song, firstUrl, isPriority, onProgress)
+        val first = musicDownloader.downloadFile(song, firstUrl, isPriority, budget, onProgress)
         if (first is MusicDownloader.DownloadStage.Error && first.httpCode != null && first.httpCode in 400..499) {
             Log.w(TAG, "URL expired (HTTP ${first.httpCode}) for ${song.title}, refreshing once")
             val freshUrl = resolveDownloadUrl(song, forceRefresh = true) ?: return first
             if (freshUrl == firstUrl) return first
-            return musicDownloader.downloadFile(song, freshUrl, isPriority, onProgress)
+            return musicDownloader.downloadFile(song, freshUrl, isPriority, budget, onProgress)
         }
         return first
     }

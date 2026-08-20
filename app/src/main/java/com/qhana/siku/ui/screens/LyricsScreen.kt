@@ -23,6 +23,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.toArgb
@@ -31,7 +32,6 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.Dp
@@ -69,6 +69,47 @@ private enum class LyricsViewMode {
  * corto el fundido no se lee como tal, sino como una LÍNEA horizontal que corta el texto justo
  * encima de los botones.
  */
+/**
+ * Interlineado de un verso del karaoke: más aire que el del rol (`TitleLargeLineHeight`
+ * = 28sp). Es espacio ENTRE VERSOS y no tipografía — con el del token las líneas se
+ * apelmazan y cuesta seguir cuál está sonando.
+ */
+private val LyricLineHeight = 34.sp
+
+/**
+ * Transporte flotante de las letras: la MISMA gramática que el del NowPlaying (ver
+ * `PlayButtonHeight` y vecinos en NowPlayingControls.kt) en una escala compacta, porque aquí los
+ * controles flotan ENCIMA del texto y cada dp de alto tapa un verso.
+ *
+ * Las tres decisiones son las de allá, y son lo que hay que respetar si se toca esto:
+ *  1. **Los ALTOS son fijos**: solo el ANCHO cambia con el estado, que es lo único que el spec mueve
+ *     entre variantes de un icon button. Antes los laterales se estiraban a cápsula vertical
+ *     (48→64) y eso hacía latir el alto de la fila entera al pausar.
+ *  2. **El play mantiene la proporción 1,5:1** en pausa (96×64, como 120×80 allá): es lo que lo hace
+ *     leerse como píldora y no como un óvalo.
+ *  3. **Los laterales SÍ son del spec**: icon button `Small` (`SmallIconButtonTokens`, leído del
+ *     jar): contenedor 40, icono 24, ancho `Uniform` 40 (24 + 8 + 8) y `Narrow` 32 (24 + 4 + 4). El
+ *     dibujo baja de 48 a 40 pero el objetivo TÁCTIL no: `FilledIconButton` aplica
+ *     `minimumInteractiveComponentSize` (48dp) por su cuenta.
+ *
+ * Del play, como en el NowPlaying, solo el ICONO sale de token; sus medidas son propias.
+ */
+private val LyricsPlayHeight = 64.dp
+
+private val LyricsPlayPlayingWidth = 64.dp
+
+private val LyricsPlayPausedWidth = 96.dp
+
+private val LyricsSideHeight = 40.dp
+
+private val LyricsSideUniformWidth = 40.dp
+
+private val LyricsSideNarrowWidth = 32.dp
+
+private val LyricsPlayIconSize = 28.sp
+
+private val LyricsSideIconSize = 24.sp
+
 private val ControlsFadeHeight = 132.dp
 
 /** Separación de los controles flotantes respecto al borde inferior de la pantalla. */
@@ -131,7 +172,9 @@ fun LyricsScreen(
     accentColor: Color,
     modifier: Modifier = Modifier
 ) {
-    val currentPosition by currentPositionFlow.collectAsStateWithLifecycle()
+    // La posición NO se lee aquí: se pasa el flow hacia abajo y solo la vista sincronizada lo
+    // colecta, dentro de su `derivedStateOf`. Leerla en este cuerpo con `by` suscribía la pantalla
+    // ENTERA al tick de un segundo (ver [SyncedLyricsView]).
 
     // Auto-detect mode capability
     val hasSyncedData = remember(lyricLines) { lyricLines.any { it.startTime > 0 } }
@@ -281,7 +324,7 @@ fun LyricsScreen(
                         when (mode) {
                             LyricsViewMode.SYNCED -> SyncedLyricsView(
                                 lines = lyricLines,
-                                currentPosition = currentPosition,
+                                currentPositionFlow = currentPositionFlow,
                                 contentColor = contentColor,
                                 accentColor = accentColor,
                                 backgroundColor = backgroundColor,
@@ -334,14 +377,21 @@ fun LyricsScreen(
                     .fillMaxWidth()
                     .background(backgroundColor)
                     .padding(bottom = ControlsBottomInset),
-                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+                // Misma separación que el grupo del NowPlaying (`NowPlayingConfig.GroupSpacing`):
+                // es el mismo control, y el 10dp que había era el único valor de los dos transportes
+                // fuera de la rejilla de 4 de Material.
+                horizontalArrangement = Arrangement.spacedBy(
+                    NowPlayingConfig.GroupSpacing,
+                    Alignment.CenterHorizontally
+                ),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 val haptic = LocalHapticFeedback.current
-                // Réplica COMPACTA del transporte del NowPlaying: reproduciendo = play como
-                // COOKIE de 9 lados girando (64×64) y laterales círculos tenues; pausa = play a
-                // píldora ensanchada (108×64) y laterales a cápsula vertical. El play comparte
-                // pieza por pieza con el NowPlaying: [PlayButtonMorphShape] para la forma,
+                // Réplica COMPACTA del transporte del NowPlaying (medidas y porqués en
+                // [LyricsPlayHeight]): reproduciendo = play como COOKIE de 9 lados girando (64×64) y
+                // laterales círculos tenues (40×40); pausa = play a píldora (96×64) y laterales
+                // estrechados (32×40). Los ALTOS no cambian: solo el ancho. El play comparte pieza
+                // por pieza con el NowPlaying: [PlayButtonMorphShape] para la forma,
                 // [rememberPlayButtonSpin] para el morph + el giro, y [cookieSpinDegrees] para
                 // desenroscar el ángulo al pausar. Los laterales siguen con forma fija.
                 val isPlaying = playbackState == PlaybackState.PLAYING || playbackState == PlaybackState.BUFFERING
@@ -363,19 +413,14 @@ fun LyricsScreen(
                 // otra pantalla, y hasta ahora coincidía por tener los números copiados.
                 val transportSpec = appSpatialSpec<Dp>()
                 val playWidth by animateDpAsState(
-                    targetValue = if (isPlaying) 64.dp else 108.dp,
+                    targetValue = if (isPlaying) LyricsPlayPlayingWidth else LyricsPlayPausedWidth,
                     animationSpec = transportSpec,
                     label = "lyricsPlayWidth"
                 )
                 val sideWidth by animateDpAsState(
-                    targetValue = if (isPlaying) 48.dp else 44.dp,
+                    targetValue = if (isPlaying) LyricsSideUniformWidth else LyricsSideNarrowWidth,
                     animationSpec = transportSpec,
                     label = "lyricsSideWidth"
-                )
-                val sideHeight by animateDpAsState(
-                    targetValue = if (isPlaying) 48.dp else 64.dp,
-                    animationSpec = transportSpec,
-                    label = "lyricsSideHeight"
                 )
                 // Izados: `transitionSpec` no es composable (mismo patrón que en PlaybackControls).
                 val glyphEnterScale = appSpatialSpec<Float>()
@@ -391,9 +436,9 @@ fun LyricsScreen(
                         containerColor = sideContainer,
                         contentColor = sideContent
                     ),
-                    modifier = Modifier.width(sideWidth).height(sideHeight)
+                    modifier = Modifier.width(sideWidth).height(LyricsSideHeight)
                 ) {
-                    MaterialSymbol("skip_previous", size = 26.sp, color = sideContent, fill = true)
+                    MaterialSymbol("skip_previous", size = LyricsSideIconSize, color = sideContent, fill = true)
                 }
 
                 Surface(
@@ -404,7 +449,7 @@ fun LyricsScreen(
                     shape = PlayButtonMorphShape(playMorphProgress),
                     color = playContainer,
                     modifier = Modifier
-                        .height(64.dp)
+                        .height(LyricsPlayHeight)
                         .width(playWidth)
                         // Lambda: solo invalida el draw, cero recomposición por frame del giro.
                         .graphicsLayer {
@@ -435,9 +480,9 @@ fun LyricsScreen(
                                     // igual que el NowPlaying: era un CircularProgressIndicator.
                                     LoadingIndicator(color = playContent, modifier = Modifier.size(32.dp))
                                 PlaybackState.PLAYING ->
-                                    MaterialSymbol("pause", size = 28.sp, color = playContent, fill = true)
+                                    MaterialSymbol("pause", size = LyricsPlayIconSize, color = playContent, fill = true)
                                 else ->
-                                    MaterialSymbol("play_arrow", size = 28.sp, color = playContent, fill = true)
+                                    MaterialSymbol("play_arrow", size = LyricsPlayIconSize, color = playContent, fill = true)
                             }
                         }
                     }
@@ -453,9 +498,9 @@ fun LyricsScreen(
                         containerColor = sideContainer,
                         contentColor = sideContent
                     ),
-                    modifier = Modifier.width(sideWidth).height(sideHeight)
+                    modifier = Modifier.width(sideWidth).height(LyricsSideHeight)
                 ) {
-                    MaterialSymbol("skip_next", size = 26.sp, color = sideContent, fill = true)
+                    MaterialSymbol("skip_next", size = LyricsSideIconSize, color = sideContent, fill = true)
                 }
             }
         }
@@ -540,7 +585,7 @@ private val LYRICS_VIEW_MODES = listOf(LyricsViewMode.SYNCED, LyricsViewMode.PLA
 @Composable
 private fun SyncedLyricsView(
     lines: List<LyricLine>,
-    currentPosition: Long,
+    currentPositionFlow: StateFlow<Long>,
     contentColor: Color,
     accentColor: Color,
     backgroundColor: Color,
@@ -556,14 +601,32 @@ private fun SyncedLyricsView(
     val topPaddingPx = with(density) { SyncedTopPadding.toPx().toInt() }
     val bottomPaddingPx = with(density) { SyncedBottomPadding.toPx().toInt() }
 
-    // Find active line
-    val activeIndex by remember(lines, currentPosition) {
+    // Línea activa.
+    //
+    // `collectAsStateWithLifecycle()` SIN `by`: se quiere el `State`, no su valor. Leerlo aquí
+    // suscribiría este composable al tick de la posición —una vez por segundo— y con él el bloque
+    // de contenido del `LazyColumn`, o sea las ~8 líneas visibles, cada una con sus tres
+    // `animate*AsState` de alpha, escala y color, y todo eso mientras el auto-scroll está corriendo.
+    //
+    // Leído SOLO dentro del `derivedStateOf`, la suscripción vive en el derivado y no en el
+    // composable, así que `activeIndex` solo notifica cuando de verdad cambia de línea: una vez cada
+    // varios segundos en vez de una por segundo. Eso es exactamente para lo que existe
+    // `derivedStateOf`, y antes no lo conseguía — llevaba la posición como CLAVE del `remember` y a
+    // la vez la leía dentro, así que el derivado se destruía y se reconstruía en cada tick sin
+    // cachear nada. La clave correcta es el `State` (identidad estable) y no su valor.
+    val position = currentPositionFlow.collectAsStateWithLifecycle()
+    val activeIndex by remember(lines, position) {
         derivedStateOf {
-            val index = lines.indexOfLast { it.startTime <= currentPosition }
+            val index = lines.indexOfLast { it.startTime <= position.value }
             if (index < 0) 0 else index
         }
     }
 
+    // ¿Es el PRIMER posicionamiento tras abrir la pantalla? Ése va sin animar (ver el bloque de
+    // abajo). Un array y no un `mutableStateOf`: solo lo lee y escribe la corrutina del efecto, así
+    // que no hace falta estado de snapshot — mismo patrón que `firstComposition` en `NowPlayingRoute`.
+    // Se reinicia solo en cada apertura, porque la hoja descompone su contenido al cerrarse.
+    val firstPositioning = remember { booleanArrayOf(true) }
     LaunchedEffect(activeIndex) {
         if (activeIndex >= 0) {
             try {
@@ -580,13 +643,35 @@ private fun SyncedLyricsView(
                 val viewportHeight = listState.layoutInfo.viewportSize.height
                 val itemInfo = listState.layoutInfo.visibleItemsInfo.find { it.index == activeIndex }
                 val cleanArea = viewportHeight - topPaddingPx - bottomPaddingPx
+                // **El PRIMERO va sin animar, y no es un detalle.** Al abrir las letras esta
+                // pantalla está subiendo desde abajo, así que un scroll ANIMADO hacia la línea que
+                // suena corre a la vez que la hoja entra: el `LazyColumn` compone y mide items en
+                // cada frame de la animación (medido en release el 19 ago: 6 composiciones de item,
+                // 3 de ellas `prefetch:execute:urgent` —o sea que no llegaron a tiempo y hubo que
+                // hacerlas dentro del frame— y 5,6 ms de trabajo en la ventana de 430 ms). Y encima
+                // no se ve: nadie está mirando cómo viaja el scroll de una pantalla que aún no ha
+                // llegado. Colocado de golpe, la línea que suena ya está centrada cuando la pantalla
+                // asienta, que es lo que el usuario esperaba ver.
+                //
+                // Solo el primero: a partir de ahí el desplazamiento SÍ se ve y es lo que hace que el
+                // karaoke se lea como una atención que se mueve y no como un salto.
+                val animateThisOne = !firstPositioning[0]
+                firstPositioning[0] = false
                 if (cleanArea > 0 && itemInfo != null) {
                     val centerOffset = -(cleanArea - itemInfo.size) / 2
-                    listState.animateScrollToItem(activeIndex, scrollOffset = centerOffset)
+                    if (animateThisOne) {
+                        listState.animateScrollToItem(activeIndex, scrollOffset = centerOffset)
+                    } else {
+                        listState.scrollToItem(activeIndex, scrollOffset = centerOffset)
+                    }
                 } else {
                     // Item fuera del viewport (ej.: primera carga, salto grande): scroll directo.
                     // El próximo cambio de activeIndex centrará exacto, pero al menos lo trae a la vista.
-                    listState.animateScrollToItem(activeIndex)
+                    if (animateThisOne) {
+                        listState.animateScrollToItem(activeIndex)
+                    } else {
+                        listState.scrollToItem(activeIndex)
+                    }
                 }
             } catch (e: Exception) {
                 android.util.Log.w("LyricsScreen", "Error scrolling to active line", e)
@@ -650,15 +735,23 @@ private fun SyncedLyricsView(
 
             val interactionSource = remember { MutableInteractionSource() }
 
+            // El verso es `titleLarge`, que YA son los 22sp que aquí se ponían a mano sobre un
+            // `headlineSmall` (24sp) — o sea que de aquel rol no quedaba nada salvo la familia. El
+            // realce de la línea en curso va por el par Regular/Emphasized del propio rol
+            // (400 → 500) en vez de por dos pesos elegidos a ojo, y se suma al color, la opacidad y
+            // la escala que ya se animan unas líneas más arriba.
+            //
+            // Lo ÚNICO que sigue apartándose del token es el `lineHeight` (34 frente a 28): es aire
+            // ENTRE VERSOS, no tipografía — con el interlineado del rol las líneas del karaoke se
+            // apelmazan y cuesta seguir cuál está sonando.
             Text(
                 text = line.text,
                 color = animatedColor,
-                style = MaterialTheme.typography.headlineSmall.copy(
-                    fontWeight = if (isActive) FontWeight.Bold else FontWeight.SemiBold,
-                    textAlign = TextAlign.Center,
-                    lineHeight = 34.sp,
-                    fontSize = 22.sp
-                ),
+                textAlign = TextAlign.Center,
+                style = (
+                    if (isActive) MaterialTheme.typography.titleLargeEmphasized
+                    else MaterialTheme.typography.titleLarge
+                ).copy(lineHeight = LyricLineHeight),
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable(
@@ -671,6 +764,24 @@ private fun SyncedLyricsView(
                         alpha = animatedAlpha
                         scaleX = animatedScale
                         scaleY = animatedScale
+                        // **`ModulateAlpha` y no el default `Auto`, que era el coste de dibujo más
+                        // caro de la app** (medido con Perfetto en release el 19 ago). Con `Auto`, un
+                        // `alpha < 1` obliga a HWUI a rasterizar el contenido en un buffer OFFSCREEN
+                        // y luego componerlo — y aquí eso ocurre en TODAS las líneas menos la activa,
+                        // que son las que llevan alpha 0.45/0.30/0.20. En el trace salían ~10
+                        // `alpha caused saveLayer` de ANCHO COMPLETO por frame (1280×190 las líneas de
+                        // un renglón, 1280×302 las de dos), o sea diez render passes extra en cada
+                        // frame que se redibuje: durante la animación de apertura, durante el scroll y
+                        // durante toda la reproducción con las letras abiertas, que es donde el
+                        // usuario pasa los minutos.
+                        //
+                        // `ModulateAlpha` aplica la opacidad a los draw ops directamente, sin buffer.
+                        // Su única pega es que da un resultado distinto si el contenido se SOLAPA
+                        // consigo mismo, y un `Text` de uno o dos renglones no lo hace. Pierde también
+                        // el recorte implícito a los bounds que trae la capa offscreen — irrelevante
+                        // aquí: la línea que se agranda (`scale` 1.12) es la ACTIVA, y ésa va a alpha
+                        // 1, así que hoy tampoco tiene capa ni recorte.
+                        compositingStrategy = CompositingStrategy.ModulateAlpha
                     }
                     .padding(vertical = 12.dp, horizontal = 32.dp)
             )

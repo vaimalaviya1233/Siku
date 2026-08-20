@@ -31,6 +31,25 @@
         teléfono, que sí copia todo junto (BD + audio) y por eso es consistente.
         Las playlists tienen su propia vía de migración: el backup JSON a OneDrive.
     -->
+    <!--
+        Predictive back DESACTIVADO (`enableOnBackInvokedCallback="false"`, 18 ago 2026, decisión
+        del usuario).
+
+        El atributo se deja ESCRITO en `false` en vez de borrarlo: sin él, el valor efectivo lo
+        decide el targetSdk, así que una subida futura podría reactivarlo en silencio. Escrito, la
+        decisión se ve y sobrevive.
+
+        Qué cambia: el sistema deja de enseñar la animación de "vas a salir" al arrastrar desde el
+        borde, y Navigation Compose deja de recorrer sus transiciones con el dedo
+        (`SeekableTransitionState`) — el "atrás" vuelve a ser un evento y no un gesto que se pueda
+        soltar a medias.
+
+        Qué NO cambia, y por eso no hay nada más que tocar: los `BackHandler` de la app siguen
+        funcionando igual (van por `OnBackPressedDispatcher`, que atiende los dos modos), y las
+        CUATRO transiciones del `NavHost` se quedan como están — se declararon para que la pantalla
+        de atrás también se mueva, y eso hace falta con gesto o sin él. Lo que el predictive back
+        añadía era poder recorrerlas con el dedo, no que existieran.
+    -->
     <application
         android:name=".MusicPlayerApp"
         android:allowBackup="false"
@@ -39,7 +58,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.MusicPlayer"
-        android:enableOnBackInvokedCallback="true"
+        android:enableOnBackInvokedCallback="false"
         android:localeConfig="@xml/locales_config"
         tools:targetApi="33">
 

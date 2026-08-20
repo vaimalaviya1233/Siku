@@ -2,6 +2,7 @@ package com.qhana.siku.ui.screens
 
 import java.util.Locale
 import androidx.compose.animation.*
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -28,6 +29,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
@@ -36,7 +38,7 @@ import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.semantics.stateDescription
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -45,14 +47,19 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.qhana.siku.ui.LocalPlayerOnScreen
 import com.qhana.siku.ui.components.*
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.PI
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
+import com.qhana.siku.ui.theme.appFastSpatialSpec
 import com.qhana.siku.ui.theme.appSpatialSpec
 import com.qhana.siku.ui.theme.appEffectsSpec
+import com.qhana.siku.ui.components.pixelPacedClock
+import com.qhana.siku.ui.components.stepMillisFor
+import kotlinx.coroutines.delay
 
 /*
  * Barra de progreso del NowPlaying en sus dos variantes (píldora plana y onda propia, ver
@@ -90,20 +97,33 @@ internal fun ProgressSlider(
      * ver [progressMetricsFor].
      */
     trackHeight: Dp = ComponentConfig.ProgressTrackHeight,
+    /**
+     * Ajustes → Apariencia: el HANDLE (palo vertical) se queda puesto. Apagado sigue apareciendo
+     * mientras se arrastra —es la affordance que dice dónde va a caer el dedo—, así que este ajuste
+     * no es "palo sí/no" sino "permanente o solo al buscar".
+     */
+    showHandle: Boolean = true,
     /** Solo para [wavy]: en pausa la onda se APLANA (como el reproductor de Android 16). */
     isPlaying: Boolean = true,
     modifier: Modifier = Modifier
 ) {
-    val metrics = remember(trackHeight) { progressMetricsFor(trackHeight) }
+    val metrics = remember(trackHeight, wavy) { progressMetricsFor(trackHeight, wavy) }
     val currentPosition by currentPositionFlow.collectAsStateWithLifecycle()
     val duration by durationFlow.collectAsStateWithLifecycle()
     val bufferedPosition by bufferedPositionFlow.collectAsStateWithLifecycle()
 
     var sliderPosition by remember { mutableFloatStateOf(0f) }
     var isDragging by remember { mutableStateOf(false) }
-    // Ancho medido de la barra. Lo necesita SOLO la gota del tiempo, que se coloca por layout; los
-    // tracks lo reciben del tamaño de su propio canvas.
+    // Ancho medido de la barra. Lo necesita SOLO la etiqueta del tiempo, que se coloca por layout;
+    // los tracks lo reciben del tamaño de su propio canvas.
     var trackWidthPx by remember { mutableIntStateOf(0) }
+    // Alto medido de la etiqueta, para colocarla a la distancia que pide el spec sin depender de que
+    // el token acierte con cualquier escala de fuente. Se siembra con el token: a escala normal es
+    // exacto y no hay ni un frame en el sitio equivocado.
+    val density = LocalDensity.current
+    var labelHeightPx by remember(density) {
+        mutableIntStateOf(with(density) { ComponentConfig.ProgressLabelHeight.roundToPx() })
+    }
     // El detector de gestos vive mientras la barra exista (su `pointerInput` no se rearma con cada
     // recomposición), así que capturaría la PRIMERA lambda de búsqueda y se quedaría con ella.
     val seek by rememberUpdatedState(onSeek)
@@ -140,11 +160,9 @@ internal fun ProgressSlider(
         spokenTime(duration)
     )
 
-    // Aparición de la GOTA (el pin con el tiempo) al arrastrar. El THUMB (palo) ya NO depende de
-    // esto: va SIEMPRE visible en los dos modos —como el thumb de un Slider de M3, que es la
-    // referencia que se está siguiendo—, así que a los tracks se les pasa `handleAlpha = 1f` fijo. La
-    // gota sigue siendo la única affordance que aparece solo al buscar: mostrar el tiempo exacto todo
-    // el rato sería ruido, el thumb solo marca la posición.
+    // Aparición de la ETIQUETA (el value indicator con el tiempo) al arrastrar. Aparece SOLO al
+    // buscar en los dos ajustes: enseñar el tiempo exacto todo el rato sería ruido, mientras que el
+    // palo solo marca la posición.
     // Effects: es alpha. Además es la garantía de que no rebota, que sobre una opacidad
     // significaría pasarse de 1 y volver.
     val bubbleAlpha by animateFloatAsState(
@@ -153,14 +171,49 @@ internal fun ProgressSlider(
         label = "bubbleAlpha"
     )
 
+    // Presencia del THUMB (palo). Con [showHandle] es permanente —como el thumb de un Slider de M3,
+    // que es la referencia que se sigue— y el valor queda pinado en 1: el `animateFloatAsState` solo
+    // se mueve cuando el ajuste está apagado y el dedo entra o sale, así que no produce frames en
+    // reposo (ver la regla de "cero productores continuos" en Motion.kt).
+    //
+    // De este mismo número sale, interpolada, la geometría del hueco fill↔palo↔riel en los dos
+    // tracks: por eso es un Float animado y no un Boolean — conmutar daría un salto en el frame en
+    // que el palo aparece, justo cuando el dedo ya está en la barra.
+    val handleAlpha by animateFloatAsState(
+        targetValue = if (showHandle || isDragging) 1f else 0f,
+        animationSpec = appEffectsSpec(),
+        label = "handleAlpha"
+    )
+
+    // ANCHO del palo: se AFINA a la mitad mientras el dedo está en la barra, que es lo que hace el
+    // thumb del `Slider` de M3 Expressive (`thumbSize.width / 2` con cualquier press, drag o foco).
+    // Es la única respuesta al tacto que tiene un objeto de 4dp que ni se mueve de su sitio ni
+    // cambia de color, y es lo que faltaba para que este palo se comportara como el del spec y no
+    // solo se le pareciera.
+    //
+    // Spatial —es geometría— y del token FAST, que es el que el spec reserva para los gestos
+    // pequeños: el rebote de un palito respondiendo al dedo ES el efecto. El Slider oficial lo
+    // conmuta de golpe (un `.size()` sin animación, porque ahí el thumb es un layout y no un
+    // dibujo); acá se anima por lo mismo que se interpola todo lo demás de esta barra, que el
+    // cambio ocurre con el dedo encima y un salto se ve.
+    //
+    // El rebote puede pasarse por debajo del objetivo, así que el consumidor lo recorta a 0 antes de
+    // dibujar (regla de Motion.kt: un spec spatial sobre un valor con suelo hay que acotarlo).
+    val handleDrawWidth by animateDpAsState(
+        targetValue = if (isDragging) ComponentConfig.ProgressHandlePressedWidth
+        else ComponentConfig.ProgressHandleWidth,
+        animationSpec = appFastSpatialSpec(),
+        label = "handleDrawWidth"
+    )
+
     Column(modifier = modifier.fillMaxWidth()) {
         // Barra de grosor ajustable (12dp por defecto) con la geometría del `Slider` de M3: fill y
         // riel separados por un hueco permanente (`ProgressHandleGap`, el `ActiveHandleLeadingSpace`
         // del spec), extremos interiores con `ProgressTrackInsideCorner` y exteriores redondos,
-        // stop indicator al final y el handle (thumb) SIEMPRE visible —como en las barras de progreso
-        // del spec Expressive—. El hueco estuvo descartado un tiempo —"con la canción por terminar se
-        // veía raro"— y volvió porque sin él el fill y el riel se tocaban y la barra se leía como una
-        // sola pieza de dos colores.
+        // stop indicator al final y el handle (thumb) permanente —como en las barras de progreso del
+        // spec Expressive; conmutable en Ajustes, ver [showHandle]—. El hueco estuvo descartado un
+        // tiempo —"con la canción por terminar se veía raro"— y volvió porque sin él el fill y el
+        // riel se tocaban y la barra se leía como una sola pieza de dos colores.
         //
         // NO usa el `Slider` de M3, y no es reimplementar por gusto: de él solo quedaba el gesto y
         // el layout, porque riel, búfer, fill, indicador, onda y handle ya se dibujaban a mano. Eso
@@ -189,7 +242,7 @@ internal fun ProgressSlider(
                 // UN solo detector para toque y arrastre, no `detectTapGestures` +
                 // `detectHorizontalDragGestures`. Dos motivos, los dos de comportamiento:
                 //  - los detectores de arrastre esperan al TOUCH SLOP, así que un dedo apoyado sin
-                //    mover no mostraría el palo ni la gota; acá el pin aparece en el `down`, como en
+                //    mover no mostraría el palo ni la etiqueta; acá aparecen en el `down`, como en
                 //    el Slider oficial.
                 //  - un toque es un arrastre de longitud cero, así que tratar los dos por el mismo
                 //    camino elimina la posibilidad de que difieran (y de que se peleen por el
@@ -223,7 +276,7 @@ internal fun ProgressSlider(
                         if (!cancelled) seek((sliderPosition * duration).toLong())
                     }
                 }
-                // El ancho lo necesita la GOTA, que se posiciona en el layout y no en el canvas.
+                // El ancho lo necesita la ETIQUETA, que se coloca por layout y no en el canvas.
                 .onSizeChanged { trackWidthPx = it.width },
             contentAlignment = Alignment.Center
         ) {
@@ -235,8 +288,8 @@ internal fun ProgressSlider(
                     bufferedFraction = bufferedFraction,
                     isPlaying = isPlaying,
                     isDragging = isDragging,
-                    // Thumb permanente: el palo no aparece/desaparece, marca la posición siempre.
-                    handleAlpha = 1f,
+                    handleAlpha = handleAlpha,
+                    handleDrawWidth = handleDrawWidth,
                     metrics = metrics,
                     activeColor = activeColor,
                     inactiveColor = inactiveColor
@@ -245,60 +298,97 @@ internal fun ProgressSlider(
                 FlatTrack(
                     fraction = displayPosition.coerceIn(0f, 1f),
                     bufferedFraction = bufferedFraction,
-                    handleAlpha = 1f,
+                    isPlaying = isPlaying,
+                    isDragging = isDragging,
+                    handleAlpha = handleAlpha,
+                    handleDrawWidth = handleDrawWidth,
                     metrics = metrics,
                     activeColor = activeColor,
                     inactiveColor = inactiveColor
                 )
             }
 
-            // GOTA con el tiempo: el pin clásico (cuadrado con 3 esquinas al 50% rotado 45°, la
-            // esquina viva apunta al palo, texto contra-rotado). Se posiciona con la MISMA función
-            // que el palo, así que no puede quedar desalineada de él.
+            // VALUE INDICATOR: la etiqueta con el tiempo, en PASTILLA (esquina completa) y con el par
+            // inverseSurface/inverseOnSurface del spec. Ya no es el pin con punta del Material viejo
+            // ni va del color del acento — ver [ComponentConfig.ProgressLabelBottomSpace] y vecinos
+            // para los tokens y el porqué del cambio.
             //
-            // `requiredSize` + `offset`: mide 46dp dentro de una caja de 24 y se sale por arriba a
-            // propósito, así que no puede aceptar las constraints del padre.
+            // Se centra con la MISMA función que el palo, así que no puede quedar desalineada de él;
+            // el ancho lo pone el texto (de "0:07" a "1:23:45") con el suelo del spec
+            // ([ComponentConfig.ProgressLabelMinWidth]), o con un tiempo corto la pastilla
+            // degeneraría en un círculo aplastado.
+            //
+            // La etiqueta se sale de la caja de la barra por arriba A PROPÓSITO, así que se mide SIN
+            // las constraints del padre (ver el `Constraints()` de abajo) y el Box no recorta.
             if (bubbleAlpha > 0f) {
-                val bubbleSize = ComponentConfig.ProgressBubbleSize
                 Box(
                     modifier = Modifier
                         .align(Alignment.CenterStart)
-                        .requiredSize(bubbleSize)
                         .offset {
                             val centerX = progressHandleCenterX(
                                 displayPosition, trackWidthPx.toFloat(), handleWidth.toPx()
                             )
-                            IntOffset(
-                                (centerX - bubbleSize.toPx() / 2f).roundToInt(),
-                                -ComponentConfig.ProgressBubbleOffset.roundToPx()
-                            )
+                            // Vertical DERIVADA: el borde inferior de la pastilla queda a
+                            // `ProgressLabelBottomSpace` del borde superior del palo, así que la
+                            // etiqueta sube sola cuando el usuario engorda la barra (el palo crece
+                            // con ella). El desplazamiento es desde el CENTRO, de ahí las dos mitades.
+                            //
+                            // El alto es el MEDIDO y no el token: con la fuente del sistema ampliada
+                            // la pastilla crece, y con el número fijo se metería dentro del aire del
+                            // spec. `ProgressLabelHeight` es su semilla, así que a escala normal
+                            // acierta desde el primer frame.
+                            val above = metrics.handleHeight.toPx() / 2f +
+                                ComponentConfig.ProgressLabelBottomSpace.toPx() +
+                                labelHeightPx / 2f
+                            IntOffset(centerX.roundToInt(), -above.roundToInt())
                         }
-                        .graphicsLayer {
-                            alpha = bubbleAlpha
-                            rotationZ = 45f
+                        // Dos cosas de una, y las dos por la misma razón (el tamaño no se conoce hasta
+                        // medir el texto, de "0:07" a "1:23:45"):
+                        //  - se mide con `Constraints()` SIN límites en vez de con las del padre: la
+                        //    caja de la barra mide lo que el palo, y con la fuente del sistema
+                        //    ampliada la pastilla no cabría y saldría comprimida en vez de asomar.
+                        //  - se corre media pastilla a la izquierda, que es lo que la deja CENTRADA
+                        //    sobre el palo; en el `offset` de arriba no se puede, porque allí todavía
+                        //    no hay ancho que partir.
+                        .layout { measurable, _ ->
+                            val placeable = measurable.measure(Constraints())
+                            layout(placeable.width, placeable.height) {
+                                placeable.place(-placeable.width / 2, 0)
+                            }
                         }
+                        .graphicsLayer { alpha = bubbleAlpha }
+                        // Contenedor de la etiqueta del spec: 44dp de alto y 48 de ancho, los dos
+                        // como MÍNIMO y no fijos — el texto crece con la fuente del sistema y una
+                        // medida clavada lo recortaría.
+                        .defaultMinSize(
+                            minWidth = ComponentConfig.ProgressLabelMinWidth,
+                            minHeight = ComponentConfig.ProgressLabelHeight
+                        )
+                        .onSizeChanged { labelHeightPx = it.height }
                         .background(
-                            trackColor,
-                            RoundedCornerShape(
-                                topStartPercent = 50, topEndPercent = 50,
-                                bottomEndPercent = 0, bottomStartPercent = 50
-                            )
+                            MaterialTheme.colorScheme.inverseSurface,
+                            RoundedCornerShape(percent = 50)
+                        )
+                        .padding(
+                            horizontal = ComponentConfig.ProgressLabelPaddingHorizontal,
+                            vertical = ComponentConfig.ProgressLabelPaddingVertical
                         ),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
                         text = formatTime((sliderPosition * duration).toLong()),
-                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                        // Mismo criterio de contraste que el palo: la gota es del color del track,
-                        // así que hereda su problema con los acentos medios.
-                        color = maxContrastOn(trackColor),
-                        modifier = Modifier.graphicsLayer { rotationZ = -45f }
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.inverseOnSurface,
+                        maxLines = 1
                     )
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(6.dp))
+        // Barra y chips de tiempo son la MISMA pieza (los chips leen la barra), así que van al
+        // nivel más junto de la escala. Estuvo en 6dp, el único valor de la pantalla que no caía en
+        // la rejilla de 4 de Material.
+        Spacer(modifier = Modifier.height(NowPlayingConfig.ItemGap))
 
         // Tiempos a los extremos y FORMATO al medio. Un Box (no una Row con SpaceBetween):
         // así el chip de formato queda centrado con la barra de verdad, sin depender de que
@@ -330,27 +420,45 @@ internal fun ProgressSlider(
  * de que lo que se ve al elegir sea lo que se ve al reproducir — un dibujo aparte se desincroniza
  * del de verdad en el primer retoque y nadie se entera.
  *
- * Sin gesto y sin tiempos, pero CON el palo: es permanente en la barra real, así que la vista previa
- * también lo muestra (si no, se elegiría mirando algo distinto de lo que se ve al reproducir). La
- * onda se anima (`isPlaying = true`) porque el movimiento ES la diferencia entre los dos modos.
+ * Sin gesto y sin tiempos. El palo se dibuja según el ajuste ([showHandle]) porque la previa enseña
+ * la barra EN REPOSO, que es como se ve el 99 % del tiempo: con el palo apagado aparece solo con el
+ * dedo encima, y mostrarlo aquí haría elegir mirando algo que luego no está. La onda se anima
+ * (`isPlaying = true`) porque el movimiento ES la diferencia entre los dos modos.
  */
 @Composable
 internal fun ProgressBarPreview(
     wavy: Boolean,
     trackHeight: Dp,
+    showHandle: Boolean,
     activeColor: Color,
     inactiveColor: Color,
     modifier: Modifier = Modifier
 ) {
-    val metrics = remember(trackHeight) { progressMetricsFor(trackHeight) }
-    Box(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+    val metrics = remember(trackHeight, wavy) { progressMetricsFor(trackHeight, wavy) }
+    // Mismo tratamiento que en la barra real: el palo entra y sale interpolando, así que conmutar
+    // el switch se ve como el palo retirándose y los huecos cerrándose, no como un salto.
+    val handleAlpha by animateFloatAsState(
+        targetValue = if (showHandle) 1f else 0f,
+        animationSpec = appEffectsSpec(),
+        label = "previewHandleAlpha"
+    )
+    // Reserva el alto del PALO, igual que la barra real: asoma 14dp del riel por arriba y por abajo
+    // (el asomo del spec), así que una caja del alto del riel lo dejaría invadiendo lo que tenga
+    // encima y debajo en la pantalla de Ajustes.
+    Box(
+        modifier = modifier.fillMaxWidth().height(metrics.touchHeight),
+        contentAlignment = Alignment.Center
+    ) {
         if (wavy) {
             WavyTrack(
                 fraction = PREVIEW_FRACTION,
                 bufferedFraction = 0f,
                 isPlaying = true,
                 isDragging = false,
-                handleAlpha = 1f,
+                handleAlpha = handleAlpha,
+                // La previa enseña la barra EN REPOSO (ver el KDoc): el palo afinado es la respuesta
+                // al dedo, y aquí no hay dedo.
+                handleDrawWidth = ComponentConfig.ProgressHandleWidth,
                 metrics = metrics,
                 activeColor = activeColor,
                 inactiveColor = inactiveColor
@@ -359,7 +467,12 @@ internal fun ProgressBarPreview(
             FlatTrack(
                 fraction = PREVIEW_FRACTION,
                 bufferedFraction = 0f,
-                handleAlpha = 1f,
+                // La previa no avanza (fracción fija), así que no hay tramo que interpolar; el
+                // parámetro va a `true` para que el track sea el MISMO que en reproducción.
+                isPlaying = true,
+                isDragging = false,
+                handleAlpha = handleAlpha,
+                handleDrawWidth = ComponentConfig.ProgressHandleWidth,
                 metrics = metrics,
                 activeColor = activeColor,
                 inactiveColor = inactiveColor
@@ -368,6 +481,13 @@ internal fun ProgressBarPreview(
     }
 }
 
+/**
+ * Cuánto se mete hacia adentro el stop indicator de la ONDA cuando es más fino que el trazo: un
+ * cuarto del trazo, el `trackStroke.width / 4f` de `LinearWavyProgressModifiers.drawStopIndicator`.
+ * Es lo que impide que el cap redondo del riel se lo trague por el borde derecho.
+ */
+private const val WAVE_STOP_INSET_DIVISOR = 4f
+
 /** Avance que enseña la vista previa: lo justo para que se lea como una canción en curso. */
 private const val PREVIEW_FRACTION = 0.62f
 
@@ -375,7 +495,7 @@ private const val PREVIEW_FRACTION = 0.62f
  * Centro del handle para una [fraction] dada, en píxeles. **Es la ÚNICA definición de "dónde está
  * la posición" en la barra**: la usan el gesto (a través de su inversa [progressFractionForX]), la
  * píldora plana y la onda. Tenerla en un solo sitio es lo que garantiza que el fill, el palo, la
- * gota y el dedo no puedan discrepar ni por un píxel — que es exactamente lo que pasaba cuando el
+ * etiqueta y el dedo no puedan discrepar ni por un píxel — que es lo que pasaba cuando el
  * palo era el `thumb` de un `Slider` (colocado por layout) y el fill se pintaba aparte.
  *
  * El recorrido va inset media anchura de handle a cada lado, o el palo se saldría del contenedor al
@@ -383,6 +503,87 @@ private const val PREVIEW_FRACTION = 0.62f
  */
 private fun progressHandleCenterX(fraction: Float, width: Float, handleWidth: Float): Float =
     handleWidth / 2f + (width - handleWidth) * fraction.coerceIn(0f, 1f)
+
+/**
+ * Posición dibujada de la barra, INTERPOLADA entre dos ticks de posición. La usan los DOS tracks:
+ * la posición real llega a TIRONES —una vez por segundo, el bucle de `MusicPlayerScreen`, lento a
+ * propósito para no despertar el main thread en cada frame—, y ese escalón es visible en los dos
+ * modos: en la onda estira el trazo de golpe y en la píldora plana el borde del relleno (y el palo,
+ * que va permanente por defecto) SALTA un píxel por segundo en vez de avanzar.
+ *
+ * Vivía dentro de `WavyTrack`, y por eso el modo plano se movía a tirones: dos tracks del mismo
+ * control no pueden avanzar con dos relojes distintos. Sacarlo aquí es además lo que garantiza que
+ * alternar el ajuste de Apariencia no cambie el RITMO de la barra, igual que [progressHandleCenterX]
+ * garantiza que no cambie su posición.
+ *
+ * Este reloj y el de la fase de la onda son los DOS únicos de la barra que no salen del
+ * MotionScheme, por el mismo motivo: tienen que ser LINEALES y durar exactamente lo que dura otra
+ * cosa (un tick de posición / un ciclo de onda). Un spring aceleraría y frenaría dentro del tramo,
+ * que es justo el tropiezo que se está corrigiendo.
+ *
+ * **Publica solo cuando el borde del relleno se movió al menos un píxel** de [trackWidthPx]: en una
+ * canción de 4 minutos son ~4 publicaciones por segundo y no 120 (un tween invalidaba cada vsync
+ * para mover tres centésimas de píxel). El reloj duerme entre píxeles ([pixelPacedClock]), así que
+ * entre publicaciones quedan vsyncs vacíos y la cola de SurfaceFlinger drena — ver la regla "cero
+ * productores continuos" en CLAUDE.md.
+ */
+@Composable
+private fun rememberSmoothedProgress(
+    fraction: Float,
+    isPlaying: Boolean,
+    /** El usuario está arrastrando: el track debe seguir al dedo, sin un segundo de retraso. */
+    isDragging: Boolean,
+    /** Ancho medido del track, para el umbral de un píxel. 0 mientras no se haya medido. */
+    trackWidthPx: Int
+): Float {
+    // Con el reproductor GUARDADO (subárbol persistente) no hay nada que suavizar y sí frames que
+    // gastar detrás de la biblioteca: se salta al valor bueno, que además es lo que hay que enseñar
+    // si se reabre.
+    val onScreen = LocalPlayerOnScreen.current
+    val smoothFraction = remember { mutableFloatStateOf(fraction) }
+    LaunchedEffect(fraction, isPlaying, onScreen, isDragging, trackWidthPx) {
+        val from = smoothFraction.floatValue
+        val jump = kotlin.math.abs(fraction - from)
+        // Un seek (o el cambio de canción) NO se interpola: sería un barrido de un segundo
+        // recorriendo toda la barra. Tampoco en pausa, donde no hay avance que suavizar.
+        if (!isPlaying || !onScreen || isDragging || jump > PROGRESS_SNAP_THRESHOLD) {
+            smoothFraction.floatValue = fraction
+            return@LaunchedEffect
+        }
+        val stepFraction = if (trackWidthPx > 0) 1f / trackWidthPx else 0f
+        // **El reloj que más se ahorra de los cuatro.** Este bucle solo tiene que recorrer el avance
+        // de UN tick de posición: con una canción de cuatro minutos y una barra de ~350px, el borde
+        // del relleno se mueve 1,5 píxeles por segundo, o sea uno cada ~685 ms. Con `withFrameNanos`
+        // eso eran 120 despertares por segundo para publicar 1,5. Ver [pixelPacedClock] para el
+        // porqué de no usar el frame clock; aquí el bucle es propio porque tiene condición de salida
+        // (`t >= 1`), no es continuo.
+        val pixelsPerSecond = jump * trackWidthPx / (POSITION_TICK_MS / 1000f)
+        // Sin avance no hay nada que interpolar, y hay que salir ANTES de calcular el intervalo:
+        // `stepMillisFor(0)` devuelve `Long.MAX_VALUE` y el bucle se quedaría dormido para siempre
+        // en un `delay` del que solo lo sacaría un cambio de key.
+        if (pixelsPerSecond <= 0f) {
+            smoothFraction.floatValue = fraction
+            return@LaunchedEffect
+        }
+        val step = stepMillisFor(pixelsPerSecond)
+        var startNanos = 0L
+        var published = from
+        var t = 0.0
+        while (t < 1.0) {
+            val now = System.nanoTime()
+            if (startNanos == 0L) startNanos = now
+            t = ((now - startNanos) / (POSITION_TICK_MS * 1_000_000.0)).coerceAtMost(1.0)
+            val value = (from + (fraction - from) * t).toFloat()
+            // La regla del píxel se queda como RED: el intervalo ya está calculado para cumplirla.
+            if (kotlin.math.abs(value - published) >= stepFraction || t >= 1.0) {
+                published = value
+                smoothFraction.floatValue = value
+            }
+            if (t < 1.0) delay(step)
+        }
+    }
+    return smoothFraction.floatValue
+}
 
 /** Inversa exacta de [progressHandleCenterX]: qué fracción representa un toque en [x]. */
 private fun progressFractionForX(x: Float, width: Float, handleWidth: Float): Float {
@@ -392,7 +593,8 @@ private fun progressFractionForX(x: Float, width: Float, handleWidth: Float): Fl
 
 /**
  * Track PLANO del reproductor: píldora de borde redondo superpuesta al riel, con el nivel de búfer,
- * el stop indicator del spec y el handle (thumb) SIEMPRE visible marcando la posición.
+ * el stop indicator del spec y el handle (thumb) marcando la posición (permanente o solo al
+ * arrastrar, según [handleAlpha]).
  *
  * Todo en UN canvas y sin `clip`: el palo mide más que el track (asomar es lo que lo distingue del
  * riel), así que el riel y el búfer se redondean por geometría en vez de apoyarse en la máscara del
@@ -403,12 +605,26 @@ private fun FlatTrack(
     fraction: Float,
     /** Búfer cargado (0 = no hay nada que contar). */
     bufferedFraction: Float,
+    /** Suena: el avance entre ticks se interpola (ver [rememberSmoothedProgress]). */
+    isPlaying: Boolean,
+    /** El usuario está arrastrando: el relleno va pegado al dedo, sin interpolar. */
+    isDragging: Boolean,
     /**
-     * Presencia del handle (1 = visible). Hoy los callers pasan 1f SIEMPRE —el thumb es permanente,
-     * como en las barras de progreso del spec Expressive—; se mantiene como parámetro porque de él
-     * sale, interpolada, la geometría del hueco fill↔palo↔riel (y a 1 queda pinada en "palo puesto").
+     * Presencia del handle (1 = visible). Vale 1 fijo con el palo permanente —el default, como en
+     * las barras del spec Expressive— y va de 0 a 1 con el dedo cuando el usuario lo apagó en
+     * Ajustes. De él sale, INTERPOLADA, la geometría del hueco fill↔palo↔riel: en reposo sin palo
+     * el fill termina en la posición y el riel arranca un `gap` después; con el palo puesto, los dos
+     * se retiran para dejarlo flotando entre dos huecos.
      */
     handleAlpha: Float,
+    /**
+     * Ancho con el que se DIBUJA el palo: [ComponentConfig.ProgressHandleWidth] en reposo y la mitad
+     * mientras el dedo está en la barra, como el thumb del `Slider` de M3. **No entra en la
+     * geometría del track** —el hueco, el borde del fill y el arranque del riel se calculan siempre
+     * con el ancho de reposo—, exactamente como en el Slider oficial: si el hueco siguiera a este
+     * valor, tocar la barra movería el borde del progreso.
+     */
+    handleDrawWidth: Dp,
     /** Geometría derivada del grosor elegido en Ajustes. */
     metrics: ProgressMetrics,
     activeColor: Color,
@@ -417,20 +633,44 @@ private fun FlatTrack(
     // Path reutilizado por los tres tramos (fill, riel, búfer): se redibujan en cada tick de
     // posición y en cada frame del arrastre.
     val trackPath = remember { Path() }
+    // Avance entre ticks de posición: MISMO reloj que la onda. Sin esto el borde del relleno —y el
+    // palo, que va permanente por defecto— daban un salto por segundo en vez de avanzar.
+    var trackWidthPx by remember { mutableIntStateOf(0) }
+    val drawnFraction = rememberSmoothedProgress(
+        fraction = fraction,
+        isPlaying = isPlaying,
+        isDragging = isDragging,
+        trackWidthPx = trackWidthPx
+    )
     Canvas(
         modifier = Modifier
             .fillMaxWidth()
             // Mismo alto que la onda: si divergen, alternar el ajuste de Apariencia movería el
             // bloque de controles entero.
             .height(metrics.trackHeight)
+            // Ancho real del track, para publicar el progreso solo cuando avanza un píxel.
+            .onSizeChanged { trackWidthPx = it.width }
     ) {
         val dotRadius = metrics.stopIndicator.toPx() / 2f
         val insideCorner = ComponentConfig.ProgressTrackInsideCorner.toPx()
+        // Ancho de REPOSO: es el que define el recorrido y los huecos, pase lo que pase con el dedo.
         val handleW = ComponentConfig.ProgressHandleWidth.toPx()
+        // Ancho con el que se PINTA el palo. El recorte es la guardia del rebote del spring spatial.
+        val drawnHandleW = handleDrawWidth.toPx().coerceAtLeast(0f)
         val gap = ComponentConfig.ProgressHandleGap.toPx()
-        val radius = size.height / 2f
+        // Radio de esquina TABULADO por el spec, no media altura: solo el tamaño más fino es una
+        // píldora perfecta (ver [ProgressMetrics.trackCorner]). Y el centro vertical va aparte —
+        // eran el mismo número mientras la barra era siempre una píldora, y confundirlos ahora
+        // dejaría el stop indicator flotando fuera del riel.
+        val corner = metrics.trackCorner.toPx()
+        val centerY = size.height / 2f
+        // Ancho de dos esquinas: por debajo, un tramo ya no puede dibujarse con su radio completo.
+        // Lo usa el FINAL de la canción (`railFade`) para decidir cuándo al riel no le queda sitio.
+        // Con la píldora este umbral era el alto entero; con el radio del spec es menor, así que el
+        // riel aguanta hasta más tarde. NO lo usa el relleno: allí el radio se acota y no se omite.
+        val minSegment = corner * 2f
         val handleVisible = handleAlpha > 0f
-        val handleCenterX = progressHandleCenterX(fraction, size.width, handleW)
+        val handleCenterX = progressHandleCenterX(drawnFraction, size.width, handleW)
 
         // Con el palo puesto, el fill se DETIENE antes de él y el riel arranca después: el palo
         // queda despegado de los dos por un hueco, que es como lo dibuja el spec. Eso es lo que
@@ -452,7 +692,13 @@ private fun FlatTrack(
         // `handleCenterX` y `handleCenterX + gap`; con el palo puesto, exactamente los bordes que
         // lo dejan flotando entre los dos huecos.
         val fillEnd = handleCenterX - (handleW / 2f + gap) * handleAlpha
-        val fillWidth = if (handleVisible) fillEnd else fillEnd.coerceAtLeast(size.height)
+        // Sin suelo: el relleno se dibuja desde el primer píxel, por corto que sea (los radios se
+        // acotan abajo). Tuvo uno —el ancho de dos esquinas— para no pintar una píldora deformada, y
+        // ese suelo se COMÍA el principio de la canción: con la barra en 24dp y el hueco de 8 que el
+        // fill le cede al palo, a los 12 s de una canción de 3:40 el tramo medía 13dp contra 16 de
+        // umbral y NO SE DIBUJABA NADA. Un progreso que no aparece hasta pasado medio minuto es peor
+        // que un progreso corto.
+        val fillWidth = fillEnd.coerceAtLeast(0f)
         // Sale del fill YA acotado, no de `handleCenterX`: al principio de la canción la píldora
         // mide un círculo entero aunque el progreso sea menor, y con el riel calculado aparte se le
         // montaba encima justo ahí.
@@ -473,9 +719,9 @@ private fun FlatTrack(
         // hacerlos desaparecer de golpe. Con el palo puesto no se estira nada (invadiría su sitio),
         // de ahí el factor `1 - handleAlpha`.
         val railWidth = size.width - railStart
-        val railFade = (1f - railWidth / size.height).coerceIn(0f, 1f) * (1f - handleAlpha)
+        val railFade = (1f - railWidth / minSegment).coerceIn(0f, 1f) * (1f - handleAlpha)
         val fillRight = fillWidth + (size.width - fillWidth) * railFade
-        val fillEndCorner = insideCorner + (radius - insideCorner) * railFade
+        val fillEndCorner = insideCorner + (corner - insideCorner) * railFade
         if (railWidth > 0f) {
             // Extremos ASIMÉTRICOS, como el track del `Slider` de M3: redondo entero por fuera y
             // `insideCorner` por dentro (el lado que da al hueco). Ver [drawTrackSegment].
@@ -484,7 +730,7 @@ private fun FlatTrack(
                 right = size.width,
                 color = inactiveColor,
                 startCorner = insideCorner,
-                endCorner = radius,
+                endCorner = corner,
                 path = trackPath
             )
             // Búfer: entre el riel apagado y el fill, para que se lea como "esto ya está cargado"
@@ -514,24 +760,27 @@ private fun FlatTrack(
                 .coerceAtMost(ComponentConfig.ProgressStopIndicatorTrailingSpace.toPx())
             val indicatorX = size.width - dotRadius - stopInset
             if (fillWidth < indicatorX && indicatorX > railStart) {
-                drawCircle(color = activeColor, radius = dotRadius, center = Offset(indicatorX, radius))
+                drawCircle(color = activeColor, radius = dotRadius, center = Offset(indicatorX, centerY))
             }
         }
 
-        // Al principio de la canción el fill no llega a medir un círculo: se omite en vez de
-        // dibujar una píldora deformada, porque ahí el palo ya marca la posición.
+        // Los radios se ACOTAN a la mitad del tramo, que es lo que hace cualquier `RoundRect` cuando
+        // las esquinas no caben: un fill de 6dp sale como una pastillita de 6dp en vez de omitirse.
+        // Es lo que sustituye al suelo de ancho (ver `fillWidth`), y encima es más fiel — el Slider
+        // de M3 tampoco tiene un mínimo por debajo del cual el track activo desaparece.
         //
         // Su borde derecho es INTERIOR (da al hueco), así que lleva `insideCorner` y no el radio
         // entero: con la punta redonda completa asomaban "hombros" de riel a los lados del palo
         // —radio del track contra 4dp de palo—, que fue lo que llevó a cortarlo recto. 2dp es lo
         // que hace el Slider oficial y no los produce.
-        if (fillRight >= size.height) {
+        if (fillRight > 0f) {
+            val fillMaxCorner = fillRight / 2f
             drawTrackSegment(
                 left = 0f,
                 right = fillRight,
                 color = activeColor,
-                startCorner = radius,
-                endCorner = fillEndCorner,
+                startCorner = minOf(corner, fillMaxCorner),
+                endCorner = minOf(fillEndCorner, fillMaxCorner),
                 path = trackPath
             )
         }
@@ -547,14 +796,18 @@ private fun FlatTrack(
         // La onda NO necesita el hueco izquierdo y por eso no lo tiene: su trazo mide 4dp contra los
         // 26 del palo, así que la punta se distingue sola. Acá el track mide 12 y sin hueco el palo
         // quedaría embebido en el fill.
+        //
+        // Se dibuja con `drawnHandleW` (afinado al tocar) pero CENTRADO en el mismo `handleCenterX`
+        // que gobierna el hueco: el palo adelgaza sin moverse y sin que nada a su alrededor se
+        // entere, igual que el thumb del `Slider`, cuyo contenedor de 4dp no cambia de tamaño.
         if (handleVisible) {
             val handleH = metrics.handleHeight.toPx()
             drawRoundRect(
                 color = activeColor,
                 alpha = handleAlpha,
-                topLeft = Offset(handleCenterX - handleW / 2f, (size.height - handleH) / 2f),
-                size = Size(handleW, handleH),
-                cornerRadius = CornerRadius(handleW / 2f)
+                topLeft = Offset(handleCenterX - drawnHandleW / 2f, (size.height - handleH) / 2f),
+                size = Size(drawnHandleW, handleH),
+                cornerRadius = CornerRadius(drawnHandleW / 2f)
             )
         }
     }
@@ -602,9 +855,9 @@ private fun DrawScope.drawTrackSegment(
  * La FASE avanza solo mientras suena y se congela al pausar (un `Animatable` cancelado
  * conserva su valor): sin salto al reanudar y sin gastar frames con el audio detenido.
  * Geometría igual que la píldora plana (alto 12dp, stop indicator) para que alternar el
- * ajuste no mueva el layout. En reposo la punta la remata el propio trazo (cap redondo): el HANDLE
- * aparece SOLO al buscar, igual que en la píldora plana — lo llevaba permanente y se retiró por
- * decisión del usuario.
+ * ajuste no mueva el layout. El HANDLE se comporta igual que en la píldora plana: permanente por
+ * defecto y, si el usuario lo apaga en Ajustes, solo mientras arrastra — en reposo la punta la
+ * remata entonces el propio trazo (cap redondo).
  */
 @Composable
 private fun WavyTrack(
@@ -615,10 +868,17 @@ private fun WavyTrack(
     /** El usuario está arrastrando: el track debe seguir al dedo sin interpolar. */
     isDragging: Boolean,
     /**
-     * Presencia del handle (1 = visible). Los callers pasan 1f SIEMPRE (thumb permanente); se
-     * mantiene como parámetro porque de él sale, interpolado, el ancho del hueco onda↔palo↔riel.
+     * Presencia del handle (1 = visible). 1 fijo con el palo permanente (el default); de 0 a 1 con
+     * el dedo cuando el ajuste está apagado. De él sale, interpolado, el ancho del hueco
+     * onda↔palo↔riel y dónde TERMINA la onda: sin palo, en la posición misma.
      */
     handleAlpha: Float,
+    /**
+     * Ancho con el que se DIBUJA el palo: la mitad mientras el dedo está en la barra, como el thumb
+     * del `Slider` de M3. No entra en la geometría (ver el mismo parámetro en [FlatTrack]) — aquí
+     * eso importa el doble, porque de `handleW` sale además dónde termina la onda.
+     */
+    handleDrawWidth: Dp,
     /** Geometría derivada del grosor elegido en Ajustes. */
     metrics: ProgressMetrics,
     activeColor: Color,
@@ -650,73 +910,52 @@ private fun WavyTrack(
     // a la app "un buffer por delante" de SurfaceFlinger tras cualquier frame tardío (buffer
     // stuffing) — el estado no drena mientras no haya vsyncs vacíos, sobrevive al cierre del
     // reproductor y se come el primer scroll de la lista. Con vsyncs vacíos entre publicaciones la
-    // cola drena sola. `withFrameNanos` NO produce frames por sí mismo: sin invalidación no hay
-    // buffer. Misma regla que el giro de la cookie del play: no dibujar lo que no mueve un píxel.
+    // cola drena sola. Misma regla que el giro de la cookie del play: no dibujar lo que no mueve un
+    // píxel.
+    //
+    // **Corrección del 20 ago 2026**: aquí ponía que `withFrameNanos` "no produce frames por sí
+    // mismo: sin invalidación no hay buffer". Lo segundo es cierto y lo primero no — un bucle de
+    // `withFrameNanos` mantiene un frame callback pendiente, y con él el Choreographer pidiendo
+    // vsyncs por binder: 45 ms de cada segundo en el hilo principal, medidos en tres segundos sin
+    // una sola invalidación. El reloj es ahora [pixelPacedClock], que duerme entre píxeles.
+    //
+    // **Y no corre con el reproductor GUARDADO**: su subárbol es persistente (ver
+    // [com.qhana.siku.ui.LocalPlayerOnScreen]), así que sin este gate la onda seguiría animándose
+    // detrás de la biblioteca — la misma producción continua de frames, con la agravante de que nadie
+    // la ve. La fase se conserva donde estaba, igual que al pausar.
+    val onScreen = LocalPlayerOnScreen.current
     val density = LocalDensity.current
     val wavelengthPxForStep = with(density) { ComponentConfig.ProgressWaveLength.toPx() }
     val phase = remember { mutableFloatStateOf(0f) }
-    LaunchedEffect(isPlaying, wavelengthPxForStep) {
-        if (!isPlaying) return@LaunchedEffect
+    LaunchedEffect(isPlaying, onScreen, wavelengthPxForStep) {
+        if (!isPlaying || !onScreen) return@LaunchedEffect
         val stepTurns = 1.0 / wavelengthPxForStep
         val basePhase = phase.floatValue.toDouble()
-        val startNanos = withFrameNanos { it }
+        var startNanos = 0L
         var published = basePhase
-        while (true) {
-            withFrameNanos { now ->
-                val turns = basePhase + (now - startNanos) / (WAVE_MS_PER_CYCLE * 1_000_000.0)
-                if (turns - published >= stepTurns) {
-                    published = turns
-                    phase.floatValue = (turns % 1.0).toFloat()
-                }
+        // La onda recorre una longitud de onda cada `WAVE_MS_PER_CYCLE`, así que avanza
+        // `wavelengthPx / (WAVE_MS_PER_CYCLE/1000)` píxeles por segundo: ése es el ritmo al que hay
+        // un píxel que enseñar y también al que se despierta (ver [pixelPacedClock]).
+        val pixelsPerSecond = wavelengthPxForStep / (WAVE_MS_PER_CYCLE / 1000f)
+        pixelPacedClock(stepMillisFor(pixelsPerSecond)) { now ->
+            if (startNanos == 0L) startNanos = now
+            val turns = basePhase + (now - startNanos) / (WAVE_MS_PER_CYCLE * 1_000_000.0)
+            // La regla del píxel se queda como RED: el intervalo ya la garantiza.
+            if (turns - published >= stepTurns) {
+                published = turns
+                phase.floatValue = (turns % 1.0).toFloat()
             }
         }
     }
 
-    // El progreso llega a TIRONES: la posición se refresca una vez por segundo (el bucle de
-    // MusicPlayerScreen, deliberadamente lento para no despertar el main thread cada frame).
-    // En la píldora plana ese escalón se nota poco, pero aquí estira la onda de golpe y se ve
-    // como un tropiezo — y cuando el ciclo de la onda duraba también 1s (antes de derivar el periodo
-    // de la velocidad) el salto caía SIEMPRE en la misma fase, que lo hacía aún más visible. Se
-    // interpola entre ticks a velocidad constante.
-    //
-    // Este reloj y el de la fase son los DOS únicos de la barra que no salen del MotionScheme, por
-    // el mismo motivo: los dos tienen que ser LINEALES y durar exactamente lo que dura otra cosa
-    // (un tick de posición / un ciclo de onda). Un spring aceleraría y frenaría dentro del tramo,
-    // que es justo el tropiezo que se está corrigiendo.
-    //
-    // Y la misma regla que la fase para el avance del progreso: el tramo entre dos ticks se
-    // recorre a velocidad constante, pero el valor dibujado solo se publica cuando el borde del
-    // relleno se ha movido al menos un píxel del ancho del track — en una canción de 4 minutos son
-    // ~4 px por segundo, o sea 4 publicaciones por segundo y no 120 (el tween anterior invalidaba
-    // cada vsync para mover tres centésimas de píxel).
+    // Avance entre ticks de posición: MISMO reloj que la píldora plana, ver [rememberSmoothedProgress].
     var trackWidthPx by remember { mutableIntStateOf(0) }
-    val smoothFraction = remember { mutableFloatStateOf(fraction) }
-    LaunchedEffect(fraction, isPlaying, isDragging, trackWidthPx) {
-        val from = smoothFraction.floatValue
-        val jump = kotlin.math.abs(fraction - from)
-        // Un seek (o el cambio de canción) NO se interpola: sería un barrido de un segundo
-        // recorriendo toda la barra. Tampoco en pausa, donde no hay avance que suavizar, ni
-        // arrastrando: ahí el track tiene que ir pegado al dedo y no un segundo por detrás.
-        if (!isPlaying || isDragging || jump > PROGRESS_SNAP_THRESHOLD) {
-            smoothFraction.floatValue = fraction
-            return@LaunchedEffect
-        }
-        val stepFraction = if (trackWidthPx > 0) 1f / trackWidthPx else 0f
-        val startNanos = withFrameNanos { it }
-        var published = from
-        var t = 0.0
-        while (t < 1.0) {
-            withFrameNanos { now ->
-                t = ((now - startNanos) / (POSITION_TICK_MS * 1_000_000.0)).coerceAtMost(1.0)
-                val value = (from + (fraction - from) * t).toFloat()
-                if (kotlin.math.abs(value - published) >= stepFraction || t >= 1.0) {
-                    published = value
-                    smoothFraction.floatValue = value
-                }
-            }
-        }
-    }
-    val drawnFraction = smoothFraction.floatValue
+    val drawnFraction = rememberSmoothedProgress(
+        fraction = fraction,
+        isPlaying = isPlaying,
+        isDragging = isDragging,
+        trackWidthPx = trackWidthPx
+    )
 
     // Path reutilizado: este bloque se redibuja en cada frame mientras suena.
     val wavePath = remember { Path() }
@@ -730,7 +969,10 @@ private fun WavyTrack(
         val centerY = size.height / 2f
         val stroke = metrics.waveStroke.toPx()
         val radius = stroke / 2f
+        // Ancho de REPOSO: recorrido, huecos y final de la onda salen de él, nunca del animado.
         val handleW = ComponentConfig.ProgressHandleWidth.toPx()
+        // Ancho con el que se PINTA el palo. El recorte es la guardia del rebote del spring spatial.
+        val drawnHandleW = handleDrawWidth.toPx().coerceAtLeast(0f)
         val handleH = metrics.handleHeight.toPx()
         val handleVisible = handleAlpha > 0f
         // MISMA función de posición que el gesto y que la píldora plana: alternar el ajuste de
@@ -783,13 +1025,24 @@ private fun WavyTrack(
                     cap = StrokeCap.Round
                 )
             }
-            // Stop indicator del final. Se desvanece con el riel (misma `railAlpha`): es su
-            // remate, no un elemento aparte, y quedarse solo al final era justo lo que se veía mal.
+            // Stop indicator del final, con la fórmula de `LinearWavyProgressModifiers` de material3
+            // (`drawStopIndicator`): tamaño FIJO del spec acotado al TRAZO —no al grosor de la
+            // barra, que es lo que hacía crecer el punto hasta 8dp con la barra en 24— y del color
+            // ACTIVO (`ProgressIndicatorTokens.StopColor` = Primary), igual que en la píldora plana.
+            // Pintado con el inactivo era invisible: un punto del color del riel, dentro del riel.
+            //
+            // Su inset también es el del componente oficial: cuando el punto es más FINO que el
+            // trazo se mete un cuarto de trazo hacia adentro, para que el cap redondo del riel no se
+            // lo coma por la derecha.
+            val stopSize = metrics.stopIndicator.toPx()
+            val stopOffset = if (stopSize >= stroke) 0f else stroke / WAVE_STOP_INSET_DIVISOR
+            // Se desvanece con el riel (misma `railAlpha`): es su remate, no un elemento aparte, y
+            // quedarse solo al final era justo lo que se veía mal.
             drawCircle(
-                color = inactiveColor,
+                color = activeColor,
                 alpha = railAlpha,
-                radius = radius,
-                center = Offset(endX, centerY)
+                radius = stopSize / 2f,
+                center = Offset(endX - stopOffset, centerY)
             )
         }
 
@@ -810,7 +1063,12 @@ private fun WavyTrack(
         // sea a `gap` del borde izquierdo del palo — el mismo aire medido entre BORDES que en el modo
         // plano y en la referencia del spec. Antes la onda llegaba hasta `activeEndX` (el centro del
         // palo) y se metía por debajo de él sin hueco.
-        val waveEndX = activeEndX - dragGap
+        //
+        // Sin palo (el ajuste apagado, en reposo) la onda termina EN la posición: ahí su punta es lo
+        // que la marca, igual que el borde del fill en el modo plano, y el riel sigue arrancando un
+        // `gap` más allá porque `inactiveStartX` interpola el suyo con el mismo `handleAlpha`. Se
+        // interpola en vez de conmutar por lo de siempre: el cambio ocurre con el dedo en la barra.
+        val waveEndX = activeEndX - dragGap * handleAlpha
         // Al principio de la canción no cabe onda antes del palo (waveEndX <= startX): se omite, como
         // el fill del modo plano, y el palo marca la posición solo.
         if (waveEndX > startX) {
@@ -831,9 +1089,9 @@ private fun WavyTrack(
             )
         }
 
-        // HANDLE del spec Expressive (palo vertical), SIEMPRE visible (como las barras de progreso
-        // del spec). Estuvo un tiempo solo-al-arrastrar y volvió a permanente por decisión del
-        // usuario. Va CENTRADO en vertical con la onda pasándole por detrás, no rematando la punta.
+        // HANDLE del spec Expressive (palo vertical), permanente por defecto (como las barras de
+        // progreso del spec) y solo-al-arrastrar si el usuario lo apaga en Ajustes → Apariencia.
+        // Va CENTRADO en vertical con la onda pasándole por detrás, no rematando la punta.
         //
         // Va dibujado acá dentro y no como `thumb` del Slider a propósito: el thumb del Slider se
         // posiciona con el valor CRUDO —que llega a tirones, una vez por segundo— mientras la onda
@@ -848,9 +1106,9 @@ private fun WavyTrack(
             drawRoundRect(
                 color = activeColor,
                 alpha = handleAlpha,
-                topLeft = Offset(activeEndX - handleW / 2f, centerY - handleH / 2f),
-                size = Size(handleW, handleH),
-                cornerRadius = CornerRadius(handleW / 2f)
+                topLeft = Offset(activeEndX - drawnHandleW / 2f, centerY - handleH / 2f),
+                size = Size(drawnHandleW, handleH),
+                cornerRadius = CornerRadius(drawnHandleW / 2f)
             )
         }
     }
@@ -971,10 +1229,9 @@ private fun FormatChip(
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelSmall.copy(
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = 0.5.sp
-            ),
+            // `labelSmallEmphasized` da los dos valores que aquí se ponían a mano: peso Bold y
+            // tracking 0.5sp — ese `letterSpacing` ERA ya el del token `LabelSmallTracking`.
+            style = MaterialTheme.typography.labelSmallEmphasized,
             color = MaterialTheme.colorScheme.onSecondaryContainer,
             maxLines = 1,
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
@@ -1046,7 +1303,7 @@ private fun TimeChip(text: String, textColor: Color, modifier: Modifier = Modifi
     ) {
         Text(
             text = text,
-            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
+            style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSecondaryContainer,
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
         )

@@ -11,7 +11,12 @@
          el flash de la pantalla de login al reabrir la app. -->
     <style name="Theme.MusicPlayer.Starting" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">@color/splash_background</item>
-        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <!-- Icono PROPIO del splash, no @mipmap/ic_launcher: el adaptive icon del launcher
+             sirve WEBP de 432 px como mucho (xxxhdpi) y el splash de Android 12+ lo pinta sobre
+             un lienzo de 288dp (~790 px a densidad 2.75), con el agravante de que dentro de ese
+             asset el dibujo solo ocupa el 46 % — quedaban ~150 px reales estirados 2,5x. El de
+             ic_splash_icon es el MISMO encuadre con el foreground a 1152 px. Ver su XML. -->
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_splash_icon</item>
         <item name="postSplashScreenTheme">@style/Theme.MusicPlayer</item>
     </style>
 </resources>

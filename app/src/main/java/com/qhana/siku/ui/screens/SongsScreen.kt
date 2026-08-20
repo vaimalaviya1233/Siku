@@ -22,7 +22,6 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.paging.compose.collectAsLazyPagingItems
 import coil3.compose.AsyncImage
@@ -117,13 +116,11 @@ fun SongsScreen(
     // Los chips viven en la pestaña Todas (no en favoritos ni en el overlay de búsqueda).
     val sourceFilters = uiState.sourceFilters
     val showSourceChips = currentFilter == SongFilter.ALL && !isSearchActive
-    // Visibilidad por familias presentes en la biblioteca (ver SourceFilterRow).
-    val hasLocalSongs by viewModel.hasLocalSongs.collectAsStateWithLifecycle()
-    val hasCloudSongs by viewModel.hasCloudSongs.collectAsStateWithLifecycle()
-    // Local solo si hay AMBAS familias (con solo-local no hay nada que filtrar);
-    // Descargadas/Nube con que haya nube (solo-nube: offline vs streaming sigue valiendo).
-    val showLocalChip = hasLocalSongs && hasCloudSongs
-    val showCloudChips = hasCloudSongs
+    // La REGLA de cuándo se ven los chips vive en el ViewModel (ver [LibraryViewModel.hasSourceSplit]);
+    // aquí solo se lee. Estaba calculada a mano aquí Y en LibraryScreen —para Artistas/Álbumes— con
+    // la misma expresión copiada, o sea dos sitios capaces de discrepar sobre cuándo hay control.
+    val showLocalChip by viewModel.showLocalSourceChip.collectAsStateWithLifecycle()
+    val showCloudChips by viewModel.showCloudSourceChips.collectAsStateWithLifecycle()
 
     // Al cambiar la query, volver arriba: si no, el scroll se queda donde estaba y las
     // secciones de artistas/álbumes (que van al principio) quedan fuera de pantalla.
@@ -131,14 +128,22 @@ fun SongsScreen(
         if (isSearchActive) listState.scrollToItem(0)
     }
 
-    // Sonda de frames largos (solo debug): se arma al empezar cada scroll de esta lista, para ver
-    // qué se compone/recompone antes de cada frame largo. Ver JankProbe.
-    LaunchedEffect(listState) {
-        snapshotFlow { listState.isScrollInProgress }.collect { if (it) JankProbe.arm { "scroll Todas" } }
-    }
-    // Room invalidó el PagingSource (refresh en vuelo): las filas se recomponen con instancias nuevas.
-    LaunchedEffect(pagedSongs) {
-        snapshotFlow { pagedSongs.loadState.refresh }.collect { JankProbe.mark { "paging refresh=$it" } }
+    // Sonda de frames largos (solo debug): se arma al empezar cada scroll de esta lista y anota los
+    // refresh del PagingSource, para ver qué se compone antes de cada frame largo. Ver JankProbe.
+    //
+    // **Gateada por `JankProbe.isEnabled`**, porque estos dos no son marcas sueltas sino
+    // `snapshotFlow(...).collect`: colectores PERMANENTES, uno de ellos sobre el `loadState` de
+    // Paging, en la lista con más presión de scroll de la app. El `inline` + early return de la
+    // sonda no puede ahorrar nada ahí — el coste está en el efecto, no en la marca. Con la sonda
+    // apagada (lo normal) no se registra ninguno de los dos.
+    if (JankProbe.isEnabled) {
+        LaunchedEffect(listState) {
+            snapshotFlow { listState.isScrollInProgress }.collect { if (it) JankProbe.arm { "scroll Todas" } }
+        }
+        // Room invalidó el PagingSource (refresh en vuelo): las filas se recomponen con instancias nuevas.
+        LaunchedEffect(pagedSongs) {
+            snapshotFlow { pagedSongs.loadState.refresh }.collect { JankProbe.mark { "paging refresh=$it" } }
+        }
     }
 
     // Vacío CONFIRMADO por Paging, no "0 ítems en este frame". `itemCount` arranca en 0 al montar
@@ -345,12 +350,18 @@ private fun SongItemOptimized(
     onStatusClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val surfaceHigh = MaterialTheme.colorScheme.surfaceContainerHigh
+    // Fondo de la fila: `surface` (98) — el lado del CONTENIDO de la horquilla. La fila es MÁS
+    // CLARA que la página (`surfaceContainer`, 94) y flota sobre ella, igual que las tarjetas de
+    // llamada del Dialer de Google, que es la referencia de la que salió este reparto (ver
+    // `headerColor` en LibraryScreen). Estuvo en `surfaceContainerHigh` (92) y luego en
+    // `surfaceContainer` (94), las dos apilando hacia el lado oscuro: así la cabecera nunca
+    // conseguía separarse de la banda de filas que le pasa por debajo al scrollear.
+    val rowSurface = MaterialTheme.colorScheme.surface
     // Resaltado del ítem en reproducción: `primaryContainer` (contenedor de acento sólido, sin
     // opacidad), el MISMO tratamiento que la cola. Sustituye al blend del acento del álbum al 30%
-    // sobre `surfaceContainerHigh`, que en un álbum monocromo quedaba casi idéntico al resto de
+    // sobre el fondo de la fila, que en un álbum monocromo quedaba casi idéntico al resto de
     // filas (ese acento venía ya proyectado a un tono cercano a la superficie).
-    val backgroundColor = if (isPlaying) MaterialTheme.colorScheme.primaryContainer else surfaceHigh
+    val backgroundColor = if (isPlaying) MaterialTheme.colorScheme.primaryContainer else rowSurface
 
     // Fondo REAL bajo el contenido de la fila, contra el que se mide la píldora de acciones: es
     // `backgroundColor` a secas porque el resaltado del ítem activo lo pinta el `Row` de abajo, no
@@ -460,7 +471,7 @@ private fun SongItemMenu(
             MaterialSymbol("more_vert", size = 18.sp, color = colors.content)
         }
         // Menú SEGMENTADO (popup + grupo), no el `DropdownMenu` clásico: ver la nota en SortChip.
-        DropdownMenuPopup(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+        AppMenuPopup(expanded = showMenu, onDismissRequest = { showMenu = false }) {
             DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
                 DropdownMenuItem(
                     onClick = { onAddToPlaylistRequest(songId); showMenu = false },
@@ -544,7 +555,6 @@ private fun SourceFilterRow(
                 text = androidx.compose.ui.res.pluralStringResource(
                     R.plurals.song_count, songCount, songCount
                 ),
-                style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSecondaryContainer
             )
         }
@@ -570,7 +580,7 @@ private fun SourceFilterRow(
 private fun SearchSectionHeader(title: String) {
     Text(
         text = title,
-        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+        style = MaterialTheme.typography.titleSmallEmphasized,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(start = 20.dp, end = 16.dp, top = 12.dp, bottom = 8.dp)
     )

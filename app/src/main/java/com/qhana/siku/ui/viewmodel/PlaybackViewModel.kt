@@ -45,7 +45,6 @@ import com.qhana.siku.player.PlaybackCoordinator
 import com.qhana.siku.player.audio.EqCurve
 import com.qhana.siku.player.audio.EqualizerAudioProcessor
 import java.util.concurrent.TimeUnit
-import com.qhana.siku.ui.components.ComponentConfig
 import com.qhana.siku.ui.components.EqPresets
 import com.qhana.siku.ui.state.LyricsFailure
 import com.qhana.siku.ui.state.LyricsSaveUiState
@@ -121,14 +120,6 @@ class PlaybackViewModel @Inject constructor(
         private const val DOWNLOAD_STATUS_SAMPLE_MS = 200L
 
         /**
-         * Lado en px con el que se precarga la carátula del tema en curso: EL MISMO con el que la
-         * pinta el NowPlaying, leído de la misma constante ([ComponentConfig.NowPlayingArtDecodePx]).
-         * Antes esto valía 900 con un KDoc que decía "es el tamaño del NowPlaying" —que pedía 800—,
-         * así que la precarga y el player decodificaban el mismo JPEG dos veces en paralelo.
-         */
-        private val VISUAL_ART_PRELOAD_PX: Int get() = ComponentConfig.NowPlayingArtDecodePx
-
-        /**
          * Margen que se le da a un reintento para EMPEZAR a sonar ([monitorPlaybackRecovery]).
          *
          * Si se agota se salta la canción, pero NO se marca corrupta: "no arrancó a tiempo"
@@ -181,6 +172,11 @@ class PlaybackViewModel @Inject constructor(
     val nowPlayingProgressThickness: StateFlow<Int> =
         musicPreferences.nowPlayingProgressThicknessFlow
             .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadNowPlayingProgressThickness())
+
+    /** Handle permanente en la barra de progreso (mismo motivo de observación que el fondo). */
+    val nowPlayingProgressHandle: StateFlow<Boolean> =
+        musicPreferences.nowPlayingProgressHandleFlow
+            .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadNowPlayingProgressHandle())
 
     /** Forma del MiniPlayer: rectángulo redondeado vs píldora (mismo motivo de observación). */
     val miniPlayerRoundedRect: StateFlow<Boolean> =
@@ -971,7 +967,15 @@ class PlaybackViewModel @Inject constructor(
             }
             // La carátula cambió (o es otra canción): lo que hubiera extraído ya no vale.
             resolveAlbumColors(dbSong, restart = isNewSong || artUriChanged || downloadCompleted)
-            preloadVisualArt(dbSong)
+            // Aquí había un `preloadVisualArt(dbSong)` que precalentaba la carátula grande. Se quitó
+            // el 19 ago 2026 porque desde el reproductor PERSISTENTE es redundante: su árbol está
+            // compuesto siempre que hay canción y pide esa misma imagen en cuanto se MIDE, ocurra o
+            // no la colocación. Las dos peticiones salían casi a la vez y **Coil no fusiona
+            // peticiones concurrentes**, así que la segunda no encontraba nada en el caché y
+            // decodificaba otra vez: medido en un trace de Perfetto, el mismo JPEG de 1500×1500 a
+            // 800×800 dos veces con 29 ms de diferencia, 162 y 136 ms. Igualar la clave de caché
+            // (ver [nowPlayingArtRequest]) era necesario pero no suficiente — lo que sobraba era el
+            // segundo peticionario.
             if (isNewSong) preloadNextSong(dbSong)
         }
     }
@@ -1099,16 +1103,6 @@ class PlaybackViewModel @Inject constructor(
         }
     }
 
-    private fun preloadVisualArt(song: Song) {
-        val uri = song.albumArtUriString ?: return
-        viewModelScope.launch(Dispatchers.IO) {
-            try { 
-                ImageRequest.Builder(context).data(uri).size(VISUAL_ART_PRELOAD_PX).build().also { context.imageLoader.enqueue(it) }
-            } catch (e: Exception) {
-                Log.w(TAG, "Error preloading visual art for song ${song.id}", e)
-            }
-        }
-    }
 
     private suspend fun handlePlaybackError(errorInfo: PlaybackErrorInfo) {
         // La canción que falló viaja EN el evento. Leerla de `currentSong` era una carrera:
@@ -1269,6 +1263,38 @@ class PlaybackViewModel @Inject constructor(
         val oldJob = playJob
         playJob = viewModelScope.launch {
             oldJob?.cancelAndJoin()
+            when (val result = playbackUseCase.playShuffled(songs)) {
+                is MusicPlaybackUseCase.PlayResult.Success -> {
+                    if (!result.song.path.startsWith("file://") && result.song.remoteId != null) {
+                        startAutoDownload(result.song, forcePriority = result.willStream)
+                    }
+                }
+                is MusicPlaybackUseCase.PlayResult.Error -> showPlaybackError(result.messageRes)
+                else -> {}
+            }
+        }
+    }
+
+    /**
+     * Aleatorio sobre un subconjunto por ORIGEN: las acciones "Sin conexión" / "Sin descargar" del
+     * inicio, que solo existen mientras la biblioteca esté partida en esas dos mitades.
+     *
+     * NO registra contexto en "Seguir escuchando", al revés que los chips de género o Favoritos, y
+     * es deliberado: aquéllos son un lugar de la biblioteca y éste es un ESTADO del dispositivo.
+     * "Lo que suena sin red" no significa lo mismo dentro de una semana —cambia con cada descarga
+     * y con el tope LRU—, así que una tarjeta para reanudarlo prometería volver a algo que ya no
+     * existe.
+     */
+    fun shuffleBySource(sourceFilters: Set<SongSourceFilter>) {
+        if (sourceFilters.isEmpty()) return
+        resetRetryBudget()
+        val oldJob = playJob
+        playJob = viewModelScope.launch {
+            oldJob?.cancelAndJoin()
+            // Mismo snapshot que arma la cola de la pestaña Todas: el orden da igual (se mezcla),
+            // pero así el subconjunto lo define el ÚNICO sitio que sabe qué es "descargada".
+            val songs = repository.getSongsSnapshot("", SortOrder.TITLE_ASC, sourceFilters)
+            if (songs.isEmpty()) return@launch
             when (val result = playbackUseCase.playShuffled(songs)) {
                 is MusicPlaybackUseCase.PlayResult.Success -> {
                     if (!result.song.path.startsWith("file://") && result.song.remoteId != null) {
