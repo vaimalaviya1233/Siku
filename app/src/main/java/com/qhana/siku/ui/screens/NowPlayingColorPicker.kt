@@ -23,6 +23,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
 import com.qhana.siku.ui.components.*
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.appTextButtonColors
 import com.qhana.siku.ui.theme.rememberAccentPreview
 
 /** Tamaños de las dos muestras de cada fila: el color de la carátula y el acento que generaría. */
@@ -63,7 +65,7 @@ internal fun ColorPickerDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) }
+            TextButton(colors = appTextButtonColors(), onClick = onDismiss) { Text(stringResource(R.string.common_close)) }
         },
         title = { Text(stringResource(R.string.color_picker_title)) },
         text = {
@@ -79,7 +81,7 @@ internal fun ColorPickerDialog(
                 Text(
                     text = stringResource(R.string.color_picker_legend),
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(12.dp))
 
@@ -98,13 +100,13 @@ internal fun ColorPickerDialog(
  */
 @Composable
 private fun AppliedAccentHeader(savedAccent: Int) {
-    val applied = MaterialTheme.colorScheme.primary
+    val applied = AppColors.primary
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(
             modifier = Modifier
                 .size(AppliedSwatchSize)
                 .background(applied, CircleShape)
-                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
+                .border(1.dp, AppColors.outlineVariant, CircleShape)
         )
         Spacer(modifier = Modifier.width(12.dp))
         Column {
@@ -115,7 +117,7 @@ private fun AppliedAccentHeader(savedAccent: Int) {
             Text(
                 text = stringResource(R.string.color_picker_seed, hexOf(savedAccent)),
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = AppColors.onSurfaceVariant
             )
         }
     }
@@ -155,8 +157,8 @@ private fun CandidateRow(
                 .background(Color(candidate.color), CircleShape)
                 .border(
                     width = if (candidate.isWinner) 2.dp else 1.dp,
-                    color = if (candidate.isWinner) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.outlineVariant,
+                    color = if (candidate.isWinner) AppColors.primary
+                    else AppColors.outlineVariant,
                     shape = CircleShape
                 )
                 .semantics { contentDescription = hex }
@@ -184,7 +186,7 @@ private fun CandidateRow(
                 Text(
                     text = note,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
             }
         }

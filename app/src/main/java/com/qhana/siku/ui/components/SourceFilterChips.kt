@@ -17,6 +17,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
 import com.qhana.siku.data.model.SongSourceFilter
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.appFilterChipColors
 
 /**
  * Chips de origen combinables por UNIÓN (Local + Descargadas = todo lo offline), compartidos
@@ -64,6 +66,7 @@ fun SourceFilterChip(
     onClick: () -> Unit
 ) {
     FilterChip(
+        colors = appFilterChipColors(),
         selected = selected,
         onClick = onClick,
         label = { Text(label) },
@@ -90,19 +93,19 @@ fun FilteredEmptyHint() {
         MaterialSymbol(
             "filter_alt_off",
             size = 64.sp,
-            color = MaterialTheme.colorScheme.outline
+            color = AppColors.outline
         )
         Spacer(modifier = Modifier.height(16.dp))
         Text(
             text = stringResource(R.string.filter_empty_title),
             style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = AppColors.onSurfaceVariant
         )
         Spacer(modifier = Modifier.height(8.dp))
         Text(
             text = stringResource(R.string.filter_empty_subtitle),
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = AppColors.onSurfaceVariant,
             textAlign = TextAlign.Center
         )
     }

@@ -611,26 +611,22 @@
     <!-- Fuentes de música: onboarding (Fase 4) + sección de Ajustes -->
     <string name="onboarding_local_title">Tu música</string>
     <string name="onboarding_local_subtitle">Empecemos por la música que ya tienes en el teléfono. Elige una de las dos formas, o sáltalo si toda tu música está en la nube.</string>
-    <string name="onboarding_cloud_title">OneDrive</string>
-    <string name="onboarding_cloud_subtitle">Conecta tu cuenta para escuchar tu música de la nube y descargarla para oírla sin conexión.</string>
+    <string name="onboarding_cloud_title">Conecta tu nube</string>
+    <string name="onboarding_cloud_subtitle">Selecciona un proveedor y conéctate para escuchar tu música de la nube y descargarla para oírla sin conexión.</string>
     <string name="onboarding_start">Empezar</string>
-    <string name="onboarding_skip">Omitir</string>
-    <string name="onboarding_need_source">Elige una fuente para continuar</string>
-    <string name="onboarding_continue">Continuar</string>
-    <!-- Indicador de paso del onboarding. %1$d = paso actual, %2$d = total -->
-    <string name="onboarding_step">Paso %1$d de %2$d</string>
-    <string name="onboarding_storage_title">Espacio</string>
+    <string name="onboarding_need_source">Conéctate para continuar; si no, regresa y escoge carpetas.</string>
+    <string name="onboarding_storage_title">Almacenamiento</string>
     <string name="onboarding_storage_subtitle">Tu música de la nube se descarga al teléfono para escucharla sin conexión. Decide cuánto espacio puede ocupar; se cambia cuando quieras desde Ajustes.</string>
-    <string name="onboarding_back_to_sources">Volver a las fuentes</string>
-    <string name="onboarding_notifications_title">Notificaciones</string>
-    <string name="onboarding_notifications_subtitle">Siku solo las usa para esto:</string>
+    <string name="onboarding_notifications_title">Permisos</string>
+    <string name="onboarding_notifications_subtitle">Siku solo pide uno, y solo para lo que ves aquí.</string>
+    <string name="onboarding_notif_card_title">Notificaciones</string>
+    <string name="onboarding_notif_card_desc">Se usan solo para esto:</string>
     <string name="onboarding_notif_player_title">Controles de reproducción</string>
     <string name="onboarding_notif_player_desc">Play, siguiente y la carátula en la barra de estado y en la pantalla de bloqueo.</string>
     <string name="onboarding_notif_sync_title">Progreso de tu nube</string>
     <string name="onboarding_notif_sync_desc">Cuánto falta del escaneo y de las descargas de OneDrive.</string>
     <string name="onboarding_notif_note">Nunca vas a recibir avisos promocionales. Puedes cambiarlo cuando quieras en los ajustes del sistema.</string>
-    <string name="onboarding_notif_allow">Permitir notificaciones</string>
-    <string name="onboarding_notif_skip">Ahora no</string>
+    <string name="onboarding_notif_allow">Permitir</string>
 
     <string name="sources_header">Fuentes de música</string>
     <string name="source_onedrive_title">OneDrive</string>

@@ -5,7 +5,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
-import androidx.compose.material3.MaterialTheme.colorScheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -18,6 +17,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import com.qhana.siku.ui.theme.AppMenuGroup
 import com.qhana.siku.R
 import com.qhana.siku.data.model.Playlist
 import com.qhana.siku.data.repository.PlaylistCoverMeta
@@ -27,6 +27,10 @@ import com.qhana.siku.ui.components.GroupedListRow
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.MenuItemIcon
 import com.qhana.siku.ui.components.rememberRowActionColors
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
+import com.qhana.siku.ui.theme.appMenuItemColors
+import com.qhana.siku.ui.theme.appTextButtonColors
 
 /**
  * Margen lateral de TODO lo que hay en esta pestaña: la píldora de Favoritos, el encabezado con su
@@ -117,7 +121,7 @@ fun PlaylistList(
                 Text(
                     text = stringResource(R.string.playlist_section_title),
                     style = MaterialTheme.typography.titleMediumEmphasized,
-                    color = MaterialTheme.colorScheme.onSurface,
+                    color = AppColors.onSurface,
                     // Una línea y elipsis, con `weight` para que sea el TÍTULO el que ceda: hoy es
                     // un literal corto, pero una traducción larga o una pantalla chica lo envolverían
                     // a dos líneas y estirarían el encabezado. Que se recorte el rótulo es correcto;
@@ -142,6 +146,7 @@ fun PlaylistList(
                 // área táctil; lo que pierde es la mancha de color con la que competía contra el
                 // contenido de la pestaña.
                 TextButton(
+                    colors = appTextButtonColors(),
                     onClick = onCreatePlaylist,
                     // Shape-morph al presionar, como el resto de botones de la app.
                     shapes = ButtonDefaults.shapes()
@@ -216,15 +221,15 @@ fun PlaylistList(
             title = { Text(stringResource(R.string.playlist_delete_title)) },
             text = { Text(stringResource(R.string.playlist_delete_confirm, playlist.name)) },
             confirmButton = {
-                TextButton(onClick = {
+                TextButton(colors = appTextButtonColors(), onClick = {
                     onDeletePlaylist(playlist.id)
                     playlistToDelete = null
                 }) {
-                    Text(stringResource(R.string.common_delete), color = MaterialTheme.colorScheme.error)
+                    Text(stringResource(R.string.common_delete), color = AppColors.error)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { playlistToDelete = null }) {
+                TextButton(colors = appTextButtonColors(), onClick = { playlistToDelete = null }) {
                     Text(stringResource(R.string.common_cancel))
                 }
             }
@@ -256,20 +261,20 @@ private fun NoPlaylistsState() {
         MaterialSymbol(
             "queue_music",
             fill = true,
-            color = MaterialTheme.colorScheme.outline,
+            color = AppColors.outline,
             size = 64.sp
         )
         Spacer(modifier = Modifier.height(16.dp))
         Text(
             text = stringResource(R.string.playlist_none_created),
             style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onSurface
+            color = AppColors.onSurface
         )
         Spacer(modifier = Modifier.height(4.dp))
         Text(
             text = stringResource(R.string.playlist_none_created_subtitle),
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = AppColors.onSurfaceVariant,
             textAlign = TextAlign.Center
         )
     }
@@ -281,7 +286,7 @@ private fun FavoritesItem(
     count: Int,
     onClick: () -> Unit
 ) {
-    Surface(
+    AppSurface(
         modifier = Modifier
             .fillMaxWidth()
             // Grupo propio: margen segmentado + aire antes del grupo de listas (M3 Expressive
@@ -291,7 +296,7 @@ private fun FavoritesItem(
         // PÍLDORA (lados totalmente redondos): distingue a Favoritos como acceso especial,
         // separado del grupo segmentado de listas de abajo.
         shape = RoundedCornerShape(percent = 50),
-        color = MaterialTheme.colorScheme.secondaryContainer // Emphasis for Favorites
+        color = AppColors.secondaryContainer // Emphasis for Favorites
     ) {
         Row(
             modifier = Modifier
@@ -303,15 +308,15 @@ private fun FavoritesItem(
         ) {
             // Corazón sobre badge con forma M3 Expressive (MaterialShapes): acento dentro
             // de la píldora tonal, misma familia que el shape reveal del NowPlaying.
-            Surface(
+            AppSurface(
                 shape = MaterialShapes.Cookie9Sided.toShape(),
-                color = MaterialTheme.colorScheme.primary,
+                color = AppColors.primary,
                 modifier = Modifier.size(48.dp)
             ) {
                 // fillMaxSize: sin él, el Box se ciñe al glifo y `Center` no centra nada dentro
                 // del badge de 48dp — el corazón quedaba pegado a la esquina superior izquierda.
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    MaterialSymbol("favorite", fill = true, size = 24.sp, color = MaterialTheme.colorScheme.onPrimary)
+                    MaterialSymbol("favorite", fill = true, size = 24.sp, color = AppColors.onPrimary)
                 }
             }
             Spacer(modifier = Modifier.width(16.dp))
@@ -319,12 +324,12 @@ private fun FavoritesItem(
                 Text(
                     text = stringResource(R.string.common_favorites),
                     style = MaterialTheme.typography.bodyLargeEmphasized,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                    color = AppColors.onSecondaryContainer
                 )
                 Text(
                     text = pluralStringResource(R.plurals.song_count, count, count),
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = ACCENT_SECONDARY_ALPHA)
+                    color = AppColors.onSecondaryContainer.copy(alpha = ACCENT_SECONDARY_ALPHA)
                 )
             }
         }
@@ -358,7 +363,7 @@ private fun PlaylistItem(
             Text(
                 text = playlist.name,
                 style = MaterialTheme.typography.bodyLargeEmphasized,
-                color = MaterialTheme.colorScheme.onSurface,
+                color = AppColors.onSurface,
                 maxLines = 1,
                 overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
             )
@@ -367,7 +372,7 @@ private fun PlaylistItem(
             Text(
                 text = pluralStringResource(R.plurals.song_count, songCount, songCount),
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = AppColors.onSurfaceVariant
             )
         },
         trailingContent = {
@@ -379,7 +384,7 @@ private fun PlaylistItem(
                     onClick = onPlay,
                     enabled = songCount > 0,
                     shapes = IconButtonDefaults.shapes(),
-                    colors = IconButtonDefaults.iconButtonColors(contentColor = MaterialTheme.colorScheme.primary),
+                    colors = IconButtonDefaults.iconButtonColors(contentColor = AppColors.primary),
                     modifier = Modifier.size(40.dp)
                 ) {
                     MaterialSymbol("play_circle", size = 30.sp, fill = true)
@@ -399,7 +404,7 @@ private fun PlaylistItemMenu(onRename: () -> Unit, onDelete: () -> Unit) {
     // Píldora vertical tonal, MISMO componente y colores que el ⋮ de "Todas"/Artistas
     // (rememberRowActionColors sobre el fondo real de la fila): las listas de navegación comparten
     // trailing. Antes era un IconButton pelado de 24sp sin contenedor, que rompía esa consistencia.
-    val colors = rememberRowActionColors(MaterialTheme.colorScheme.surface)
+    val colors = rememberRowActionColors(AppColors.surface)
     Box {
         FilledIconButton(
             onClick = { showMenu = true },
@@ -416,8 +421,9 @@ private fun PlaylistItemMenu(onRename: () -> Unit, onDelete: () -> Unit) {
         }
         // Menú SEGMENTADO (popup + grupo), no el `DropdownMenu` clásico: ver la nota en SortChip.
         AppMenuPopup(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-            DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
+            AppMenuGroup(shapes = MenuDefaults.groupShapes()) {
                 DropdownMenuItem(
+                    colors = appMenuItemColors(),
                     onClick = {
                         showMenu = false
                         onRename()
@@ -431,13 +437,14 @@ private fun PlaylistItemMenu(onRename: () -> Unit, onDelete: () -> Unit) {
                 // de `copy` que comparten `textColor`/`leadingIconColor`, así que esa llamada no
                 // resuelve.
                 DropdownMenuItem(
+                    colors = appMenuItemColors(),
                     onClick = {
                         showMenu = false
                         onDelete()
                     },
-                    text = { Text(stringResource(R.string.common_delete), color = MaterialTheme.colorScheme.error) },
+                    text = { Text(stringResource(R.string.common_delete), color = AppColors.error) },
                     shape = MenuDefaults.trailingItemShape,
-                    leadingIcon = { MenuItemIcon("delete", color = MaterialTheme.colorScheme.error) }
+                    leadingIcon = { MenuItemIcon("delete", color = AppColors.error) }
                 )
             }
         }
@@ -457,12 +464,12 @@ private fun PlaylistThumb(arts: List<String>, modifier: Modifier = Modifier) {
             .clip(RoundedCornerShape(12.dp))
     ) {
         when (arts.size) {
-            0 -> Surface(
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            0 -> AppSurface(
+                color = AppColors.surfaceContainerHigh,
                 modifier = Modifier.matchParentSize()
             ) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    MaterialSymbol("playlist_play", fill = true, size = 24.sp, color = MaterialTheme.colorScheme.primary)
+                    MaterialSymbol("playlist_play", fill = true, size = 24.sp, color = AppColors.primary)
                 }
             }
             1 -> ThumbTile(arts[0], Modifier.matchParentSize())

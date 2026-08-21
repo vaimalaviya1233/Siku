@@ -3,28 +3,26 @@ package com.qhana.siku.ui.components
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.material3.DropdownMenuPopup
 import androidx.compose.material3.DropdownMenuPopupPositionProvider
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorPosition
 import androidx.compose.material3.MenuDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.window.PopupProperties
 
 /**
- * El `DropdownMenuPopup` de la app: el de material3 con **el contenedor del menú un peldaño más
- * alto en la escala neutra**. Es el punto de entrada ÚNICO para cualquier menú desplegable —
- * `DropdownMenuPopup` crudo no debe aparecer en el repo, igual que `ModalBottomSheet` crudo
- * tampoco (ver [AppModalSheet]).
+ * El `DropdownMenuPopup` de la app. Es el punto de entrada ÚNICO para cualquier menú desplegable —
+ * `DropdownMenuPopup` crudo no debe aparecer en el repo, igual que `ModalBottomSheet` crudo tampoco
+ * (ver [AppModalSheet]) — y va SIEMPRE con [AppMenuGroup] dentro, que es quien pone el color.
  *
- * **El problema**: M3 pinta el menú con `surfaceContainerLow`, que está a UN peldaño de `surface`
- * —el fondo de casi todas las pantallas— y a dos del `surfaceContainer` de las barras. Con un tema
- * dinámico, cuya escala neutra apenas tiene croma, esa distancia no se ve: el menú se fundía con lo
- * que tapaba y solo lo delataba su sombra. Es exactamente el agotamiento de la escala neutra que ya
- * obligó a separar el MiniPlayer por croma; aquí la salida es la contraria —quedarse en la escala,
- * pero en su TECHO— porque un menú de varias entradas teñido de acento pesa demasiado para algo que
- * se abre y se cierra en un segundo. (M3 tabula esa otra opción: `groupVibrantContainerColor`, sobre
- * `tertiaryContainer`. Su propio doc pide usarla "sparingly", y aquí serían los nueve menús.)
+ * **La decisión de color, que ahora vive en [AppMenuGroup]**: M3 pinta el menú con
+ * `surfaceContainerLow`, que está a UN peldaño de `surface` —el fondo de casi todas las pantallas— y
+ * a dos del `surfaceContainer` de las barras. Con un tema dinámico, cuya escala neutra apenas tiene
+ * croma, esa distancia no se ve: el menú se fundía con lo que tapaba y solo lo delataba su sombra.
+ * Es el mismo agotamiento de la escala neutra que ya obligó a separar el MiniPlayer por croma; aquí
+ * la salida es la contraria —quedarse en la escala, pero en su TECHO— porque un menú de varias
+ * entradas teñido de acento pesa demasiado para algo que se abre y se cierra en un segundo. (M3
+ * tabula esa otra opción: `groupVibrantContainerColor`, sobre `tertiaryContainer`. Su propio doc
+ * pide usarla "sparingly", y aquí serían los nueve menús.)
  *
  * **Por qué el TECHO y no un peldaño intermedio**: las superficies sobre las que un menú puede caer
  * en esta app van de `surface` a `surfaceContainerHigh` — la biblioteca y los detalles reparten en
@@ -38,13 +36,13 @@ import androidx.compose.ui.window.PopupProperties
  * abría. Se revirtió por otro motivo, pero deja la lección: **este techo solo es un techo mientras
  * nadie más lo ocupe.**
  *
- * **Por qué se hace REMAPEANDO el rol y no pasando `containerColor`**: el color del menú no está en
- * un sitio, está en dos. `DropdownMenuGroup` pinta su superficie, pero **cada `DropdownMenuItem`
- * pinta ADEMÁS la suya** (por eso puede morfear su forma leading/middle/trailing), las dos con el
- * mismo token; el grupo solo asoma por su `contentPadding`. Pasar `containerColor` obligaría a
- * tocar el grupo Y los 37 items repartidos por la app, y a acordarse en cada item nuevo — el fallo
- * sería silencioso y visual. Redefiniendo el ROL dentro del subárbol del menú, ambos lo heredan, y
- * un menú que se añada mañana también.
+ * **Aquí hubo, hasta el 20 ago 2026, un `MaterialTheme` anidado que REMAPEABA `surfaceContainerLow`
+ * a `surfaceContainerHighest`**, para que el grupo y los 37 items heredaran el techo sin tocar cada
+ * caller. Se cayó con el refactor de color: el remapeo depende de que el default de M3 se resuelva
+ * dentro del subárbol, y en cuanto `MaterialTheme` dejó de seguir a la carátula el menú apareció
+ * GRIS dentro de una app teñida (visto en device). La lección general del refactor vale también
+ * aquí: **el color se ENTREGA, no se hereda por un remapeo** — [AppMenuGroup] y [appMenuItemColors]
+ * lo pasan explícito, que son los mismos dos sitios que el remapeo cubría. NO reintroducirlo.
  */
 @Composable
 fun AppMenuPopup(
@@ -63,21 +61,6 @@ fun AppMenuPopup(
         popupPositionProvider = popupPositionProvider,
         properties = properties
     ) {
-        // El `ColumnScope` del popup se captura para devolvérselo al contenido: `MaterialTheme`
-        // toma una lambda SIN receiver, así que sin esto el llamador perdería el scope (y con él
-        // `weight`, `align` y compañía) solo por haber envuelto el tema.
-        val columnScope = this
-        val scheme = MaterialTheme.colorScheme
-        // `remember`ado a propósito: `MaterialTheme` es un local ESTÁTICO y compara el esquema por
-        // IDENTIDAD, así que un `copy()` nuevo por recomposición invalidaría el menú entero en cada
-        // frame (es la misma razón por la que `rememberUnderlayColorScheme` existe).
-        val menuScheme = remember(scheme) {
-            scheme.copy(surfaceContainerLow = scheme.surfaceContainerHighest)
-        }
-        // Solo el esquema: `MaterialTheme` hereda tipografía, formas y motion de fuera, así que el
-        // menú no se despega del tema en nada más.
-        MaterialTheme(colorScheme = menuScheme) {
-            with(columnScope) { content() }
-        }
+        content()
     }
 }

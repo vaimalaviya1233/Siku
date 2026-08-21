@@ -21,7 +21,6 @@ import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MaterialTheme.colorScheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -35,6 +34,7 @@ import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.qhana.siku.R
 import com.qhana.siku.data.local.AlbumSummary
+import com.qhana.siku.ui.theme.AppColors
 
 /** Radio del `Card` del tile. La punta del shared element deriva de él sus esquinas superiores. */
 private val AlbumTileCorner = 20.dp
@@ -69,7 +69,7 @@ fun AlbumTileCard(
     Card(
         onClick = onClick,
         shape = RoundedCornerShape(AlbumTileCorner),
-        colors = CardDefaults.cardColors(containerColor = colorScheme.surface),
+        colors = CardDefaults.cardColors(containerColor = AppColors.surface),
         modifier = modifier.fillMaxWidth()
     ) {
         // La forma que viaja son las esquinas SUPERIORES del card: la carátula ocupa su borde de
@@ -89,7 +89,7 @@ fun AlbumTileCard(
                 .fillMaxWidth()
                 .aspectRatio(1f)
                 .then(sharedModifier)
-                .background(colorScheme.surfaceContainerHighest)
+                .background(AppColors.surfaceContainerHighest)
         ) {
             if (album.albumArtUri != null) {
                 AsyncImage(
@@ -100,7 +100,7 @@ fun AlbumTileCard(
                 )
             } else {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    MaterialSymbol("music_note", size = 40.sp, color = colorScheme.onSurfaceVariant)
+                    MaterialSymbol("music_note", size = 40.sp, color = AppColors.onSurfaceVariant)
                 }
             }
             // Badge tonal sólido (sin glassmorphism) con el conteo de canciones.
@@ -110,15 +110,15 @@ fun AlbumTileCard(
                     .align(Alignment.TopStart)
                     .padding(8.dp)
                     .clip(RoundedCornerShape(8.dp))
-                    .background(colorScheme.secondaryContainer)
+                    .background(AppColors.secondaryContainer)
                     .padding(horizontal = 8.dp, vertical = 3.dp)
             ) {
-                MaterialSymbol("music_note", size = 13.sp, color = colorScheme.onSecondaryContainer)
+                MaterialSymbol("music_note", size = 13.sp, color = AppColors.onSecondaryContainer)
                 Spacer(modifier = Modifier.width(3.dp))
                 Text(
                     text = "${album.songCount}",
                     style = MaterialTheme.typography.labelMedium,
-                    color = colorScheme.onSecondaryContainer
+                    color = AppColors.onSecondaryContainer
                 )
             }
             // Overflow (encolar el álbum) SOBRE la carátula, no en la fila de abajo: en una
@@ -134,8 +134,8 @@ fun AlbumTileCard(
                 QueueOverflowButton(
                     onAddToQueue = onAddToQueue,
                     colors = TonalLayerColors(
-                        container = colorScheme.secondaryContainer,
-                        content = colorScheme.onSecondaryContainer
+                        container = AppColors.secondaryContainer,
+                        content = AppColors.onSecondaryContainer
                     ),
                     contentDescription = stringResource(R.string.common_album_options),
                     menuLabel = stringResource(R.string.detail_add_all_to_queue),
@@ -167,7 +167,7 @@ fun AlbumTileCard(
                     // neutros llevan croma del seed, así que el título ya está teñido por la
                     // carátula, al nivel que el spec reserva para texto.
                     style = MaterialTheme.typography.titleSmallEmphasized,
-                    color = colorScheme.onSurface,
+                    color = AppColors.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -175,7 +175,7 @@ fun AlbumTileCard(
                     Text(
                         text = album.artist.ifBlank { stringResource(R.string.common_unknown_artist) },
                         style = MaterialTheme.typography.bodySmall,
-                        color = colorScheme.onSurfaceVariant,
+                        color = AppColors.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -188,7 +188,7 @@ fun AlbumTileCard(
                 shapes = IconButtonDefaults.shapes(),
                 modifier = Modifier.size(40.dp)
             ) {
-                MaterialSymbol("play_circle", size = 30.sp, color = colorScheme.primary, fill = true)
+                MaterialSymbol("play_circle", size = 30.sp, color = AppColors.primary, fill = true)
             }
         }
     }

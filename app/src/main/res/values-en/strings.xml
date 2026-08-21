@@ -554,25 +554,22 @@
     <!-- Music sources: onboarding (Phase 4) + Settings section -->
     <string name="onboarding_local_title">Your music</string>
     <string name="onboarding_local_subtitle">Let\'s start with the music already on your phone. Pick either way, or skip it if all your music lives in the cloud.</string>
-    <string name="onboarding_cloud_title">OneDrive</string>
-    <string name="onboarding_cloud_subtitle">Connect your account to play your cloud music and download it for offline listening.</string>
+    <string name="onboarding_cloud_title">Connect your cloud</string>
+    <string name="onboarding_cloud_subtitle">Pick a provider and connect to play your cloud music and download it for offline listening.</string>
     <string name="onboarding_start">Get started</string>
-    <string name="onboarding_skip">Skip</string>
-    <string name="onboarding_need_source">Pick a source to continue</string>
-    <string name="onboarding_continue">Continue</string>
-    <string name="onboarding_step">Step %1$d of %2$d</string>
+    <string name="onboarding_need_source">Connect to continue; otherwise go back and choose folders.</string>
     <string name="onboarding_storage_title">Storage</string>
     <string name="onboarding_storage_subtitle">Your cloud music is downloaded to the phone so you can listen offline. Decide how much space it can use; you can change it anytime in Settings.</string>
-    <string name="onboarding_back_to_sources">Back to sources</string>
-    <string name="onboarding_notifications_title">Notifications</string>
-    <string name="onboarding_notifications_subtitle">Siku only uses them for this:</string>
+    <string name="onboarding_notifications_title">Permissions</string>
+    <string name="onboarding_notifications_subtitle">Siku asks for a single one, and only for what you see here.</string>
+    <string name="onboarding_notif_card_title">Notifications</string>
+    <string name="onboarding_notif_card_desc">Used only for this:</string>
     <string name="onboarding_notif_player_title">Playback controls</string>
     <string name="onboarding_notif_player_desc">Play, next and the album art on your status bar and lock screen.</string>
     <string name="onboarding_notif_sync_title">Cloud progress</string>
     <string name="onboarding_notif_sync_desc">How much is left of the scan and of your OneDrive downloads.</string>
     <string name="onboarding_notif_note">You will never get promotional alerts. You can change this any time in your system settings.</string>
-    <string name="onboarding_notif_allow">Allow notifications</string>
-    <string name="onboarding_notif_skip">Not now</string>
+    <string name="onboarding_notif_allow">Allow</string>
 
     <string name="sources_header">Music sources</string>
     <string name="source_onedrive_title">OneDrive</string>

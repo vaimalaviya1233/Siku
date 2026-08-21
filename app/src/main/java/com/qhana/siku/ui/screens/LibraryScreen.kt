@@ -16,7 +16,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.material3.*
-import androidx.compose.material3.MaterialTheme.colorScheme
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
@@ -38,6 +37,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.qhana.siku.ui.theme.AppMenuGroup
+import com.qhana.siku.ui.theme.AppSnackbar
 import com.qhana.siku.R
 import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
@@ -54,6 +55,10 @@ import com.qhana.siku.data.model.SongSourceFilter
 import com.qhana.siku.ui.PlayerArtOrigin
 import com.qhana.siku.ui.SharedTransitionGate
 import com.qhana.siku.ui.components.*
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
+import com.qhana.siku.ui.theme.appMenuItemColors
+import com.qhana.siku.ui.theme.appTextButtonColors
 import com.qhana.siku.ui.viewmodel.BrowseViewModel
 import com.qhana.siku.ui.viewmodel.DownloadBannerState
 import com.qhana.siku.ui.viewmodel.LibraryBannerState
@@ -316,7 +321,7 @@ fun LibraryScreen(
     // en tono Y croma a la vez, "no combinan". El diagnóstico que ordenó todo salió de medir los
     // píxeles de una captura: los tres colores tenían el MISMO hue y la misma calidez (R−G = 10-11),
     // o sea que el problema nunca fue de armonía sino de PESO y de DIRECCIÓN.
-    val headerColor = colorScheme.surfaceContainerHigh
+    val headerColor = AppColors.surfaceContainerHigh
     // Contenedor de la píldora de búsqueda: `surface` (98), el lado del CONTENIDO — 6 puntos por
     // encima de su bloque (92). Es lo que hace el Dialer, donde la search bar lleva exactamente el
     // mismo color que las tarjetas de la lista (medido: `250,249,254` en las dos).
@@ -328,7 +333,7 @@ fun LibraryScreen(
     // el token crudo el campo empataría con su propio bloque.
     // NEUTRO a propósito: el color fuerte (`secondaryContainer`) es el lenguaje del estado
     // SELECCIONADO —el tab activo—, y teñir también la búsqueda le robaba ese protagonismo.
-    val headerItemColor = colorScheme.surface
+    val headerItemColor = AppColors.surface
 
     // --- BÚSQUEDA (search as secondary action / focused search) ---
     // Componente REAL de M3, variante CONTAINED: la lupa de la TopBar es el ancla colapsada y los
@@ -494,7 +499,7 @@ fun LibraryScreen(
     // se esfumó en el primer frame— y lo que se ve es un salto. Reteniendo el último contenido
     // visible, el `exit` tiene algo que apagar y encoger.
     //
-    // Contenedor plano y no estado de snapshot, por lo mismo que `rememberUnderlayColorScheme`: se
+    // Contenedor plano y no estado de snapshot, por lo mismo que hacía la retención de paleta: se
     // escribe y se lee en la MISMA composición (la que ya está corriendo porque `showBanner` cambió),
     // así que un `mutableStateOf` solo serviría para invalidarse a sí mismo.
     val bannerContent = remember { LastBannerContent() }
@@ -532,7 +537,7 @@ fun LibraryScreen(
         // `surfaceContainerHigh`; la horquilla completa, con la medición del Dialer de la que sale,
         // está en `headerColor`. Estuvo en `surface` (98) unas horas el 20 ago: con todo apilado
         // hacia abajo desde el extremo, alguna frontera quedaba siempre en 2 puntos de tono.
-        containerColor = colorScheme.surfaceContainer,
+        containerColor = AppColors.surfaceContainer,
         // Sin snackbarHost: el host único vive en MainActivity, ya posicionado sobre el
         // MiniPlayer flotante. Tener otro acá duplicaba el componente y solo mostraba los
         // snackbars pedidos a mano desde esta pantalla, no los del bus.
@@ -587,6 +592,7 @@ fun LibraryScreen(
                     // solo esquiva la navbar.
                     SnackbarHost(
                         hostState = snackbarHostState,
+                        snackbar = { AppSnackbar(it) },
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .navigationBarsPadding()
@@ -1032,15 +1038,15 @@ fun LibraryScreen(
                 title = { Text(stringResource(R.string.common_logout)) },
                 text = { Text(stringResource(R.string.logout_confirm)) },
                 confirmButton = {
-                    TextButton(onClick = {
+                    TextButton(colors = appTextButtonColors(), onClick = {
                         showLogoutDialog = false
                         onLogoutClick()
                     }) {
-                        Text(stringResource(R.string.common_logout), color = MaterialTheme.colorScheme.error)
+                        Text(stringResource(R.string.common_logout), color = AppColors.error)
                     }
                 },
                 dismissButton = {
-                    TextButton(onClick = { showLogoutDialog = false }) {
+                    TextButton(colors = appTextButtonColors(), onClick = { showLogoutDialog = false }) {
                         Text(stringResource(R.string.common_cancel))
                     }
                 }
@@ -1374,7 +1380,7 @@ private fun LibraryTabs(
         // pestaña. Con el mismo color a alpha 0 la interpolación se queda en su propio tono y solo
         // se desvanece.
         val pillColor by animateColorAsState(
-            targetValue = colorScheme.secondaryContainer.copy(alpha = if (selected) 1f else 0f),
+            targetValue = AppColors.secondaryContainer.copy(alpha = if (selected) 1f else 0f),
             animationSpec = appEffectsSpec(),
             label = "tabPill"
         )
@@ -1401,8 +1407,8 @@ private fun LibraryTabs(
                 // — o sea que sin esto las seis pestañas se pintarían del color de la activa y ninguna
                 // se leería como inactiva. La activa va sobre la píldora, así que su color es el `on-`
                 // del contenedor, no el acento suelto.
-                selectedContentColor = colorScheme.onSecondaryContainer,
-                unselectedContentColor = colorScheme.onSurfaceVariant,
+                selectedContentColor = AppColors.onSecondaryContainer,
+                unselectedContentColor = AppColors.onSurfaceVariant,
                 text = null,
                 icon = {
                     // **La píldora se dibuja AQUÍ, en el contenido, no en el modifier del `Tab`.** Eso
@@ -1521,7 +1527,7 @@ private fun BannerCard(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Surface(shape = CircleShape, color = iconContainer, modifier = Modifier.size(40.dp)) {
+            AppSurface(shape = CircleShape, color = iconContainer, modifier = Modifier.size(40.dp)) {
                 Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
                     // Giro continuo con `rememberInfiniteTransition`, que en cualquier otro sitio de
                     // esta app sería un error (ver "CERO productores continuos" en la sección Motion
@@ -1566,9 +1572,9 @@ private fun BannerCard(
         }
     }
     if (onClick != null) {
-        Surface(onClick = onClick, color = containerColor, contentColor = contentColor, shape = shape, modifier = baseModifier) { row() }
+        AppSurface(onClick = onClick, color = containerColor, contentColor = contentColor, shape = shape, modifier = baseModifier) { row() }
     } else {
-        Surface(color = containerColor, contentColor = contentColor, shape = shape, modifier = baseModifier) { row() }
+        AppSurface(color = containerColor, contentColor = contentColor, shape = shape, modifier = baseModifier) { row() }
     }
 }
 
@@ -1871,8 +1877,9 @@ private fun LibraryOverflowButton(
             expanded = showOverflowMenu,
             onDismissRequest = { showOverflowMenu = false }
         ) {
-            DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
+            AppMenuGroup(shapes = MenuDefaults.groupShapes()) {
                 DropdownMenuItem(
+                    colors = appMenuItemColors(),
                     onClick = { showOverflowMenu = false; onSettingsClick() },
                     text = { Text(stringResource(R.string.settings_title)) },
                     // Sin sesión, "Ajustes" es el ÚNICO item y por tanto una pastilla suelta; con
@@ -1882,6 +1889,7 @@ private fun LibraryOverflowButton(
                 )
                 if (isLoggedIn) {
                     DropdownMenuItem(
+                        colors = appMenuItemColors(),
                         onClick = { showOverflowMenu = false; onLogoutClick() },
                         text = { Text(stringResource(R.string.common_logout)) },
                         shape = MenuDefaults.trailingItemShape,

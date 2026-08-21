@@ -5,19 +5,25 @@ import android.media.audiofx.AudioEffect
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.util.lerp
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -27,6 +33,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.qhana.siku.R
 import com.qhana.siku.data.util.JankProbe
 import com.qhana.siku.data.util.SnackbarManager
+import com.qhana.siku.ui.state.NowPlayingUiState
 import com.qhana.siku.ui.components.EqualizerSheet
 import com.qhana.siku.ui.components.PLAYER_ART_SHARED_KEY
 import com.qhana.siku.ui.components.SheetOverlay
@@ -37,6 +44,14 @@ import com.qhana.siku.ui.screens.AmbientPlayerActivity
 import com.qhana.siku.ui.screens.NavigationActions
 import com.qhana.siku.ui.screens.NowPlayingScreen
 import com.qhana.siku.ui.screens.PlayerActions
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.EXPRESSIVE_DEFAULT_EFFECTS_MS
+import com.qhana.siku.ui.theme.EXPRESSIVE_FAST_EFFECTS_MS
+import com.qhana.siku.ui.theme.ExpressiveDefaultEffectsEasing
+import com.qhana.siku.ui.theme.ExpressiveFastEffectsEasing
+import com.qhana.siku.ui.theme.EXPRESSIVE_SLOW_EFFECTS_MS
+import com.qhana.siku.ui.theme.SHARED_AXIS_Z_NEAR_SCALE
+import com.qhana.siku.ui.theme.ScreenSlideEasing
 import com.qhana.siku.ui.viewmodel.LibraryViewModel
 import com.qhana.siku.ui.viewmodel.PlaybackViewModel
 
@@ -237,7 +252,16 @@ fun NowPlayingLayer(
             onReorder = { from, to -> playbackViewModel.reorderQueue(from, to) },
             onRemoveFromQueue = { playbackViewModel.removeFromQueue(it) },
             onSaveQueueAsPlaylist = { playbackViewModel.saveQueueAsPlaylist(it) },
-            onClearQueue = { playbackViewModel.clearQueue() },
+            // Vaciar la cola CIERRA el reproductor en el mismo gesto y en la misma vuelta que el
+            // `stop` (que anula la canción de forma síncrona): así la capa ve "sin canción" y "sin
+            // expandir" en UNA composición y sale con una sola transición hacia `Hidden`, en vez de
+            // reaccionar un frame después a la canción nula desde el `LaunchedEffect` de arriba.
+            // Con la cola vacía no hay nada que mostrar ni píldora en la que aterrizar: lo que
+            // corresponde es que el reproductor se vaya, no que se quede esperando.
+            onClearQueue = {
+                playbackViewModel.clearQueue()
+                appState.closePlayerIfEmpty()
+            },
             onToggleFavorite = { currentSong?.let { libraryViewModel.toggleFavorite(it.id) } },
             onToggleDownload = { playbackViewModel.toggleDownload() },
             onToggleKeepScreenOn = { playbackViewModel.toggleKeepScreenOn() },
@@ -286,10 +310,129 @@ fun NowPlayingLayer(
     // Sin canción actual la capa no tiene nada que mostrar (vaciar la cola llama a
     // `MusicController.stop()`, que anula la canción). Antes esto dejaba el player atascado en el
     // esqueleto shimmer, sin salida salvo varios "atrás". Ahora se colapsa sola: sin canción que
-    // sonar, no hay player que enseñar.
+    // sonar, no hay player que enseñar. Es la RED para los caminos que anulan la canción sin pasar
+    // por un gesto del reproductor (logout, corrupción, purga de una fuente); el de vaciar la cola
+    // cierra en el propio gesto (`onClearQueue`), en la misma vuelta que el `stop`.
     val hasSong = nowPlayingUiState.song != null
     LaunchedEffect(hasSong) {
         if (!hasSong) appState.closePlayerIfEmpty()
+    }
+
+    // **Lo que se pinta mientras el reproductor se CIERRA es su último contenido, no una superficie
+    // lisa.** Al quedarse sin canción, la capa tarda lo que dure su transición en guardarse, y
+    // durante ese tramo aquí se dibujaba un Box del color del fondo a pantalla completa: visto en
+    // device el 20 ago, vaciar la cola era un fundido a negro sin ninguna relación con lo que había
+    // un frame antes. La salida correcta es la de cualquier cierre (shared axis Z cuando no hay
+    // superficie donde aterrizar, ver `detachedFactor`), y eso necesita que el contenido siga ahí
+    // mientras se va. Se retiene el ÚLTIMO estado con canción mientras la capa siga en pantalla y se
+    // suelta al guardarse, que es cuando el próximo estado empieza de cero. Memoria plana y no
+    // snapshot state: nadie depende de ella y escribirla durante la composición invalidaría el
+    // scope que la acaba de escribir (mismo patrón que `MorphOriginHolder`).
+    val lastShown = remember { arrayOfNulls<NowPlayingUiState>(1) }
+    if (hasSong) lastShown[0] = nowPlayingUiState
+    LaunchedEffect(onScreen) {
+        if (!onScreen) lastShown[0] = null
+    }
+    val shownState = if (hasSong) nowPlayingUiState else lastShown[0]?.takeIf { onScreen }
+
+    // Entrada y salida SIN superficie de origen ni destino (`morphOrigin` = NONE: chips del inicio,
+    // aleatorio, notificación). Sin key de contenedor no hay `sharedBounds` que anime nada, así que
+    // el reproductor aparecía y desaparecía DE GOLPE; lo que corresponde es el **shared axis Z** del
+    // resto de la navegación, con la misma escala, duración y curvas que los cuatro helpers del
+    // `NavHost` (`appNavForwardEnter` y compañía).
+    //
+    // **Va AQUÍ, en la capa, y no dentro de `NowPlayingScreen`** (donde estuvo primero, 20 ago 2026):
+    // esa pantalla no se compone hasta que hay canción, y al arrancar una lista desde un chip con la
+    // cola vacía la canción tarda ~43 ms en llegar (medido en logcat: la capa pasa a `Expanded` con
+    // `song=null`). Durante esos frames se pintaba el Box liso del early-return a pantalla completa,
+    // opaco y sin `graphicsLayer` ninguno — o sea la mitad de la animación ocurría sobre algo que no
+    // se veía y el resto aparecía ya puesto. En la capa cubre los DOS contenidos, con canción y sin
+    // ella.
+    //
+    // **Dos factores y no uno**: el token spatial mueve la escala y el de EFFECTS las opacidades (la
+    // regla general del scheme), y es además lo que arregla que el cierre se sintiera lento — un solo
+    // float ataba el fundido al movimiento, cuando el `NavHost` funde en 150 al salir.
+    //
+    // ## Las DOS reglas que este bloque tuvo que aprender a la mala (20 ago 2026)
+    //
+    // **1. Se declaran SIEMPRE, nunca dentro de un `if`.** La primera versión las creaba solo con
+    // `containerSharedKey == null`… y esa condición sale de `onScreen`, que sale del `currentState` de
+    // esta misma transición. O sea: la transición decidía si la animación existe, y la animación
+    // decide cuándo la transición termina. Con el conjunto de animaciones cambiando a mitad de vuelo,
+    // la `Transition` puede no adoptar nunca su `targetState`, y entonces la capa se queda VARADA:
+    // `currentState` en `Expanded` —así que `PlayerOverlay` la sigue COLOCANDO y se traga los
+    // toques— con su hija ya en `PostExit` —así que este alpha vale 0 y no se dibuja—. El síntoma es
+    // demoledor y no parece un problema de animación: la app "se cuelga", responde a los clics
+    // abriendo hojas invisibles, y "atrás" cierra la app porque `playerExpanded` ya es `false`.
+    // **Regla general: una animación de una `Transition` no puede existir condicionalmente si la
+    // condición depende del estado de esa `Transition`.** Ahora existen siempre y lo único
+    // condicional es si se APLICAN, que es una decisión de dibujo.
+    //
+    // **2. Ninguna dura más que el bounds (~330 ms).** Es la regla que ya estaba escrita en CLAUDE.md
+    // —"de ella cuelgan la retención de la paleta, la vida de la punta de la píldora y el momento en
+    // que se deja de COLOCAR el player"— y la escala la violaba con los 500 de `SCREEN_TRANSFORM_MS`.
+    // Aquí NO se comparte esa duración con el `NavHost` a propósito: allí la manda la coordinación con
+    // los shared elements, y acá la manda el presupuesto de la capa. Se queda en el token *slow* de
+    // effects (300), con la MISMA curva del slide — lo que hace reconocible al shared axis es el
+    // easing, no el número.
+    val detachedScale = animatedVisibilityScope.transition.animateFloat(
+        transitionSpec = { tween(EXPRESSIVE_SLOW_EFFECTS_MS, easing = ScreenSlideEasing) },
+        label = "playerDetachedScale"
+    ) { if (it == EnterExitState.Visible) 1f else 0f }
+
+    val detachedAlpha = animatedVisibilityScope.transition.animateFloat(
+        transitionSpec = {
+            if (targetState == EnterExitState.Visible) {
+                tween(EXPRESSIVE_DEFAULT_EFFECTS_MS, easing = ExpressiveDefaultEffectsEasing)
+            } else {
+                tween(EXPRESSIVE_FAST_EFFECTS_MS, easing = ExpressiveFastEffectsEasing)
+            }
+        },
+        label = "playerDetachedAlpha"
+    ) { if (it == EnterExitState.Visible) 1f else 0f }
+
+    // Con superficie de origen manda el container transform (`surfaceFactor`/`contentFactor` dentro de
+    // `NowPlayingScreen`) y este layer tiene que ser TRANSPARENTE al asunto: se lee DIFERIDO, como los
+    // dos factores, para que cambiar de origen no reconstruya el modifier ni recomponga la capa.
+    val detachedInUse = rememberUpdatedState(containerSharedKey == null)
+
+    // Sonda: el estado que hace falta para reconocer una capa VARADA (ver la regla 1 de arriba) —
+    // colocada pero apagada. Sin esto, el síntoma se investiga a ciegas porque no parece un problema
+    // de animación: la app "no responde", y en realidad responde perfectamente a alpha 0. Va dentro
+    // de `if (JankProbe.isEnabled)` por la convención 9d: apagada, un `SideEffect` puesto solo para
+    // sondear cuesta igual.
+    if (JankProbe.isEnabled) {
+        SideEffect {
+            JankProbe.note {
+                val t = animatedVisibilityScope.transition
+                "player: expanded=${appState.playerExpanded} onScreen=$onScreen " +
+                    "detached=${detachedInUse.value} vis=${t.currentState}→${t.targetState} " +
+                    "alpha=${"%.2f".format(detachedAlpha.value)} scale=${"%.2f".format(detachedScale.value)}"
+            }
+        }
+    }
+
+    // Lectura DIFERIDA dentro del bloque: cambia en cada frame de la transición y leerla en
+    // composición recompondría la capa entera por frame. `ModulateAlpha` mientras corre, porque un
+    // alpha < 1 sobre una capa a pantalla completa es un `saveLayer` de ese tamaño por frame (ver el
+    // KDoc de `contentFactor` en NowPlayingScreen).
+    val detachedModifier = remember {
+        Modifier.graphicsLayer {
+            if (!detachedInUse.value) {
+                // Sin tocar nada: el morph ya gobierna escala y opacidad.
+                scaleX = 1f
+                scaleY = 1f
+                alpha = 1f
+                compositingStrategy = CompositingStrategy.Auto
+                return@graphicsLayer
+            }
+            val s = lerp(SHARED_AXIS_Z_NEAR_SCALE, 1f, detachedScale.value)
+            scaleX = s
+            scaleY = s
+            alpha = detachedAlpha.value
+            compositingStrategy =
+                if (alpha < 1f) CompositingStrategy.ModulateAlpha else CompositingStrategy.Auto
+        }
     }
 
     // El reproductor ya no muere al cerrarse, así que lo que había abierto DENTRO tampoco: sin esto,
@@ -316,15 +459,15 @@ fun NowPlayingLayer(
     // [LocalPlayerOnScreen] envuelve TODO el reproductor —hoja del ecualizador incluida— porque lo que
     // publica es "este subárbol se ve", y eso vale para cualquier animación que cuelgue de él.
     CompositionLocalProvider(LocalPlayerOnScreen provides onScreen) {
-    Box(modifier = modifier.fillMaxSize()) {
-        // Mientras la ruta se cierra (canción ya nula, pop en curso) se pinta una superficie lisa que
-        // se desliza hacia abajo, NO el esqueleto shimmer: ese parpadeo es justo lo que el usuario no
-        // debe volver a ver al vaciar la cola.
-        if (!hasSong) {
+    Box(modifier = modifier.fillMaxSize().then(detachedModifier)) {
+        // Sin NADA que mostrar —ni canción ni un último estado retenido (ver [shownState])— una
+        // superficie lisa, NO el esqueleto shimmer. Solo se llega aquí en reposo (reproductor guardado
+        // y sin canción), donde no se coloca; mientras se cierra, manda el contenido retenido.
+        if (shownState == null) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.surface)
+                    .background(AppColors.surface)
             )
             return@Box
         }
@@ -342,7 +485,7 @@ fun NowPlayingLayer(
                 artSharedKey = artSharedKey,
                 containerSharedKey = containerSharedKey,
                 animatedVisibilityScope = animatedVisibilityScope,
-                uiState = nowPlayingUiState,
+                uiState = shownState,
                 playbackState = playbackState,
                 currentPositionFlow = playbackViewModel.currentPosition,
                 durationFlow = playbackViewModel.duration,

@@ -54,6 +54,8 @@ import kotlin.math.PI
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
 import com.qhana.siku.ui.theme.appFastSpatialSpec
 import com.qhana.siku.ui.theme.appSpatialSpec
 import com.qhana.siku.ui.theme.appEffectsSpec
@@ -114,6 +116,10 @@ internal fun ProgressSlider(
 
     var sliderPosition by remember { mutableFloatStateOf(0f) }
     var isDragging by remember { mutableStateOf(false) }
+    // La duración que lee el detector de gestos al SOLTAR. Por referencia y no capturada, para que
+    // el `pointerInput` pueda llevar clave `Unit` y no se relance con cada canción — ver el
+    // comentario del detector, donde está el bug que eso provocaba.
+    val currentDuration = rememberUpdatedState(duration)
     // Ancho medido de la barra. Lo necesita SOLO la etiqueta del tiempo, que se coloca por layout;
     // los tracks lo reciben del tamaño de su propio canvas.
     var trackWidthPx by remember { mutableIntStateOf(0) }
@@ -247,33 +253,51 @@ internal fun ProgressSlider(
                 //  - un toque es un arrastre de longitud cero, así que tratar los dos por el mismo
                 //    camino elimina la posibilidad de que difieran (y de que se peleen por el
                 //    evento).
-                .pointerInput(duration) {
+                // **Clave `Unit`, y la duración leída por referencia** (20 ago 2026). Con
+                // `pointerInput(duration)` el detector se RELANZABA en cada cambio de canción, y
+                // relanzar cancela la corrutina: si el dedo estaba en la barra en ese instante, el
+                // `isDragging = false` del final no llegaba a ejecutarse nunca y la etiqueta de
+                // tiempo se quedaba flotando para siempre, como si hubiera un dedo apoyado (visto
+                // en device). Lo agravaba que el reproductor es PERSISTENTE: ese `remember` no se
+                // reinicia al cerrar, así que una vez pegado ya no se despegaba ni cambiando de
+                // canción. La duración sólo hace falta al SOLTAR, así que se lee del State y el
+                // gesto deja de tener motivo para reiniciarse.
+                .pointerInput(Unit) {
                     val handleWidthPx = handleWidth.toPx()
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         isDragging = true
-                        sliderPosition =
-                            progressFractionForX(down.position.x, size.width.toFloat(), handleWidthPx)
-                        var cancelled = false
-                        while (true) {
-                            val event = awaitPointerEvent()
-                            val change = event.changes.firstOrNull { it.id == down.id }
-                            // El puntero desapareció (otro gesto se lo llevó): no se busca nada.
-                            if (change == null) {
-                                cancelled = true
-                                break
-                            }
-                            if (change.changedToUpIgnoreConsumed()) {
-                                change.consume()
-                                break
-                            }
+                        // `finally` y no sólo la línea al final del bloque: un `awaitEachGesture`
+                        // puede cancelarse en cualquier `await` (el nodo deja de colocarse al
+                        // guardar el reproductor, otro gesto se lleva el puntero, cambia una clave),
+                        // y en una cancelación el código de después NO corre. Es la garantía de que
+                        // este estado no puede quedarse encendido pase lo que pase.
+                        try {
                             sliderPosition = progressFractionForX(
-                                change.position.x, size.width.toFloat(), handleWidthPx
+                                down.position.x, size.width.toFloat(), handleWidthPx
                             )
-                            change.consume()
+                            var cancelled = false
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id }
+                                // El puntero desapareció (otro gesto se lo llevó): no se busca nada.
+                                if (change == null) {
+                                    cancelled = true
+                                    break
+                                }
+                                if (change.changedToUpIgnoreConsumed()) {
+                                    change.consume()
+                                    break
+                                }
+                                sliderPosition = progressFractionForX(
+                                    change.position.x, size.width.toFloat(), handleWidthPx
+                                )
+                                change.consume()
+                            }
+                            if (!cancelled) seek((sliderPosition * currentDuration.value).toLong())
+                        } finally {
+                            isDragging = false
                         }
-                        isDragging = false
-                        if (!cancelled) seek((sliderPosition * duration).toLong())
                     }
                 }
                 // El ancho lo necesita la ETIQUETA, que se coloca por layout y no en el canvas.
@@ -366,7 +390,7 @@ internal fun ProgressSlider(
                         )
                         .onSizeChanged { labelHeightPx = it.height }
                         .background(
-                            MaterialTheme.colorScheme.inverseSurface,
+                            AppColors.inverseSurface,
                             RoundedCornerShape(percent = 50)
                         )
                         .padding(
@@ -378,7 +402,7 @@ internal fun ProgressSlider(
                     Text(
                         text = formatTime((sliderPosition * duration).toLong()),
                         style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.inverseOnSurface,
+                        color = AppColors.inverseOnSurface,
                         maxLines = 1
                     )
                 }
@@ -699,10 +723,21 @@ private fun FlatTrack(
         // umbral y NO SE DIBUJABA NADA. Un progreso que no aparece hasta pasado medio minuto es peor
         // que un progreso corto.
         val fillWidth = fillEnd.coerceAtLeast(0f)
-        // Sale del fill YA acotado, no de `handleCenterX`: al principio de la canción la píldora
-        // mide un círculo entero aunque el progreso sea menor, y con el riel calculado aparte se le
-        // montaba encima justo ahí.
-        val railStart = fillWidth + gap + (handleW + gap) * handleAlpha
+        // Sale de `handleCenterX`, **espejo exacto de `fillEnd`**: el hueco de la derecha mide lo
+        // mismo que el de la izquierda por construcción, pase lo que pase con el progreso.
+        //
+        // Salía del fill YA ACOTADO (`fillWidth`), y eso lo rompía al principio de la canción: con
+        // el progreso por debajo del hueco, `fillEnd` es negativo y el `coerceAtLeast(0f)` se comía
+        // esa parte, así que el riel arrancaba `gap` más a la derecha de lo que le tocaba — 12dp de
+        // hueco tras el palo contra los 6 de la izquierda, o sea los dos lados de la barra con
+        // distinta forma justo en los primeros segundos, que es cuando se mira el reproductor recién
+        // abierto. Álgebra: con `fillEnd ≥ 0` las dos fórmulas dan EXACTAMENTE el mismo número
+        // (`hc + gap + handleW/2 · handleAlpha`), así que esto no mueve nada del resto de la canción.
+        //
+        // El motivo por el que en su día se derivó del fill —que la píldora tenía un ancho MÍNIMO de
+        // un círculo entero y el riel se le montaba encima— ya no existe: ese suelo se quitó (ver
+        // `fillWidth`).
+        val railStart = handleCenterX + gap + (handleW / 2f) * handleAlpha
 
         // FINAL DE LA CANCIÓN. Con el riel calculado a secas, el último tramo quedaba en un muñón
         // de unos pocos píxeles —del alto ENTERO de la barra, con el stop indicator dentro— pegado
@@ -764,23 +799,23 @@ private fun FlatTrack(
             }
         }
 
-        // Los radios se ACOTAN a la mitad del tramo, que es lo que hace cualquier `RoundRect` cuando
-        // las esquinas no caben: un fill de 6dp sale como una pastillita de 6dp en vez de omitirse.
-        // Es lo que sustituye al suelo de ancho (ver `fillWidth`), y encima es más fiel — el Slider
-        // de M3 tampoco tiene un mínimo por debajo del cual el track activo desaparece.
+        // Cuando el tramo es más estrecho que sus dos radios, los escala [drawTrackSegment] —
+        // proporcionalmente, no acotando cada uno a la mitad del ancho, que era lo que igualaba los
+        // dos extremos de la barra (ver allí). Es lo que sustituye al suelo de ancho (ver
+        // `fillWidth`), y encima es más fiel: el Slider de M3 tampoco tiene un mínimo por debajo del
+        // cual el track activo desaparece.
         //
         // Su borde derecho es INTERIOR (da al hueco), así que lleva `insideCorner` y no el radio
         // entero: con la punta redonda completa asomaban "hombros" de riel a los lados del palo
         // —radio del track contra 4dp de palo—, que fue lo que llevó a cortarlo recto. 2dp es lo
         // que hace el Slider oficial y no los produce.
         if (fillRight > 0f) {
-            val fillMaxCorner = fillRight / 2f
             drawTrackSegment(
                 left = 0f,
                 right = fillRight,
                 color = activeColor,
-                startCorner = minOf(corner, fillMaxCorner),
-                endCorner = minOf(fillEndCorner, fillMaxCorner),
+                startCorner = corner,
+                endCorner = fillEndCorner,
                 path = trackPath
             )
         }
@@ -831,14 +866,26 @@ private fun DrawScope.drawTrackSegment(
     path: Path
 ) {
     if (right <= left) return
+    val width = right - left
+    // Si los dos radios no caben a lo ancho se escalan **PROPORCIONALMENTE**, que es lo que hace
+    // Skia con un `RRect` y lo único que conserva la relación entre el extremo exterior (redondo
+    // entero) y el interior (`ProgressTrackInsideCorner`).
+    //
+    // Hasta el 20 ago 2026 el relleno acotaba cada radio a la MITAD DE SU ANCHO en el call site, y
+    // eso los IGUALABA: con el tramo corto —o sea al principio de cada canción— el borde izquierdo
+    // de la barra, que es el exterior, perdía redondez hasta empatar con el interior, mientras que
+    // el riel de la derecha nunca se acota. Resultado: los dos extremos de la barra dejaban de tener
+    // la misma forma. Escalando, el de fuera sigue siendo el más redondo por corto que sea el tramo.
+    val demand = startCorner + endCorner
+    val fit = if (demand > width) width / demand else 1f
     path.rewind()
     path.addRoundRect(
         RoundRect(
-            rect = Rect(Offset(left, 0f), Size(right - left, size.height)),
-            topLeft = CornerRadius(startCorner),
-            topRight = CornerRadius(endCorner),
-            bottomRight = CornerRadius(endCorner),
-            bottomLeft = CornerRadius(startCorner)
+            rect = Rect(Offset(left, 0f), Size(width, size.height)),
+            topLeft = CornerRadius(startCorner * fit),
+            topRight = CornerRadius(endCorner * fit),
+            bottomRight = CornerRadius(endCorner * fit),
+            bottomLeft = CornerRadius(startCorner * fit)
         )
     )
     drawPath(path, color)
@@ -1213,9 +1260,9 @@ private fun FormatChip(
         label
     )
     val toggleable = format.hasDetails
-    Surface(
+    AppSurface(
         shape = RoundedCornerShape(50),
-        color = MaterialTheme.colorScheme.secondaryContainer,
+        color = AppColors.secondaryContainer,
         // Surface con onClick para tener ripple/estado táctil de M3; sin detalles que enseñar se
         // vuelve la Surface informativa de siempre.
         onClick = onToggleDetailed,
@@ -1232,7 +1279,7 @@ private fun FormatChip(
             // `labelSmallEmphasized` da los dos valores que aquí se ponían a mano: peso Bold y
             // tracking 0.5sp — ese `letterSpacing` ERA ya el del token `LabelSmallTracking`.
             style = MaterialTheme.typography.labelSmallEmphasized,
-            color = MaterialTheme.colorScheme.onSecondaryContainer,
+            color = AppColors.onSecondaryContainer,
             maxLines = 1,
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
         )
@@ -1296,15 +1343,15 @@ private const val SECONDS_PER_MINUTE = 60
  */
 @Composable
 private fun TimeChip(text: String, textColor: Color, modifier: Modifier = Modifier) {
-    Surface(
+    AppSurface(
         shape = RoundedCornerShape(50),
-        color = MaterialTheme.colorScheme.secondaryContainer,
+        color = AppColors.secondaryContainer,
         modifier = modifier
     ) {
         Text(
             text = text,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSecondaryContainer,
+            color = AppColors.onSecondaryContainer,
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
         )
     }

@@ -40,7 +40,9 @@ import com.qhana.siku.ui.components.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+import com.qhana.siku.ui.theme.AppColors
 import com.qhana.siku.ui.theme.AppContainerBoundsTransform
+import com.qhana.siku.ui.theme.AppSurface
 import com.qhana.siku.ui.theme.appSpatialSpec
 import com.qhana.siku.ui.theme.appFastSpatialSpec
 import com.qhana.siku.ui.theme.appSlowSpatialSpec
@@ -189,7 +191,7 @@ internal fun PlaybackSourceChip(
         PlaybackOrigin.STREAMING -> stringResource(R.string.np_chip_stream)
     }
 
-    Surface(
+    AppSurface(
         shape = RoundedCornerShape(50),
         color = chipContainerColor,
         modifier = modifier.height(if (compact) 36.dp else 40.dp)
@@ -371,7 +373,7 @@ internal fun AlbumArtSection(
 
         val revealShape = MaterialShapes.Cookie12Sided.toShape()
         val albumArtOptionsLabel = stringResource(R.string.np_album_art_options)
-        Surface(
+        AppSurface(
             modifier = Modifier
                 .aspectRatio(1f)
                 .then(sharedElementModifier)
@@ -407,7 +409,7 @@ internal fun AlbumArtSection(
                     }
                 },
             shape = AlbumArtMorphShape(artMorphProgress),
-            color = MaterialTheme.colorScheme.surfaceContainerHighest
+            color = AppColors.surfaceContainerHighest
         ) {
             Box(
                 modifier = Modifier.fillMaxSize(),
@@ -467,9 +469,9 @@ internal fun AlbumArtSection(
                         .align(if (flashForward) Alignment.CenterEnd else Alignment.CenterStart)
                         .padding(horizontal = SeekFlashSidePadding)
                 ) {
-                    Surface(
+                    AppSurface(
                         shape = CircleShape,
-                        color = MaterialTheme.colorScheme.scrim.copy(alpha = SEEK_FLASH_SCRIM_ALPHA),
+                        color = AppColors.scrim.copy(alpha = SEEK_FLASH_SCRIM_ALPHA),
                         modifier = Modifier.size(SeekFlashCircleSize)
                     ) {
                         Box(
@@ -566,7 +568,7 @@ internal fun SongInfoSection(
                 text = song.title,
                 style = MaterialTheme.typography.headlineSmallEmphasized,
                 // Título en primary; artista y álbum en secondary.
-                color = MaterialTheme.colorScheme.primary,
+                color = AppColors.primary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = titleMarquee
@@ -575,7 +577,7 @@ internal fun SongInfoSection(
             Text(
                 text = song.artist.ifBlank { stringResource(R.string.common_unknown_artist) },
                 style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.secondary,
+                color = AppColors.secondary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
@@ -587,7 +589,7 @@ internal fun SongInfoSection(
                 Text(
                     text = song.album,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.secondary,
+                    color = AppColors.secondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
@@ -627,10 +629,10 @@ private fun FavoriteHeartPill(
     // TONAL toggle de M3 (tokens): activo = secondary/onSecondary; inactivo = secondaryContainer/
     // onSecondaryContainer. El activo NO usa primary — ese es el color del PLAY, por eso antes el
     // corazón activo se veía idéntico al play.
-    val activeContainer = MaterialTheme.colorScheme.secondary
-    val onActive = MaterialTheme.colorScheme.onSecondary
-    val tonalContainer = MaterialTheme.colorScheme.secondaryContainer
-    val onTonalContainer = MaterialTheme.colorScheme.onSecondaryContainer
+    val activeContainer = AppColors.secondary
+    val onActive = AppColors.onSecondary
+    val tonalContainer = AppColors.secondaryContainer
+    val onTonalContainer = AppColors.onSecondaryContainer
     val heartColorSpec = appEffectsSpec<Color>()
     val container by animateColorAsState(
         targetValue = if (isFavorite) activeContainer else tonalContainer,

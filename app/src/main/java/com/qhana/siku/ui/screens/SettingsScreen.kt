@@ -34,6 +34,8 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.materialkolor.hct.Hct
+import com.qhana.siku.ui.theme.appSelectableMenuItemColors
+import com.qhana.siku.ui.theme.AppMenuGroup
 import com.qhana.siku.R
 import com.qhana.siku.data.lyrics.safFolderDisplayName
 import com.qhana.siku.data.model.LibraryTabId
@@ -61,6 +63,14 @@ import com.qhana.siku.ui.components.OneDriveSourceCard
 import com.qhana.siku.ui.components.rememberOneDriveFolderChanger
 import com.qhana.siku.ui.components.StorageLimitCard
 import com.qhana.siku.ui.navigation.Screen
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
+import com.qhana.siku.ui.theme.appButtonColors
+import com.qhana.siku.ui.theme.appOutlinedButtonColors
+import com.qhana.siku.ui.theme.appRadioButtonColors
+import com.qhana.siku.ui.theme.appSliderColors
+import com.qhana.siku.ui.theme.appSwitchColors
+import com.qhana.siku.ui.theme.appTextButtonColors
 import com.qhana.siku.ui.viewmodel.BackupViewModel
 import com.qhana.siku.ui.viewmodel.BrowseViewModel
 import com.qhana.siku.ui.viewmodel.LibraryViewModel
@@ -176,19 +186,19 @@ private fun SettingsSwitchTile(
             // El token del componente es `surface`; estas listas se apilan SOBRE `surface`, así que
             // la fila tiene que subir un escalón tonal o desaparece contra el fondo. Mismo criterio
             // (y mismo valor) que `GroupedListRow`.
-            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+            containerColor = AppColors.surfaceContainerHigh
         ),
         leadingContent = { MaterialSymbol(icon, size = 24.sp) },
         supportingContent = {
             Text(
                 text = description,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = AppColors.onSurfaceVariant
             )
         },
         // Display-only: quien maneja el gesto es la fila. Con su propio `onCheckedChange` el tap se
         // atendería dos veces.
-        trailingContent = { Switch(checked = checked, onCheckedChange = null) },
+        trailingContent = { Switch(colors = appSwitchColors(), checked = checked, onCheckedChange = null) },
         content = { Text(text = title, style = MaterialTheme.typography.bodyLarge) },
         modifier = Modifier.fillMaxWidth()
     )
@@ -302,11 +312,11 @@ fun SettingsScreen(
                 onClick = { onNavigate(category.route) },
                 shapes = ListItemDefaults.segmentedShapes(index = index, count = categories.size),
                 colors = ListItemDefaults.segmentedColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                    containerColor = AppColors.surfaceContainerHigh
                 ),
                 leadingContent = {
                     val (badgeContainer, badgeContent) = rememberBadgeColors(category.seed)
-                    Surface(
+                    AppSurface(
                         shape = category.iconShape,
                         color = badgeContainer,
                         modifier = Modifier.size(44.dp)
@@ -325,14 +335,14 @@ fun SettingsScreen(
                     Text(
                         text = category.subtitle,
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = AppColors.onSurfaceVariant
                     )
                 },
                 trailingContent = {
                     MaterialSymbol(
                         "chevron_right",
                         size = 24.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = AppColors.onSurfaceVariant
                     )
                 },
                 content = {
@@ -441,7 +451,7 @@ fun SettingsSourcesScreen(
             Text(
                 text = stringResource(R.string.source_device_disable_locked),
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = AppColors.onSurfaceVariant,
                 modifier = Modifier.padding(top = 8.dp, start = 4.dp, end = 4.dp)
             )
         }
@@ -502,15 +512,15 @@ fun SettingsBackupScreen(
         title = stringResource(R.string.backup_header),
         onBackClick = onBackClick
     ) {
-        Surface(
+        AppSurface(
             shape = RoundedCornerShape(SettingsTokens.BlockCorner),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh
+            color = AppColors.surfaceContainerHigh
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
                     text = stringResource(R.string.backup_desc),
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = AppColors.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = 12.dp)
                 )
                 // Los dos botones REPARTEN el ancho por `weight`, y sus etiquetas son el VERBO a
@@ -523,9 +533,10 @@ fun SettingsBackupScreen(
                 val backupButtonHeight = ButtonDefaults.MinHeight
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (backupBusy) {
-                        LoadingIndicator(modifier = Modifier.size(24.dp))
+                        LoadingIndicator(color = AppColors.primary, modifier = Modifier.size(24.dp))
                     } else {
                         Button(
+                            colors = appButtonColors(),
                             onClick = { backupViewModel.exportPlaylists() },
                             shapes = ButtonDefaults.shapes(),
                             enabled = isLoggedIn,
@@ -544,6 +555,7 @@ fun SettingsBackupScreen(
                         }
                         Spacer(modifier = Modifier.width(8.dp))
                         OutlinedButton(
+                            colors = appOutlinedButtonColors(),
                             onClick = { backupViewModel.importPlaylists() },
                             shapes = ButtonDefaults.shapes(),
                             enabled = isLoggedIn,
@@ -578,9 +590,9 @@ fun SettingsPlaybackScreen(
         title = stringResource(R.string.settings_volume_header),
         onBackClick = onBackClick
     ) {
-        Surface(
+        AppSurface(
             shape = RoundedCornerShape(SettingsTokens.BlockCorner),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh
+            color = AppColors.surfaceContainerHigh
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 // Encabezado propio del bloque: antes lo hacía el título de la pantalla, que ahora es
@@ -594,7 +606,7 @@ fun SettingsPlaybackScreen(
                 Text(
                     text = stringResource(R.string.settings_volume_desc),
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = AppColors.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = 12.dp)
                 )
 
@@ -629,13 +641,13 @@ fun SettingsPlaybackScreen(
                 Text(
                     text = modeHint,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = AppColors.onSurfaceVariant,
                     modifier = Modifier.padding(top = 8.dp)
                 )
 
                 // Pre-amp (solo relevante si el modo no es OFF)
                 if (replayGainMode != ReplayGainMode.OFF) {
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+                    HorizontalDivider(color = AppColors.outlineVariant, modifier = Modifier.padding(vertical = 12.dp))
                     TunableSlider(
                         title = stringResource(R.string.settings_preamp_title, String.format("%+.1f", replayGainPreamp)),
                         description = stringResource(R.string.settings_preamp_desc),
@@ -651,9 +663,9 @@ fun SettingsPlaybackScreen(
         Spacer(modifier = Modifier.height(16.dp))
 
         // Ecualizador: elegir entre el propio (hoja del NowPlaying) y el del sistema.
-        Surface(
+        AppSurface(
             shape = RoundedCornerShape(SettingsTokens.BlockCorner),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh
+            color = AppColors.surfaceContainerHigh
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
@@ -668,7 +680,7 @@ fun SettingsPlaybackScreen(
                     onCheckedChange = { viewModel.setUseSystemEq(it) }
                 )
 
-                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+                HorizontalDivider(color = AppColors.outlineVariant, modifier = Modifier.padding(vertical = 12.dp))
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
@@ -684,7 +696,7 @@ fun SettingsPlaybackScreen(
                         Text(
                             text = stringResource(R.string.settings_eq_presets_desc),
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = AppColors.onSurfaceVariant
                         )
                     }
                     Spacer(modifier = Modifier.width(16.dp))
@@ -736,15 +748,15 @@ fun SettingsEqPresetsScreen(
         title = stringResource(R.string.settings_eq_presets),
         onBackClick = onBackClick
     ) {
-        Surface(
+        AppSurface(
             shape = RoundedCornerShape(SettingsTokens.BlockCorner),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh
+            color = AppColors.surfaceContainerHigh
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
                     text = stringResource(R.string.settings_eq_presets_hint),
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = AppColors.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = 12.dp)
                 )
 
@@ -759,7 +771,7 @@ fun SettingsEqPresetsScreen(
                 }
 
                 if (profiles.isNotEmpty()) {
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+                    HorizontalDivider(color = AppColors.outlineVariant, modifier = Modifier.padding(vertical = 12.dp))
                     Text(
                         text = stringResource(R.string.settings_eq_profiles_own),
                         style = MaterialTheme.typography.titleSmall,
@@ -778,8 +790,8 @@ fun SettingsEqPresetsScreen(
                 // Solo cuando hay algo que restaurar: un botón permanentemente inútil enseña al
                 // usuario a ignorar esa zona de la pantalla.
                 if (hidden.isNotEmpty()) {
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-                    TextButton(onClick = { viewModel.eqPresets.restoreAll() }) {
+                    HorizontalDivider(color = AppColors.outlineVariant, modifier = Modifier.padding(vertical = 12.dp))
+                    TextButton(colors = appTextButtonColors(), onClick = { viewModel.eqPresets.restoreAll() }) {
                         Text(stringResource(R.string.settings_eq_presets_restore_all, hidden.size))
                     }
                 }
@@ -810,9 +822,9 @@ private fun PresetVisibilityRow(
             text = name,
             style = MaterialTheme.typography.bodyLarge,
             color = if (visible) {
-                MaterialTheme.colorScheme.onSurface
+                AppColors.onSurface
             } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
+                AppColors.onSurfaceVariant
             },
             modifier = Modifier.weight(1f)
         )
@@ -821,11 +833,11 @@ private fun PresetVisibilityRow(
                 MaterialSymbol(
                     icon = "delete",
                     size = 20.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
             }
         }
-        Switch(checked = visible, onCheckedChange = onVisibleChange)
+        Switch(colors = appSwitchColors(), checked = visible, onCheckedChange = onVisibleChange)
     }
 }
 
@@ -850,9 +862,9 @@ fun SettingsGesturesScreen(
         // trocearlo obligaría a razonar sobre gestos aún no descubiertos. La descripción los
         // ENUMERA porque, apagados, no hay forma de que el usuario sepa qué se está perdiendo —
         // un gesto que nadie te contó no existe.
-        Surface(
+        AppSurface(
             shape = RoundedCornerShape(SettingsTokens.BlockCorner),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh
+            color = AppColors.surfaceContainerHigh
         ) {
             Row(
                 modifier = Modifier
@@ -881,13 +893,14 @@ fun SettingsGesturesScreen(
                             PlayerGestureConfig.SeekStepSeconds
                         ),
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = AppColors.onSurfaceVariant
                     )
                 }
 
                 Spacer(modifier = Modifier.width(16.dp))
 
                 Switch(
+                    colors = appSwitchColors(),
                     checked = uiState.playerGestures,
                     onCheckedChange = null
                 )
@@ -926,9 +939,9 @@ private fun LyricsSaveSetting(
         }
     }
 
-    Surface(
+    AppSurface(
         shape = RoundedCornerShape(SettingsTokens.BlockCorner),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh
+        color = AppColors.surfaceContainerHigh
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
@@ -954,13 +967,13 @@ private fun LyricsSaveSetting(
                         .padding(vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    RadioButton(selected = mode == value, onClick = null)
+                    RadioButton(colors = appRadioButtonColors(), selected = mode == value, onClick = null)
                     Spacer(modifier = Modifier.width(12.dp))
                     Text(text = label, style = MaterialTheme.typography.bodyLarge)
                 }
             }
 
-            HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+            HorizontalDivider(color = AppColors.outlineVariant, modifier = Modifier.padding(vertical = 12.dp))
 
             Text(
                 text = stringResource(R.string.settings_lyrics_folder_title),
@@ -969,7 +982,7 @@ private fun LyricsSaveSetting(
             Text(
                 text = stringResource(R.string.settings_lyrics_folder_summary),
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = AppColors.onSurfaceVariant
             )
             Text(
                 text = folderUri?.let { safFolderDisplayName(it) }
@@ -978,11 +991,11 @@ private fun LyricsSaveSetting(
                 modifier = Modifier.padding(top = 8.dp)
             )
             Row(modifier = Modifier.padding(top = 4.dp)) {
-                TextButton(onClick = { folderPicker.launch(null) }) {
+                TextButton(colors = appTextButtonColors(), onClick = { folderPicker.launch(null) }) {
                     Text(stringResource(R.string.settings_lyrics_folder_choose))
                 }
                 if (folderUri != null) {
-                    TextButton(onClick = { onFolderChange(null) }) {
+                    TextButton(colors = appTextButtonColors(), onClick = { onFolderChange(null) }) {
                         Text(stringResource(R.string.settings_lyrics_folder_clear))
                     }
                 }
@@ -1050,7 +1063,7 @@ private fun PlayerBarCustomizer(
             // receiver se pierde al entrar al Row (pasa a RowScope): se captura y se re-aplica.
             ReorderableItem {
                 val itemScope = this
-                Surface(
+                AppSurface(
                     tonalElevation = if (isDragging) 6.dp else 0.dp,
                     color = Color.Transparent,
                     modifier = Modifier.fillMaxWidth()
@@ -1060,11 +1073,11 @@ private fun PlayerBarCustomizer(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
                     ) {
                         Box(modifier = with(itemScope) { Modifier.draggableHandle() }.padding(8.dp)) {
-                            MaterialSymbol("drag_indicator", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            MaterialSymbol("drag_indicator", color = AppColors.onSurfaceVariant)
                         }
                     MaterialSymbol(
                         item.action.iconName(),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = AppColors.onSurfaceVariant,
                         modifier = Modifier.padding(end = 12.dp)
                     )
                     Text(
@@ -1073,6 +1086,7 @@ private fun PlayerBarCustomizer(
                         modifier = Modifier.weight(1f)
                     )
                     Switch(
+                        colors = appSwitchColors(),
                         checked = item.inBar,
                         // Deshabilitar SOLO los apagados cuando ya se llegó al tope (los encendidos
                         // siempre se pueden apagar).
@@ -1094,7 +1108,7 @@ private fun PlayerBarCustomizer(
         Text(
             text = stringResource(R.string.settings_player_bar_max, PlayerToolbarConfig.MAX_IN_BAR),
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = AppColors.onSurfaceVariant,
             modifier = Modifier.padding(top = 8.dp)
         )
     }
@@ -1150,9 +1164,9 @@ fun SettingsDownloadsScreen(
         val photosOnMetered by browseViewModel.artistPhotosOnMetered.collectAsStateWithLifecycle()
         val photosBannerEnabled by browseViewModel.artistPhotosBannerEnabled.collectAsStateWithLifecycle()
         val photoDetailOnMetered by browseViewModel.artistPhotoDetailOnMetered.collectAsStateWithLifecycle()
-        Surface(
+        AppSurface(
             shape = RoundedCornerShape(SettingsTokens.BlockCorner),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh
+            color = AppColors.surfaceContainerHigh
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
@@ -1227,13 +1241,13 @@ fun SettingsAppearanceScreen(
                 title = { Text(stringResource(R.string.settings_regenerate_confirm_title)) },
                 text = { Text(stringResource(R.string.settings_regenerate_confirm_message)) },
                 confirmButton = {
-                    TextButton(onClick = {
+                    TextButton(colors = appTextButtonColors(), onClick = {
                         showRegenerateConfirm = false
                         viewModel.regenerateColors()
                     }) { Text(stringResource(R.string.settings_regenerate_confirm_action)) }
                 },
                 dismissButton = {
-                    TextButton(onClick = { showRegenerateConfirm = false }) {
+                    TextButton(colors = appTextButtonColors(), onClick = { showRegenerateConfirm = false }) {
                         Text(stringResource(R.string.common_cancel))
                     }
                 }
@@ -1377,9 +1391,9 @@ fun SettingsProgressBarScreen(
     ) {
         // La previa va PRIMERO y en su propio bloque: es el objeto sobre el que actúan los dos
         // controles de abajo, no una decoración de uno de ellos.
-        Surface(
+        AppSurface(
             shape = RoundedCornerShape(SettingsTokens.BlockCorner),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh
+            color = AppColors.surfaceContainerHigh
         ) {
             Box(
                 modifier = Modifier
@@ -1393,8 +1407,8 @@ fun SettingsProgressBarScreen(
                     wavy = wavy,
                     trackHeight = thickness.dp,
                     showHandle = handle,
-                    activeColor = MaterialTheme.colorScheme.primary,
-                    inactiveColor = MaterialTheme.colorScheme.primary.copy(alpha = PREVIEW_RAIL_ALPHA)
+                    activeColor = AppColors.primary,
+                    inactiveColor = AppColors.primary.copy(alpha = PREVIEW_RAIL_ALPHA)
                 )
             }
         }
@@ -1468,15 +1482,15 @@ fun SettingsTabsScreen(
         title = stringResource(R.string.settings_tabs_header),
         onBackClick = onBackClick
     ) {
-        Surface(
+        AppSurface(
             shape = RoundedCornerShape(SettingsTokens.BlockCorner),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh
+            color = AppColors.surfaceContainerHigh
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
                     text = stringResource(R.string.settings_tabs_desc),
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = AppColors.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
                 LibraryTabsCustomizer(
@@ -1501,15 +1515,15 @@ fun SettingsPlayerBarScreen(
         title = stringResource(R.string.settings_player_bar_header),
         onBackClick = onBackClick
     ) {
-        Surface(
+        AppSurface(
             shape = RoundedCornerShape(SettingsTokens.BlockCorner),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh
+            color = AppColors.surfaceContainerHigh
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
                     text = stringResource(R.string.settings_player_bar_desc),
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = AppColors.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
                 PlayerBarCustomizer(
@@ -1574,7 +1588,7 @@ private fun LibraryTabsCustomizer(
         key(item.tab) {
             ReorderableItem {
                 val itemScope = this
-                Surface(
+                AppSurface(
                     tonalElevation = if (isDragging) 6.dp else 0.dp,
                     color = Color.Transparent,
                     modifier = Modifier.fillMaxWidth()
@@ -1584,11 +1598,11 @@ private fun LibraryTabsCustomizer(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
                     ) {
                         Box(modifier = with(itemScope) { Modifier.draggableHandle() }.padding(8.dp)) {
-                            MaterialSymbol("drag_indicator", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            MaterialSymbol("drag_indicator", color = AppColors.onSurfaceVariant)
                         }
                         MaterialSymbol(
                             item.tab.iconName(),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = AppColors.onSurfaceVariant,
                             modifier = Modifier.padding(end = 12.dp)
                         )
                         Text(
@@ -1597,6 +1611,7 @@ private fun LibraryTabsCustomizer(
                             modifier = Modifier.weight(1f)
                         )
                         Switch(
+                            colors = appSwitchColors(),
                             checked = item.visible,
                             // Deshabilitar SOLO la última encendida: apagarla dejaría la
                             // biblioteca sin pestañas.
@@ -1618,7 +1633,7 @@ private fun LibraryTabsCustomizer(
         Text(
             text = stringResource(R.string.settings_tabs_min),
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = AppColors.onSurfaceVariant,
             modifier = Modifier.padding(top = 8.dp)
         )
     }
@@ -1667,9 +1682,9 @@ private fun ProgressThicknessSetting(
     val steps = ((max - min) / step).toInt() - 1
     val current = thicknessDp.dp.coerceIn(min, max)
 
-    Surface(
+    AppSurface(
         shape = RoundedCornerShape(SettingsTokens.BlockCorner),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh
+        color = AppColors.surfaceContainerHigh
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1683,14 +1698,14 @@ private fun ProgressThicknessSetting(
                     Text(
                         text = stringResource(R.string.settings_progress_thickness_desc),
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = AppColors.onSurfaceVariant
                     )
                 }
                 Spacer(modifier = Modifier.width(16.dp))
                 Text(
                     text = stringResource(R.string.settings_progress_thickness_value, current.value.toInt()),
                     style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary
+                    color = AppColors.primary
                 )
             }
 
@@ -1698,6 +1713,7 @@ private fun ProgressThicknessSetting(
             // ([SettingsProgressBarScreen]), y responde a este slider mientras se arrastra. Dos
             // dibujos del mismo objeto solo pueden acabar contándose cosas distintas.
             Slider(
+                colors = appSliderColors(),
                 value = current.value,
                 onValueChange = { onChange(it.roundToInt()) },
                 valueRange = min.value..max.value,
@@ -1717,9 +1733,9 @@ private fun ThemePaletteStyleSetting(
     // Un estilo retirado de la librería (o una preferencia vieja) no debe dejar la fila vacía.
     val current = PaletteStyleOptions.firstOrNull { it.first == selected } ?: PaletteStyleOptions.first()
 
-    Surface(
+    AppSurface(
         shape = RoundedCornerShape(SettingsTokens.BlockCorner),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        color = AppColors.surfaceContainerHigh,
         onClick = { expanded = true }
     ) {
         Row(
@@ -1740,7 +1756,7 @@ private fun ThemePaletteStyleSetting(
                 Text(
                     text = stringResource(current.second.first),
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
             }
 
@@ -1750,7 +1766,7 @@ private fun ThemePaletteStyleSetting(
                 MaterialSymbol(
                     "expand_more",
                     size = 24.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
                 // Elegir estilo de paleta es una SELECCIÓN EXCLUSIVA: sobrecarga `selected`, que
                 // marca el activo con contenedor y morph de forma. La descripción va en el slot
@@ -1758,9 +1774,10 @@ private fun ThemePaletteStyleSetting(
                 // —el componente ya sabe maquetar título + apoyo, con su tipografía y su color— y
                 // el check pasa a `selectedLeadingIcon`, que además lo anima al entrar.
                 AppMenuPopup(expanded = expanded, onDismissRequest = { expanded = false }) {
-                    DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
+                    AppMenuGroup(shapes = MenuDefaults.groupShapes()) {
                         PaletteStyleOptions.forEachIndexed { index, (name, labels) ->
                             DropdownMenuItem(
+                                colors = appSelectableMenuItemColors(),
                                 selected = name == current.first,
                                 onClick = {
                                     expanded = false
@@ -1809,6 +1826,7 @@ private fun SettingsScaffold(
 ) {
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     Scaffold(
+        containerColor = AppColors.background,
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             LargeFlexibleTopAppBar(
@@ -1872,18 +1890,18 @@ private fun SettingsSwitchRow(
             Text(
                 text = title,
                 style = MaterialTheme.typography.bodyLarge,
-                color = if (enabled) MaterialTheme.colorScheme.onSurface
-                else MaterialTheme.colorScheme.onSurface.copy(alpha = DISABLED_CONTENT_ALPHA)
+                color = if (enabled) AppColors.onSurface
+                else AppColors.onSurface.copy(alpha = DISABLED_CONTENT_ALPHA)
             )
             Text(
                 text = description,
                 style = MaterialTheme.typography.bodySmall,
-                color = if (enabled) MaterialTheme.colorScheme.onSurfaceVariant
-                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = DISABLED_CONTENT_ALPHA)
+                color = if (enabled) AppColors.onSurfaceVariant
+                else AppColors.onSurfaceVariant.copy(alpha = DISABLED_CONTENT_ALPHA)
             )
         }
         Spacer(modifier = Modifier.width(16.dp))
-        Switch(checked = checked, enabled = enabled, onCheckedChange = null)
+        Switch(colors = appSwitchColors(), checked = checked, enabled = enabled, onCheckedChange = null)
     }
 }
 
@@ -1918,7 +1936,7 @@ private fun SettingsActionRow(
     // ahí las llaves de la rama y las de la lambda se confunden a la vista, y el tipo esperado
     // tendría que propagarse a través del `when` para que el plugin de Compose marque el lambda.
     val leading: (@Composable () -> Unit)? = if (loading) {
-        { LoadingIndicator(modifier = Modifier.size(24.dp)) }
+        { LoadingIndicator(color = AppColors.primary, modifier = Modifier.size(24.dp)) }
     } else if (icon != null) {
         { MaterialSymbol(icon, size = 24.sp) }
     } else {
@@ -1929,7 +1947,7 @@ private fun SettingsActionRow(
             MaterialSymbol(
                 "chevron_right",
                 size = 24.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = AppColors.onSurfaceVariant
             )
         }
     } else {
@@ -1941,14 +1959,14 @@ private fun SettingsActionRow(
         enabled = enabled,
         shapes = shapes,
         colors = ListItemDefaults.segmentedColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+            containerColor = AppColors.surfaceContainerHigh
         ),
         leadingContent = leading,
         supportingContent = {
             Text(
                 text = description,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = AppColors.onSurfaceVariant
             )
         },
         trailingContent = trailing,
@@ -1974,9 +1992,10 @@ private fun TunableSlider(
         Text(
             text = description,
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = AppColors.onSurfaceVariant
         )
         Slider(
+            colors = appSliderColors(),
             value = value,
             onValueChange = onValueChange,
             valueRange = range,

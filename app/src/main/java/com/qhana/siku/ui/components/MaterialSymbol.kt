@@ -1,5 +1,6 @@
 package com.qhana.siku.ui.components
 
+import android.content.Context
 import android.content.res.AssetManager
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MenuDefaults
@@ -12,7 +13,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontVariation
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.createFontFamilyResolver
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.LineHeightStyle
@@ -37,16 +41,16 @@ fun MaterialSymbol(
     size: TextUnit = 24.sp,
     color: Color = LocalContentColor.current,
     fill: Boolean = false,
-    weight: Int = 400,
-    grade: Int = 0,
-    opticalSize: Int = 24
+    weight: Int = DEFAULT_WEIGHT,
+    grade: Int = DEFAULT_GRADE,
+    opticalSize: Int = DEFAULT_OPTICAL_SIZE
 ) {
     val context = LocalContext.current
     val fillValue = if (fill) 1f else 0f
 
     // Cache del font con una key estable (context no cambia durante la sesión)
     val font = remember(fillValue, weight, grade, opticalSize) {
-        createMaterialSymbolFontFamily(context.assets, fillValue, weight, grade, opticalSize)
+        MaterialSymbolFont.family(context.assets, fillValue, weight, grade, opticalSize)
     }
 
     // Cache del TextStyle base para evitar recrearlo
@@ -120,16 +124,59 @@ fun MenuItemIcon(
  */
 private const val MenuIconOpticalSize = 20
 
-private fun createMaterialSymbolFontFamily(
-    assetManager: AssetManager,
-    fill: Float,
-    weight: Int,
-    grade: Int,
-    opticalSize: Int
-): FontFamily {
-    return FontFamily(
+/**
+ * La fuente de Material Symbols como FAMILIA por variante, y su precalentamiento.
+ *
+ * Cada combinación distinta de ejes (FILL/wght/GRAD/opsz) es un `Typeface` distinto que Android
+ * construye con `Typeface.Builder(assets, path).setFontVariationSettings(...)`, o sea **parseando el
+ * archivo entero otra vez** — y `material_symbols_rounded.ttf` pesa **15 MB**. Compose resuelve una
+ * fuente de assets de forma BLOQUEANTE dentro del `measure` del primer texto que la pide, así que en
+ * un arranque en frío ese parseo caía en el hilo principal, en el segundo frame de la app: medido en
+ * Perfetto el 20 ago 2026, dos `TextStringSimpleNode::measure` de **89,8 y 41,4 ms** (una variante
+ * cada uno, `fill` 0 y 1) dentro de un frame de 160 ms, con 180 frames de buffer stuffing detrás. El
+ * precalentamiento de Google Sans Flex (`rememberAppTypography`) no lo cubría: es otra familia.
+ *
+ * [preload] construye las variantes que usa la primera pantalla en un hilo de fondo, desde
+ * `Application.onCreate`, a través de `createFontFamilyResolver(context)` — que comparte
+ * `GlobalTypefaceRequestCache` con el `LocalFontFamilyResolver` de cualquier `ComposeView`
+ * (`FontFamilyResolver.android.kt`), y la clave de esa caché compara `AndroidAssetFont` por ruta y
+ * ejes, no por instancia — así que lo resuelto aquí es exactamente lo que el primer frame encuentra
+ * hecho. Va en la Application y NO en un `LaunchedEffect`: el efecto arranca después de la primera
+ * composición, y la primera composición ya pide estos glifos (las pestañas de la biblioteca).
+ *
+ * **Si se añade una variante nueva al arranque (otro `weight`, `grade` u `opticalSize` en pantalla
+ * desde el primer frame), añadirla a [STARTUP_VARIANTS]**; una variante que solo aparece más tarde
+ * se paga una vez, en caliente y sin frame de arranque de por medio, y no hace falta listarla.
+ */
+object MaterialSymbolFont {
+
+    private const val PATH = "fonts/material_symbols_rounded.ttf"
+
+    /** Una variante = un `Typeface` = un parseo del archivo. */
+    private data class Variant(val fill: Float, val weight: Int, val grade: Int, val opticalSize: Int)
+
+    /**
+     * Las variantes visibles en el primer frame: el default de [MaterialSymbol] delineado y relleno
+     * (la biblioteca mezcla los dos desde el arranque) y, detrás, las de [MenuItemIcon]
+     * (`opticalSize` 20), que no son del primer frame pero sí del primer menú que se abra. El orden
+     * es el de necesidad: se construyen en serie y el primer frame espera a las dos primeras.
+     */
+    private val STARTUP_VARIANTS = listOf(
+        Variant(fill = 0f, weight = DEFAULT_WEIGHT, grade = DEFAULT_GRADE, opticalSize = DEFAULT_OPTICAL_SIZE),
+        Variant(fill = 1f, weight = DEFAULT_WEIGHT, grade = DEFAULT_GRADE, opticalSize = DEFAULT_OPTICAL_SIZE),
+        Variant(fill = 0f, weight = DEFAULT_WEIGHT, grade = DEFAULT_GRADE, opticalSize = MenuIconOpticalSize),
+        Variant(fill = 1f, weight = DEFAULT_WEIGHT, grade = DEFAULT_GRADE, opticalSize = MenuIconOpticalSize)
+    )
+
+    fun family(
+        assetManager: AssetManager,
+        fill: Float,
+        weight: Int,
+        grade: Int,
+        opticalSize: Int
+    ): FontFamily = FontFamily(
         Font(
-            path = "fonts/material_symbols_rounded.ttf",
+            path = PATH,
             assetManager = assetManager,
             variationSettings = FontVariation.Settings(
                 FontVariation.Setting("FILL", fill),
@@ -139,4 +186,35 @@ private fun createMaterialSymbolFontFamily(
             )
         )
     )
+
+    /**
+     * Puebla la caché global de typefaces con [STARTUP_VARIANTS]. Llamar desde un hilo de fondo
+     * (`Dispatchers.Default`: es CPU pura) lo antes posible en la vida del proceso.
+     *
+     * Pide cada familia con los MISMOS parámetros con los que la pedirá el `Text` de
+     * [MaterialSymbol] —peso `Normal`, estilo `Normal`, síntesis por defecto— porque la clave de la
+     * caché los incluye: con otro peso sería otra entrada y el primer frame no la encontraría.
+     * `FontFamily.Resolver.preload` no sirve para esto (solo precarga fuentes ASYNC, y una de assets
+     * es `Blocking`; ver `rememberAppTypography`).
+     */
+    fun preload(context: Context) {
+        val resolver = createFontFamilyResolver(context.applicationContext)
+        val assets = context.applicationContext.assets
+        STARTUP_VARIANTS.forEach { v ->
+            // Un fallo aquí no puede tumbar la app: sin caché, la fuente se resolverá luego por la vía
+            // normal y lo único que se pierde es el precalentado.
+            runCatching {
+                resolver.resolve(
+                    fontFamily = family(assets, v.fill, v.weight, v.grade, v.opticalSize),
+                    fontWeight = FontWeight.Normal,
+                    fontStyle = FontStyle.Normal
+                )
+            }
+        }
+    }
 }
+
+/** Defaults de [MaterialSymbol]; declarados aparte para que [MaterialSymbolFont] los comparta. */
+private const val DEFAULT_WEIGHT = 400
+private const val DEFAULT_GRADE = 0
+private const val DEFAULT_OPTICAL_SIZE = 24

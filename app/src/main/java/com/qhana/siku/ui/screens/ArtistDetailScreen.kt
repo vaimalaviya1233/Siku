@@ -13,7 +13,6 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
-import androidx.compose.material3.MaterialTheme.colorScheme
 import androidx.compose.runtime.*
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
@@ -58,6 +57,8 @@ import com.qhana.siku.ui.components.songRowBackground
 import com.qhana.siku.ui.components.TonalChip
 import com.qhana.siku.ui.components.overSharedElementsModifier
 import com.qhana.siku.ui.components.rememberListItemShape
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
 import com.qhana.siku.ui.viewmodel.ArtistPickerState
 import com.qhana.siku.ui.viewmodel.BrowseViewModel
 import kotlinx.coroutines.flow.first
@@ -203,7 +204,7 @@ fun ArtistDetailScreen(
         // `surfaceContainerHigh` (92). Mismo reparto que la biblioteca; el porqué, en `headerColor`
         // de LibraryScreen. Si se cambia, hay que mover CON él el degradado del header inmersivo,
         // que funde la imagen contra este color y dejaría costura.
-        containerColor = colorScheme.surfaceContainer
+        containerColor = AppColors.surfaceContainer
     ) { paddingValues ->
         // El MiniPlayer global (MainActivity) FLOTA sobre esta pantalla: se reserva su
         // alto como contentPadding para que el final de la lista scrollee por encima.
@@ -295,11 +296,11 @@ fun ArtistDetailScreen(
                             style = MaterialTheme.typography.titleMediumEmphasized
                         )
                         TonalChip {
-                            MaterialSymbol("music_note", size = 14.sp, color = colorScheme.onSecondaryContainer)
+                            MaterialSymbol("music_note", size = 14.sp, color = AppColors.onSecondaryContainer)
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
                                 text = "${songs.size}",
-                                color = colorScheme.onSecondaryContainer
+                                color = AppColors.onSecondaryContainer
                             )
                         }
                     }
@@ -311,7 +312,7 @@ fun ArtistDetailScreen(
                     // La canción actual, esté sonando o en PAUSA: mismo criterio que la cola y la
                     // lista de canciones (el resaltado marca "cargada", no "reproduciendo ahora").
                     val isPlaying = currentSong?.id == song.id
-                    val rowBackground = songRowBackground(colorScheme.surface, isPlaying)
+                    val rowBackground = songRowBackground(AppColors.surface, isPlaying)
                     // Punta ORIGEN del container transform hacia el reproductor: la fila crece hasta
                     // ser el player. Fuera del envoltorio va lo que la coloca en la lista; dentro, la
                     // superficie que morfa (ver [SongRowContainer]).
@@ -322,8 +323,8 @@ fun ArtistDetailScreen(
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 1.dp)
                     ) {
-                        Surface(
-                            color = colorScheme.surface,
+                        AppSurface(
+                            color = AppColors.surface,
                             // isActive: el ítem en reproducción usa la forma redondeada (16 dp), igual
                             // que en la cola y la lista de canciones, en vez de la esquina agrupada.
                             shape = rememberListItemShape(index, songs.size, isActive = isPlaying),
@@ -357,13 +358,13 @@ fun ArtistDetailScreen(
                         MaterialSymbol(
                             "artist",
                             size = 64.sp,
-                            color = colorScheme.outline
+                            color = AppColors.outline
                         )
                         Spacer(modifier = Modifier.height(16.dp))
                         Text(
                             text = stringResource(R.string.artist_no_songs),
                             style = MaterialTheme.typography.bodyLarge,
-                            color = colorScheme.onSurfaceVariant
+                            color = AppColors.onSurfaceVariant
                         )
                     }
                 }
@@ -380,7 +381,7 @@ fun ArtistDetailScreen(
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .then(overSharedElementsModifier(sharedTransitionScope, animatedVisibilityScope, headerImageSharedState))
-                .background(colorScheme.surfaceContainerHigh.copy(alpha = topBarAlpha))
+                .background(AppColors.surfaceContainerHigh.copy(alpha = topBarAlpha))
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -393,8 +394,8 @@ fun ArtistDetailScreen(
                     onClick = onBackClick,
                     shapes = IconButtonDefaults.shapes(),
                     colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = colorScheme.surface,
-                        contentColor = colorScheme.onSurface
+                        containerColor = AppColors.surface,
+                        contentColor = AppColors.onSurface
                     )
                 ) {
                     MaterialSymbol("arrow_back")
@@ -411,8 +412,8 @@ fun ArtistDetailScreen(
                     onClick = { viewModel.searchArtistCandidates(artistName) },
                     shapes = IconButtonDefaults.shapes(),
                     colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = colorScheme.surface,
-                        contentColor = colorScheme.onSurface
+                        containerColor = AppColors.surface,
+                        contentColor = AppColors.onSurface
                     )
                 ) {
                     MaterialSymbol("person_search")
@@ -427,7 +428,7 @@ fun ArtistDetailScreen(
         Text(
             text = artistName.ifBlank { stringResource(R.string.common_unknown_artist) },
             style = MaterialTheme.typography.displaySmallEmphasized,
-            color = colorScheme.onSurface,
+            color = AppColors.onSurface,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier
@@ -557,10 +558,10 @@ private fun ArtistImmersiveHeader(
             Box(
                 modifier = Modifier
                     .matchParentSize()
-                    .background(colorScheme.surfaceContainerHighest),
+                    .background(AppColors.surfaceContainerHighest),
                 contentAlignment = Alignment.Center
             ) {
-                MaterialSymbol("artist", size = 96.sp, color = colorScheme.onSurfaceVariant)
+                MaterialSymbol("artist", size = 96.sp, color = AppColors.onSurfaceVariant)
             }
         }
 
@@ -576,9 +577,9 @@ private fun ArtistImmersiveHeader(
                 .background(
                     Brush.verticalGradient(
                         0.3f to Color.Transparent,
-                        0.7f to colorScheme.surfaceContainer.copy(alpha = 0.5f),
-                        0.85f to colorScheme.surfaceContainer,
-                        1f to colorScheme.surfaceContainer
+                        0.7f to AppColors.surfaceContainer.copy(alpha = 0.5f),
+                        0.85f to AppColors.surfaceContainer,
+                        1f to AppColors.surfaceContainer
                     )
                 )
         )
@@ -593,7 +594,7 @@ private fun ArtistImmersiveHeader(
             Text(
                 text = artistName.ifBlank { stringResource(R.string.common_unknown_artist) },
                 style = MaterialTheme.typography.displaySmallEmphasized,
-                color = colorScheme.onSurface,
+                color = AppColors.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 // PLACEHOLDER invisible: aporta el layout (posición de los chips) y reporta
@@ -605,19 +606,19 @@ private fun ArtistImmersiveHeader(
             Spacer(modifier = Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TonalChip {
-                    MaterialSymbol("album", size = 14.sp, color = colorScheme.onSecondaryContainer)
+                    MaterialSymbol("album", size = 14.sp, color = AppColors.onSecondaryContainer)
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = if (albumCount == 1) "1 álbum" else "$albumCount álbumes",
-                        color = colorScheme.onSecondaryContainer
+                        color = AppColors.onSecondaryContainer
                     )
                 }
                 TonalChip {
-                    MaterialSymbol("music_note", size = 14.sp, color = colorScheme.onSecondaryContainer)
+                    MaterialSymbol("music_note", size = 14.sp, color = AppColors.onSecondaryContainer)
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = if (songCount == 1) "1 canción" else "$songCount canciones",
-                        color = colorScheme.onSecondaryContainer
+                        color = AppColors.onSecondaryContainer
                     )
                 }
             }

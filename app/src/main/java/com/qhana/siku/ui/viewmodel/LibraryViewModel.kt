@@ -87,7 +87,33 @@ sealed class LibraryBannerState {
 private sealed interface SyncSignal {
     data class Progress(val status: SyncStatus) : SyncSignal
     data class Finished(val status: SyncStatus.Complete) : SyncSignal
+
+    /**
+     * Se cumplió la espera de cortesía de [BANNER_GRACE_MS] con un escaneo todavía en marcha: a
+     * partir de aquí el banner SÍ se pinta. Es una señal más y no un temporizador aparte a propósito
+     * — la convención 14 (un solo escritor por estado de UI) se cumple fusionando señales, no
+     * añadiendo coroutines que escriban el mismo campo.
+     */
+    data object GraceElapsed : SyncSignal
 }
+
+/**
+ * Cuánto tiene que llevar corriendo un ESCANEO antes de que el banner se moleste en aparecer.
+ *
+ * La app dispara pasadas de sincronización a menudo —el escaneo de arranque, el refresco al volver a
+ * primer plano, el encadenado tras un worker— y la mayoría no encuentra nada: terminan en unos pocos
+ * cientos de ms. Sin esta espera, cada una pintaba el banner y lo retiraba, y eso no es solo ruido
+ * visual: mientras dice "Escaneando" hay DOS animaciones continuas encima (el icono giratorio con su
+ * `rememberInfiniteTransition` y un `LinearWavyProgressIndicator` INDETERMINADO, que anima fase y
+ * barrido a tasa de pantalla). O sea que cada aparición fugaz deja a la app produciendo un frame por
+ * vsync, que es justo lo que impide a la cola de SurfaceFlinger drenar un atasco (ver "CERO
+ * productores continuos" en CLAUDE.md). Medido con Perfetto el 21 ago 2026: en el segundo del
+ * arranque, 121 frames con la composición parada y 120 de ellos con *buffer stuffing*.
+ *
+ * No se gatea nada más: `Downloading`, `Preparing`, `Paused` y `Error` significan que hay trabajo o
+ * un problema de verdad, y ésos se anuncian en el acto.
+ */
+private const val BANNER_GRACE_MS = 400L
 
 /**
  * Duración de un snackbar CORTO de Material 3 (`SnackbarDuration.Short`), en ms.
@@ -597,55 +623,70 @@ class LibraryViewModel @Inject constructor(
         // El orden entre ambas señales está garantizado porque `SyncManager` publica el estado
         // y emite el evento en la misma secuencia (`_state.value = complete` y luego `tryEmit`).
         viewModelScope.launch {
+            // El tercer flujo emite UNA vez por escaneo, [BANNER_GRACE_MS] después de que arranque.
+            // Si el escaneo termina antes, `flatMapLatest` cancela la espera y el tick no llega:
+            // el banner no llega a pintarse nunca, que es justo lo que se busca en las pasadas en
+            // vacío. Ver [BANNER_GRACE_MS].
+            // Tipo EXPLÍCITO: sin él, `merge` tiene que inferir el supertipo común de tres flujos de
+            // subtipos distintos y `emptyFlow()` se queda sin nada de donde sacarlo.
+            val graceTicks: Flow<SyncSignal> = syncManager.state
+                .map { it is SyncStatus.Scanning }
+                .distinctUntilChanged()
+                .flatMapLatest { scanning ->
+                    if (!scanning) emptyFlow()
+                    else flow {
+                        delay(BANNER_GRACE_MS)
+                        emit(SyncSignal.GraceElapsed)
+                    }
+                }
+
+            // `false` mientras el escaneo esté dentro de su espera de cortesía. Es estado LOCAL del
+            // colector —no de la UI—, así que no compite con nadie por [_uiState].
+            var graceElapsed = false
+
             merge(
                 syncManager.state.map { SyncSignal.Progress(it) },
-                syncManager.completedEvents.map { SyncSignal.Finished(it) }
+                syncManager.completedEvents.map { SyncSignal.Finished(it) },
+                graceTicks
             ).collect { signal ->
-                // El sync publicó algo: el pull-to-refresh ya no espera nada.
-                if (signal !is SyncSignal.Progress || signal.status !is SyncStatus.Idle) {
+                // El sync publicó algo: el pull-to-refresh ya no espera nada. El tick de cortesía
+                // NO cuenta — no dice nada del sync, así que no debe apagar el indicador.
+                if (signal is SyncSignal.Finished ||
+                    (signal is SyncSignal.Progress && signal.status !is SyncStatus.Idle)
+                ) {
                     _isManualRefreshing.value = false
                 }
 
                 // `null` = "no toques el banner". Lo necesita el caso Complete (abajo): no es lo
                 // mismo "poner Hidden" que "dejar lo que hay", y confundirlos era el parpadeo.
                 val banner: LibraryBannerState? = when (signal) {
+                    // **El escaneo espera su turno** ([BANNER_GRACE_MS]): mientras no haya pasado la
+                    // cortesía no se pinta nada, y si la pasada termina antes, el banner no llega a
+                    // existir. Lo demás se anuncia en el acto: significa trabajo o problema real.
                     is SyncSignal.Progress -> when (val status = signal.status) {
-                        is SyncStatus.Scanning ->
-                            LibraryBannerState.Scanning(status.found, status.message)
-                        is SyncStatus.Downloading -> LibraryBannerState.Downloading(
-                            status.current, status.total, status.failed, status.message
-                        )
-                        is SyncStatus.Preparing -> LibraryBannerState.Preparing(
-                            status.current, status.total, status.message
-                        )
-                        is SyncStatus.Error -> LibraryBannerState.Error(status.message)
-                        // Detenido por el entorno: se anuncia igual mientras se espera que
-                        // como estado final, porque para quien mira es la misma situación.
-                        // NO lleva acción: reanudar con datos móviles ya se decide en Ajustes,
-                        // y para escuchar ahora mismo está el streaming.
-                        is SyncStatus.Paused -> LibraryBannerState.Paused(status.message)
-                        // **Terminó: NO se toca el banner, se deja lo que haya.** `SyncManager`
-                        // publica `_state.value = complete` y en la línea siguiente emite el evento
-                        // `Finished`, así que son DOS emisiones seguidas del flujo fusionado. Poner
-                        // Hidden en la primera hacía que el banner se plegara del todo —la lista
-                        // saltaba hacia arriba— para volver a desplegarse un frame después con el
-                        // resumen. Visible en vídeo (17 ago 2026): "Escaneando" → nada → "Biblioteca
-                        // al día". Dejándolo intacto, el resumen RELEVA al de progreso sin hueco.
-                        //
-                        // No hay riesgo de que se quede colgado: `Complete` es un estado retenido, y
-                        // si el evento no llegara (nadie suscrito cuando se emitió) lo que hay es
-                        // Hidden de todos modos. El camino que sí necesita limpiar es Idle.
-                        is SyncStatus.Complete -> null
-                        // Idle es "no hay corrida": cancelación, logout, `release()`. Ahí sí se
-                        // retira lo que estuviera puesto, y es la red que impide que un "Escaneando"
-                        // sobreviva a un sync abortado.
-                        is SyncStatus.Idle -> LibraryBannerState.Hidden
+                        // Fin de la corrida: se rearma la cortesía para la siguiente.
+                        is SyncStatus.Idle, is SyncStatus.Complete -> {
+                            graceElapsed = false
+                            progressBanner(status)
+                        }
+                        is SyncStatus.Scanning -> if (graceElapsed) progressBanner(status) else null
+                        else -> {
+                            graceElapsed = true
+                            progressBanner(status)
+                        }
+                    }
+                    // Se cumplió la espera y el escaneo sigue: ahora sí, con el estado ACTUAL.
+                    is SyncSignal.GraceElapsed -> {
+                        graceElapsed = true
+                        progressBanner(syncManager.state.value)
                     }
                     // "Biblioteca al día" (sync sin cambio alguno) solo aporta con una fuente de
                     // NUBE (confirma que se consultó el servidor). Con biblioteca 100% local el
                     // re-escaneo es silencioso: sin novedades no hay nada que anunciar. Si SÍ
                     // hubo cambios (canciones nuevas/borradas de la carpeta), se muestra igual.
                     is SyncSignal.Finished -> signal.status.let { status ->
+                        // La corrida acabó: la siguiente vuelve a tener su espera de cortesía.
+                        graceElapsed = false
                         val nothingToReport = status.newSongs == 0 && status.downloaded == 0 &&
                             status.failed == 0 && status.deleted == 0
                         val onlyLocal = sourceRegistry.activeSources()
@@ -1184,4 +1225,45 @@ class LibraryViewModel @Inject constructor(
          */
         const val SONG_PICKER_DEBOUNCE_MS = 200L
     }
+
+    /**
+     * Traduce el estado EN CURSO del sync a banner. `null` = "no toques el banner".
+     *
+     * Vive fuera del colector porque la consulta el tick de cortesía además de la señal de progreso
+     * (ver [BANNER_GRACE_MS]): cuando el tick llega, hay que volver a mapear el estado ACTUAL, y
+     * tener la traducción en un solo sitio es lo que impide que las dos rutas diverjan.
+     */
+    private fun progressBanner(status: SyncStatus): LibraryBannerState? = when (status) {
+        is SyncStatus.Scanning ->
+            LibraryBannerState.Scanning(status.found, status.message)
+        is SyncStatus.Downloading -> LibraryBannerState.Downloading(
+            status.current, status.total, status.failed, status.message
+        )
+        is SyncStatus.Preparing -> LibraryBannerState.Preparing(
+            status.current, status.total, status.message
+        )
+        is SyncStatus.Error -> LibraryBannerState.Error(status.message)
+        // Detenido por el entorno: se anuncia igual mientras se espera que
+        // como estado final, porque para quien mira es la misma situación.
+        // NO lleva acción: reanudar con datos móviles ya se decide en Ajustes,
+        // y para escuchar ahora mismo está el streaming.
+        is SyncStatus.Paused -> LibraryBannerState.Paused(status.message)
+        // **Terminó: NO se toca el banner, se deja lo que haya.** `SyncManager`
+        // publica `_state.value = complete` y en la línea siguiente emite el evento
+        // `Finished`, así que son DOS emisiones seguidas del flujo fusionado. Poner
+        // Hidden en la primera hacía que el banner se plegara del todo —la lista
+        // saltaba hacia arriba— para volver a desplegarse un frame después con el
+        // resumen. Visible en vídeo (17 ago 2026): "Escaneando" → nada → "Biblioteca
+        // al día". Dejándolo intacto, el resumen RELEVA al de progreso sin hueco.
+        //
+        // No hay riesgo de que se quede colgado: `Complete` es un estado retenido, y
+        // si el evento no llegara (nadie suscrito cuando se emitió) lo que hay es
+        // Hidden de todos modos. El camino que sí necesita limpiar es Idle.
+        is SyncStatus.Complete -> null
+        // Idle es "no hay corrida": cancelación, logout, `release()`. Ahí sí se
+        // retira lo que estuviera puesto, y es la red que impide que un "Escaneando"
+        // sobreviva a un sync abortado.
+        is SyncStatus.Idle -> LibraryBannerState.Hidden
+    }
+
 }

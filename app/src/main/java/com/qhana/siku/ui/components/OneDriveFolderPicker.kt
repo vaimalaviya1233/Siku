@@ -38,6 +38,9 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.qhana.siku.R
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.appButtonColors
+import com.qhana.siku.ui.theme.appTextButtonColors
 import com.qhana.siku.ui.viewmodel.OneDriveFolderPickerViewModel
 
 /**
@@ -75,13 +78,13 @@ fun rememberOneDriveFolderChanger(
             title = { Text(stringResource(R.string.onedrive_folder_change_title)) },
             text = { Text(stringResource(R.string.onedrive_folder_change_body)) },
             confirmButton = {
-                TextButton(onClick = {
+                TextButton(colors = appTextButtonColors(), onClick = {
                     pendingPath = null
                     onApply(path)
                 }) { Text(stringResource(R.string.onedrive_folder_change_confirm)) }
             },
             dismissButton = {
-                TextButton(onClick = { pendingPath = null }) {
+                TextButton(colors = appTextButtonColors(), onClick = { pendingPath = null }) {
                     Text(stringResource(R.string.common_cancel))
                 }
             }
@@ -120,7 +123,7 @@ fun OneDriveFolderPickerSheet(
             Text(
                 text = stringResource(R.string.onedrive_folder_subtitle),
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = AppColors.onSurfaceVariant
             )
 
             Spacer(Modifier.height(12.dp))
@@ -135,7 +138,7 @@ fun OneDriveFolderPickerSheet(
                         Text(
                             text = " / ",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = AppColors.onSurfaceVariant
                         )
                     }
                     Text(
@@ -143,8 +146,8 @@ fun OneDriveFolderPickerSheet(
                         style = MaterialTheme.typography.bodyMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        color = if (index == state.crumbs.lastIndex) MaterialTheme.colorScheme.onSurface
-                        else MaterialTheme.colorScheme.primary,
+                        color = if (index == state.crumbs.lastIndex) AppColors.onSurface
+                        else AppColors.primary,
                         modifier = Modifier.clickable(enabled = index != state.crumbs.lastIndex) {
                             viewModel.goTo(index)
                         }
@@ -156,15 +159,15 @@ fun OneDriveFolderPickerSheet(
 
             Box(modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp, max = 360.dp)) {
                 when {
-                    state.isLoading -> LoadingIndicator(modifier = Modifier.align(Alignment.Center))
+                    state.isLoading -> LoadingIndicator(color = AppColors.primary, modifier = Modifier.align(Alignment.Center))
 
                     state.error != null -> Column(modifier = Modifier.align(Alignment.Center)) {
                         Text(
                             text = state.error ?: "",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.error
+                            color = AppColors.error
                         )
-                        TextButton(onClick = { viewModel.retry() }) {
+                        TextButton(colors = appTextButtonColors(), onClick = { viewModel.retry() }) {
                             Text(stringResource(R.string.common_retry))
                         }
                     }
@@ -172,7 +175,7 @@ fun OneDriveFolderPickerSheet(
                     state.folders.isEmpty() -> Text(
                         text = stringResource(R.string.onedrive_folder_empty),
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = AppColors.onSurfaceVariant,
                         modifier = Modifier.align(Alignment.Center)
                     )
 
@@ -202,7 +205,7 @@ fun OneDriveFolderPickerSheet(
                                             folder.childCount
                                         ),
                                         style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        color = AppColors.onSurfaceVariant
                                     )
                                 }
                                 MaterialSymbol("chevron_right", size = 20.sp)
@@ -220,12 +223,13 @@ fun OneDriveFolderPickerSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (state.canGoUp) {
-                    TextButton(onClick = { viewModel.goUp() }) {
+                    TextButton(colors = appTextButtonColors(), onClick = { viewModel.goUp() }) {
                         Text(stringResource(R.string.onedrive_folder_up))
                     }
                     Spacer(Modifier.width(8.dp))
                 }
                 Button(
+                    colors = appButtonColors(),
                     onClick = { close { onConfirm(state.path) } },
                     enabled = !state.isLoading,
                     shapes = ButtonDefaults.shapes()

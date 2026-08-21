@@ -10,7 +10,6 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
-import androidx.compose.material3.MaterialTheme.colorScheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,6 +51,9 @@ import com.qhana.siku.ui.components.sort
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
 
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
+import com.qhana.siku.ui.theme.appButtonColors
 import com.qhana.siku.ui.theme.appEffectsSpec
 import com.qhana.siku.ui.theme.appFastEffectsSpec
 import com.qhana.siku.ui.theme.appItemPlacementSpec
@@ -159,7 +161,7 @@ fun PlaylistDetailScreen(
         // `surfaceContainerHigh` (92). Mismo reparto que la biblioteca; el porqué, en `headerColor`
         // de LibraryScreen. Si se cambia, hay que mover CON él el degradado del header inmersivo,
         // que funde la imagen contra este color y dejaría costura.
-        containerColor = colorScheme.surfaceContainer
+        containerColor = AppColors.surfaceContainer
     ) { paddingValues ->
         Box(
             modifier = Modifier
@@ -260,10 +262,10 @@ fun PlaylistDetailScreen(
                                 // el grip y los botones, así que su tinte cubría solo el trozo
                                 // central, con esquinas rectas, y la fila activa se leía distinta
                                 // que en el resto de listas de la app.
-                                val rowBackground = songRowBackground(colorScheme.surface, isPlaying)
+                                val rowBackground = songRowBackground(AppColors.surface, isPlaying)
                                 val activeContent = rememberActiveRowContentColor(rowBackground, isPlaying)
                                 val rowVariantColor =
-                                    if (isPlaying) activeContent else colorScheme.onSurfaceVariant
+                                    if (isPlaying) activeContent else AppColors.onSurfaceVariant
                                 // Punta ORIGEN del container transform hacia el reproductor (ver
                                 // [SongRowContainer]). Va DENTRO del `ReorderableItem`: lo que se
                                 // arrastra es la fila, y lo que morfa es esa misma superficie.
@@ -273,9 +275,9 @@ fun PlaylistDetailScreen(
                                         .fillMaxWidth()
                                         .padding(horizontal = 16.dp, vertical = 1.dp)
                                 ) {
-                                    Surface(
+                                    AppSurface(
                                         color = rowBackground,
-                                        contentColor = if (isPlaying) activeContent else colorScheme.onSurface,
+                                        contentColor = if (isPlaying) activeContent else AppColors.onSurface,
                                         shape = shape,
                                         tonalElevation = elevation,
                                         shadowElevation = elevation,
@@ -362,8 +364,8 @@ fun PlaylistDetailScreen(
                                     .fillMaxWidth()
                                     .padding(horizontal = 16.dp, vertical = 1.dp)
                             ) {
-                                Surface(
-                                    color = colorScheme.surface,
+                                AppSurface(
+                                    color = AppColors.surface,
                                     shape = shape,
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
@@ -382,7 +384,7 @@ fun PlaylistDetailScreen(
                                             Row(verticalAlignment = Alignment.CenterVertically) {
                                                 if (isFavoritesList) {
                                                     IconButton(onClick = { onToggleFavorite(song.id) }) {
-                                                        MaterialSymbol("favorite", fill = true, color = colorScheme.primary)
+                                                        MaterialSymbol("favorite", fill = true, color = AppColors.primary)
                                                     }
                                                 }
                                                 SongOverflowButton(
@@ -395,7 +397,7 @@ fun PlaylistDetailScreen(
                                                     },
                                                     onAddToPlaylist = { songIdForPlaylist = song.id },
                                                     onAddToQueue = { onAddToQueue(song) },
-                                                    rowBackground = songRowBackground(colorScheme.surface, isPlaying)
+                                                    rowBackground = songRowBackground(AppColors.surface, isPlaying)
                                                 )
                                             }
                                         }
@@ -413,7 +415,7 @@ fun PlaylistDetailScreen(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
-                    .background(colorScheme.surfaceContainerHigh.copy(alpha = if (songs.isEmpty()) 1f else topBarAlpha))
+                    .background(AppColors.surfaceContainerHigh.copy(alpha = if (songs.isEmpty()) 1f else topBarAlpha))
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -426,8 +428,8 @@ fun PlaylistDetailScreen(
                         onClick = onBackClick,
                         shapes = IconButtonDefaults.shapes(),
                         colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = colorScheme.surface,
-                            contentColor = colorScheme.onSurface
+                            containerColor = AppColors.surface,
+                            contentColor = AppColors.onSurface
                         )
                     ) {
                         MaterialSymbol("arrow_back")
@@ -439,7 +441,7 @@ fun PlaylistDetailScreen(
                         Text(
                             text = playlistName,
                             style = MaterialTheme.typography.titleMedium,
-                            color = colorScheme.onSurface,
+                            color = AppColors.onSurface,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier
@@ -461,7 +463,7 @@ fun PlaylistDetailScreen(
                 Text(
                     text = playlistName,
                     style = MaterialTheme.typography.headlineLargeEmphasized,
-                    color = colorScheme.onSurface,
+                    color = AppColors.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
@@ -535,7 +537,7 @@ private fun EmptyPlaylistState(
             MaterialSymbol(
                 if (isFavoritesList) "heart_broken" else "playlist_remove",
                 fill = true,
-                color = colorScheme.outline,
+                color = AppColors.outline,
                 size = 64.sp
             )
             Spacer(modifier = Modifier.height(16.dp))
@@ -543,14 +545,14 @@ private fun EmptyPlaylistState(
                 text = if (isFavoritesList) stringResource(R.string.favorites_empty)
                 else stringResource(R.string.playlist_empty),
                 style = MaterialTheme.typography.titleMedium,
-                color = colorScheme.onSurface
+                color = AppColors.onSurface
             )
             if (!isFavoritesList) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = stringResource(R.string.playlist_empty_subtitle),
                     style = MaterialTheme.typography.bodyMedium,
-                    color = colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
             }
             // Botón de alta AQUÍ: con la lista vacía no se dibuja la cabecera con
@@ -564,7 +566,7 @@ private fun EmptyPlaylistState(
                 // `iconSpacingFor`), no literales — mismo trato que su hermano "Crear lista" en la
                 // pestaña Listas, que es el otro extremo de esta misma acción.
                 val addButtonHeight = ButtonDefaults.MinHeight
-                Button(onClick = onAddSongs, shapes = ButtonDefaults.shapes()) {
+                Button(colors = appButtonColors(), onClick = onAddSongs, shapes = ButtonDefaults.shapes()) {
                     MaterialSymbol(
                         "playlist_add",
                         size = ButtonDefaults.iconSizeFor(addButtonHeight).value.sp
@@ -600,14 +602,14 @@ private fun PlaylistImmersiveHeader(
             0 -> Box(
                 modifier = Modifier
                     .matchParentSize()
-                    .background(colorScheme.surfaceContainerHighest),
+                    .background(AppColors.surfaceContainerHighest),
                 contentAlignment = Alignment.Center
             ) {
                 MaterialSymbol(
                     if (isFavoritesList) "favorite" else "queue_music",
                     fill = true,
                     size = 96.sp,
-                    color = colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
             }
             else -> AdaptiveCollage(arts, Modifier.matchParentSize())
@@ -620,7 +622,7 @@ private fun PlaylistImmersiveHeader(
                 .background(
                     Brush.verticalGradient(
                         0.4f to Color.Transparent,
-                        1f to colorScheme.surfaceContainer
+                        1f to AppColors.surfaceContainer
                     )
                 )
         )
@@ -633,7 +635,7 @@ private fun PlaylistImmersiveHeader(
             Text(
                 text = playlistName,
                 style = MaterialTheme.typography.headlineLargeEmphasized,
-                color = colorScheme.onSurface,
+                color = AppColors.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 // PLACEHOLDER invisible: solo aporta layout y su ancla; el texto visible es el
@@ -645,20 +647,20 @@ private fun PlaylistImmersiveHeader(
             Spacer(modifier = Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TonalChip {
-                    MaterialSymbol("music_note", size = 14.sp, color = colorScheme.onSecondaryContainer)
+                    MaterialSymbol("music_note", size = 14.sp, color = AppColors.onSecondaryContainer)
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = pluralStringResource(R.plurals.song_count, songs.size, songs.size),
-                        color = colorScheme.onSecondaryContainer
+                        color = AppColors.onSecondaryContainer
                     )
                 }
                 if (totalDurationMin > 0) {
                     TonalChip {
-                        MaterialSymbol("schedule", size = 14.sp, color = colorScheme.onSecondaryContainer)
+                        MaterialSymbol("schedule", size = 14.sp, color = AppColors.onSecondaryContainer)
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = "$totalDurationMin min",
-                            color = colorScheme.onSecondaryContainer
+                            color = AppColors.onSecondaryContainer
                         )
                     }
                 }

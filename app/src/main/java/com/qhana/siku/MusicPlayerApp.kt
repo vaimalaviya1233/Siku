@@ -23,6 +23,8 @@ import com.qhana.siku.widget.PlayerWidget
 import com.qhana.siku.widget.QueueWidget
 import com.qhana.siku.widget.WidgetBridge
 import kotlinx.coroutines.CoroutineScope
+import com.qhana.siku.ui.components.MaterialSymbolFont
+import com.qhana.siku.ui.theme.AppFonts
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
@@ -92,6 +94,18 @@ class MusicPlayerApp : Application(), Configuration.Provider, SingletonImageLoad
         // pérdida del directorio de covers), re-extrae del audio local o limpia el URI.
         // No bloquea el arranque; corre en background al iniciar el proceso.
         appScope.launch { artworkHealingManager.heal() }
+
+        // Typefaces construidos ANTES del primer frame: sin esto el segundo frame del arranque en
+        // frío los construye en el hilo principal, dentro del `measure`. En `Default` y no en el `IO`
+        // del scope: es CPU pura. Ver [MaterialSymbolFont.preload] y [AppFonts.preload].
+        //
+        // **Los ICONOS primero**: los dos se resuelven contra la misma caché con lock, así que el
+        // orden decide quién llega antes al primer frame, y el primer frame pinta glifos (las
+        // pestañas de la biblioteca) antes que texto de cuerpo.
+        appScope.launch(Dispatchers.Default) {
+            MaterialSymbolFont.preload(this@MusicPlayerApp)
+            AppFonts.preload(this@MusicPlayerApp)
+        }
 
         // Worker de colores en background, con restricción de batería pero SIN exigir dispositivo
         // inactivo. `setRequiresDeviceIdle` suena prudente y en la práctica es una condición que

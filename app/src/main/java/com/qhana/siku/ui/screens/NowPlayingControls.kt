@@ -47,6 +47,9 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.sp
+import com.qhana.siku.ui.theme.appSelectableMenuItemColors
+import com.qhana.siku.ui.theme.AppMenuGroup
+import com.qhana.siku.ui.theme.appVibrantFloatingToolbarColors
 import com.qhana.siku.R
 import com.qhana.siku.data.model.PlaybackState
 import com.qhana.siku.data.model.PlayerToolbarAction
@@ -55,6 +58,9 @@ import com.qhana.siku.data.model.ToolbarActionState
 import com.qhana.siku.ui.LocalPlayerOnScreen
 import com.qhana.siku.ui.components.*
 
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
+import com.qhana.siku.ui.theme.appMenuItemColors
 import com.qhana.siku.ui.theme.appSpatialSpec
 import com.qhana.siku.ui.theme.appFastSpatialSpec
 import com.qhana.siku.ui.theme.appEffectsSpec
@@ -478,7 +484,7 @@ internal fun ExpressiveToggleIcon(
     // el `surface` para que SIEMPRE sea PROMINENTE (≥3:1) — si no, un acento claro (p.ej. el lila de
     // Orion) en tema claro pesa MENOS que el `onSurfaceVariant` oscuro del inactivo y se lee al
     // revés. Conserva el matiz: en claro lo oscurece, en oscuro lo deja claro.
-    val activeColor = ensureContrast(accentColor, MaterialTheme.colorScheme.surface, minRatio = 3f)
+    val activeColor = ensureContrast(accentColor, AppColors.surface, minRatio = 3f)
     val iconColor by animateColorAsState(
         targetValue = if (checked) activeColor else inactiveColor,
         // Effects: es un color, y los tokens effects son los únicos sin rebote.
@@ -592,8 +598,8 @@ internal fun PlaybackControls(
     // la pantalla —textos, chips, títulos— también es blanco en ese estilo, así que un icono con más
     // croma se leería apagado entre ellos. Se probó reencuadrarlo y se revirtió; ver el porqué
     // completo junto a `ensureContrast` en PlayerWidgets.kt.
-    val sideButtonContainer = MaterialTheme.colorScheme.secondaryContainer
-    val sideButtonContent = MaterialTheme.colorScheme.onSecondaryContainer
+    val sideButtonContainer = AppColors.secondaryContainer
+    val sideButtonContent = AppColors.onSecondaryContainer
     // Transporte = SOLO prev / play / next, centrado. Shuffle se movió a la cola y repeat al
     // toolbar (eran ajustes de la cola, no del transporte; y competían con el play en la jerarquía).
     Row(
@@ -616,13 +622,13 @@ internal fun PlaybackControls(
         // funcional por si un cambio futuro rompe esa invariante.
 
         // En los dos botones lo único que cambia con el estado es el ANCHO —lo único que el spec
-        // mueve entre variantes—; los ALTOS son fijos (80 el play, 56 los laterales, ver
-        // [PlayButtonHeight] y [SideButtonHeight]).
+        // mueve entre variantes—; los ALTOS son fijos y son EL MISMO (80, ver [PlayButtonHeight] y
+        // [SideButtonHeight]).
         // REPRODUCIENDO: el play es una COOKIE de 9 lados (80×80, morph desde la píldora vía
-        // PlayButtonMorphShape) y los laterales círculos (56×56 = Medium uniform).
+        // PlayButtonMorphShape) y los laterales círculos del mismo diámetro (80×80).
         // EN PAUSA: el play crece a píldora (120×80, medidas propias — ver [PlayButtonHeight]) y
-        // los laterales se estrechan (48×56 = Medium narrow). Forma y ancho animan con el mismo
-        // spring.
+        // los laterales se estrechan a la variante Narrow del Large (64×80). Forma y ancho animan
+        // con el mismo spring.
         // UN solo spec para los dos anchos animados y para el morph de la forma
         // ([rememberPlayButtonSpin] usa el mismo token): es lo que hace que el grupo se mueva como
         // una pieza en vez de como animaciones que casualmente duran parecido. Los altos ya no se
@@ -650,13 +656,13 @@ internal fun PlaybackControls(
             animationSpec = transportSpec,
             label = "sideButtonWidth"
         )
-        // Formas del spec para un icon button Medium: `ContainerShapeRound` = CornerFull en reposo y
-        // `PressedContainerShape` = CornerMedium al pulsar, que es `MaterialTheme.shapes.medium` —
-        // se toma del tema y no de un dp escrito a mano, que es lo que había (16dp, el corner de un
-        // botón Large).
+        // Formas del spec para un icon button Large: `ContainerShapeRound` = CornerFull en reposo y
+        // `PressedContainerShape` = CornerLarge al pulsar, que es `MaterialTheme.shapes.large` —
+        // se toma del tema y no de un dp escrito a mano. (Era el Medium —`shapes.medium`— mientras
+        // los laterales fueron Medium; al subirlos a la talla del play sube también su pressed.)
         val sideShapes = IconButtonShapes(
             shape = RoundedCornerShape(percent = 50),
-            pressedShape = MaterialTheme.shapes.medium
+            pressedShape = MaterialTheme.shapes.large
         )
         val prevShapes = sideShapes
         val nextShapes = sideShapes
@@ -729,6 +735,7 @@ internal fun PlaybackControls(
                     // Darle forma sólo a los nuestros metería pastillas sueltas en una superficie
                     // que no es un grupo segmentado.
                     DropdownMenuItem(
+                        colors = appMenuItemColors(),
                         text = { Text(stringResource(R.string.np_previous)) },
                         leadingIcon = { MaterialSymbol("skip_previous", fill = true) },
                         onClick = {
@@ -751,7 +758,7 @@ internal fun PlaybackControls(
                     // Morph continuo píldora (pausa) ↔ Cookie9Sided (reproduciendo),
                     // conducido por el mismo spring que las dimensiones.
                     val playShape = PlayButtonMorphShape(playMorphProgress)
-                    Surface(
+                    AppSurface(
                         onClick = {
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             onPlayPause()
@@ -804,6 +811,7 @@ internal fun PlaybackControls(
                 },
                 menuContent = { state ->
                     DropdownMenuItem(
+                        colors = appMenuItemColors(),
                         text = { Text(if (isPlayingOrBuffering) stringResource(R.string.common_pause) else stringResource(R.string.common_play)) },
                         leadingIcon = { MaterialSymbol(if (isPlayingOrBuffering) "pause" else "play_arrow") },
                         onClick = {
@@ -841,6 +849,7 @@ internal fun PlaybackControls(
                 },
                 menuContent = { state ->
                     DropdownMenuItem(
+                        colors = appMenuItemColors(),
                         text = { Text(stringResource(R.string.np_next)) },
                         leadingIcon = { MaterialSymbol("skip_next", fill = true) },
                         onClick = {
@@ -886,7 +895,7 @@ internal fun BottomActionBar(
     // container = `primaryContainer`, content = `onPrimaryContainer` (defaults de
     // vibrantFloatingToolbarColors). Se eligió vibrant porque la standard (surfaceContainer) se
     // perdía contra el fondo del NowPlaying.
-    val toolbarContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+    val toolbarContentColor = AppColors.onPrimaryContainer
     // Relleno del toggle ACTIVO: el color DE LA BARRA movido solo en el eje del TONO, lo bastante
     // lejos de ella para VERSE y sin llegar a disputarle el énfasis al play.
     //
@@ -952,7 +961,7 @@ internal fun BottomActionBar(
     //
     // Comprobado contra el estilo que ya estaba aprobado a la vista en tema claro (barra 90.1, play
     // 42.4, glifo 30.0): cumple las dos y sigue dando 71.0, idéntico.
-    val toolbarContainerColor = MaterialTheme.colorScheme.primaryContainer
+    val toolbarContainerColor = AppColors.primaryContainer
     val checkedBg = remember(playButtonColor, toolbarContainerColor, toolbarContentColor) {
         val bar = Hct.fromInt(toolbarContainerColor.toArgb())
         val playTone = Hct.fromInt(playButtonColor.toArgb()).tone
@@ -1003,7 +1012,7 @@ internal fun BottomActionBar(
     Box(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         HorizontalFloatingToolbar(
             expanded = true,
-            colors = FloatingToolbarDefaults.vibrantFloatingToolbarColors(),
+            colors = appVibrantFloatingToolbarColors(),
             // Spec floating toolbar: container de 64dp. La alpha18 NO lo respeta sola (medido
             // 72.5dp en dispositivo: acolcha 12dp alrededor de los touch targets de 48 aunque
             // se le pase contentPadding de 8) → altura FORZADA al token. Los visuales de 40dp
@@ -1197,7 +1206,7 @@ internal fun BottomActionBar(
                         expanded = showMenu,
                         onDismissRequest = { showMenu = false }
                     ) {
-                    DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
+                    AppMenuGroup(shapes = MenuDefaults.groupShapes()) {
                         // Qué acciones caen aquí lo decide la config del toolbar, así que la forma
                         // de cada item sale de su POSICIÓN en la lista real: el bloque cierra
                         // arriba y abajo aunque el usuario deje una sola acción en el overflow.
@@ -1214,6 +1223,7 @@ internal fun BottomActionBar(
                             )
                             when (action) {
                                 PlayerToolbarAction.REPEAT -> DropdownMenuItem(
+                                    colors = appMenuItemColors(),
                                     onClick = { showMenu = false; onRepeatToggle() },
                                     text = {
                                         Text(when (repeatMode) {
@@ -1231,6 +1241,7 @@ internal fun BottomActionBar(
                                     }
                                 )
                                 PlayerToolbarAction.LYRICS -> DropdownMenuItem(
+                                    colors = appSelectableMenuItemColors(),
                                     checked = showLyrics,
                                     onCheckedChange = { showMenu = false; onLyricsToggle() },
                                     text = { Text(if (showLyrics) stringResource(R.string.np_hide_lyrics) else stringResource(R.string.np_show_lyrics)) },
@@ -1238,18 +1249,21 @@ internal fun BottomActionBar(
                                     leadingIcon = { MenuItemIcon("lyrics", fill = showLyrics) }
                                 )
                                 PlayerToolbarAction.QUEUE -> DropdownMenuItem(
+                                    colors = appMenuItemColors(),
                                     onClick = { showMenu = false; onShowQueue() },
                                     text = { Text(stringResource(R.string.np_view_queue)) },
                                     shape = itemShapes.shape,
                                     leadingIcon = { MenuItemIcon("queue_music") }
                                 )
                                 PlayerToolbarAction.SHARE -> DropdownMenuItem(
+                                    colors = appMenuItemColors(),
                                     onClick = { showMenu = false; onShareSong() },
                                     text = { Text(stringResource(R.string.np_share)) },
                                     shape = itemShapes.shape,
                                     leadingIcon = { MenuItemIcon("share") }
                                 )
                                 PlayerToolbarAction.KEEP_SCREEN_ON -> DropdownMenuItem(
+                                    colors = appSelectableMenuItemColors(),
                                     checked = keepScreenOn,
                                     onCheckedChange = { showMenu = false; onToggleKeepScreenOn() },
                                     text = { Text(if (keepScreenOn) stringResource(R.string.np_screen_off) else stringResource(R.string.np_screen_on)) },
@@ -1257,12 +1271,14 @@ internal fun BottomActionBar(
                                     leadingIcon = { MenuItemIcon("wb_sunny", fill = keepScreenOn) }
                                 )
                                 PlayerToolbarAction.EQUALIZER -> DropdownMenuItem(
+                                    colors = appMenuItemColors(),
                                     onClick = { showMenu = false; onOpenEqualizer() },
                                     text = { Text(stringResource(R.string.np_open_eq)) },
                                     shape = itemShapes.shape,
                                     leadingIcon = { MenuItemIcon("graphic_eq") }
                                 )
                                 PlayerToolbarAction.ADD_TO_PLAYLIST -> DropdownMenuItem(
+                                    colors = appMenuItemColors(),
                                     onClick = { showMenu = false; onAddToPlaylistClick() },
                                     text = { Text(stringResource(R.string.common_add_to_playlist)) },
                                     shape = itemShapes.shape,
@@ -1272,6 +1288,7 @@ internal fun BottomActionBar(
                                 // que es una ACCIÓN; que haya uno corriendo se sigue contando con
                                 // el acento del icono.
                                 PlayerToolbarAction.SLEEP_TIMER -> DropdownMenuItem(
+                                    colors = appMenuItemColors(),
                                     onClick = { showMenu = false; onSleepTimerClick() },
                                     text = { Text(stringResource(R.string.sleep_timer_title)) },
                                     shape = itemShapes.shape,
@@ -1284,6 +1301,7 @@ internal fun BottomActionBar(
                                     }
                                 )
                                 PlayerToolbarAction.DOWNLOAD -> DropdownMenuItem(
+                                    colors = appMenuItemColors(),
                                     onClick = { showMenu = false; onRedownload() },
                                     text = { Text(if (isDownloaded) stringResource(R.string.common_redownload) else stringResource(R.string.np_download)) },
                                     shape = itemShapes.shape,
@@ -1292,7 +1310,7 @@ internal fun BottomActionBar(
                                 )
                             }
                         }
-                    } // fin DropdownMenuGroup
+                    } // fin AppMenuGroup
                     }
                 }
             }
@@ -1419,32 +1437,49 @@ private val PlayButtonPlayingWidth = 80.dp
 private val PlayButtonPausedWidth = 120.dp
 
 /**
- * Prev/next = icon button **Medium** del spec, leído de `MediumIconButtonTokens`: contenedor 56dp de
- * alto, icono 24 y tres anchos según la variante — `Narrow` 48 (24 + 12 + 12), `Uniform` 56
- * (24 + 16 + 16) y `Wide` 72 (24 + 24 + 24).
+ * Prev/next van a la **talla VISUAL del play** (20 ago 2026, decisión del usuario): tres piezas de un
+ * rango. Antes eran un icon button **Medium** del spec (56 de alto, 48/56 de ancho, icono 24) y se
+ * leían como acompañantes de otra talla.
+ *
+ * **"Igual" es igual A LA VISTA, no en bounds**, y la diferencia la pone la forma del play: la cookie
+ * de 9 lados es una estrella con `innerRadius = 0.8` (`MaterialShapes.cookie9()`) inscrita en sus
+ * 80×80, así que los lóbulos tocan el borde pero el CUERPO mide 64, y con el redondeo al 50 % el
+ * contorno se percibe en la media de los dos radios. Un círculo pleno de 80 al lado se veía más
+ * grande (probado en device: el play parecía el chico). De ahí [CookieVisualRatio]: los laterales
+ * miden `80 × 0,9 = 72`, el tamaño al que un círculo pesa lo mismo que esa cookie.
  *
  * **El alto NO cambia con el estado**, igual que en el play: es el del contenedor, y el spec solo
- * mueve el eje horizontal entre variantes. Sonando son círculos **Uniform** (56×56, cuadrado ⇒
- * círculo con `CornerFull`) y en pausa se estrechan a **Narrow** (48×56), acompañando al play que se
- * ensancha. Hubo un estado intermedio donde en pausa se estiraban a lo alto hasta igualar al play
- * (48×96): esa cápsula vertical no tiene token —el spec no tabula altos por variante— y se
- * descartó.
+ * mueve el eje horizontal entre variantes. En pausa se estrechan con la proporción de la variante
+ * **Narrow del Large** sobre su Uniform — 64/80 (`IconSize` 32 + 16 + 16 de `LargeIconButtonTokens`
+ * contra 32 + 32 + 32... acotado aquí al 80 del play) — llevada a la talla visual y a la rejilla de 4:
+ * 72 × 0,8 = 57,6 → **56**. La talla Large es la que toca porque es la del icono que llevan (32, el
+ * mismo del play); su `ContainerHeight` tabulado (96) no se adopta por el mismo motivo que no lo
+ * adoptó el play: le roba alto a la carátula, que es `weight(1f)`. Hubo un estado intermedio donde
+ * en pausa se estiraban a lo alto hasta igualar al play (48×96): esa cápsula vertical no tiene token
+ * —el spec no tabula altos por variante— y se descartó.
  */
-private val SideButtonHeight = 56.dp
+private val SideButtonHeight = PlayButtonHeight * CookieVisualRatio
 
-private val SideButtonUniformWidth = 56.dp
+private val SideButtonUniformWidth = SideButtonHeight
 
-private val SideButtonNarrowWidth = 48.dp
+private val SideButtonNarrowWidth = 56.dp
 
 /**
- * Glifos del transporte: `LargeIconButtonTokens.IconSize` (32) para el play y
- * `MediumIconButtonTokens.IconSize` (24) para prev/next. Los dos estaban en 32, o sea el del Large
- * aplicado también a los laterales.
+ * Cuánto del bound ocupa, a la vista, la cookie de 9 lados del play: la media entre su radio exterior
+ * (1, los lóbulos) y el interior (`innerRadius = 0.8` en `MaterialShapes.cookie9()`, leído del jar de
+ * material3 1.5.0-alpha24 — no está expuesto como API). Un círculo de este tamaño relativo pesa lo
+ * mismo que la cookie; es lo que iguala los laterales al play sin que ninguno se lea más grande.
+ */
+private const val CookieVisualRatio = (1f + 0.8f) / 2f
+
+/**
+ * Glifos del transporte: `LargeIconButtonTokens.IconSize` (32) en los tres. Prev/next llevaron el
+ * del Medium (24) mientras fueron botones Medium; al subir a la talla del play suben con ella.
  *
  * En **sp** y no en dp porque un `MaterialSymbol` es tipografía (fuente variable), así que escala
  * con el ajuste de tamaño de texto del sistema — a escala 1 coincide exactamente con el token.
  */
 private val PlayButtonIconSize = 32.sp
 
-private val SideButtonIconSize = 24.sp
+private val SideButtonIconSize = PlayButtonIconSize
 

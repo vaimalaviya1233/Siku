@@ -23,6 +23,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
 import com.qhana.siku.data.repository.LyricsCandidate
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.appButtonColors
+import com.qhana.siku.ui.theme.appTextButtonColors
 
 /**
  * Bottom sheet para selección manual de letras desde candidatos de LrcLib.
@@ -56,30 +59,30 @@ fun LyricsSearchSheet(
             Text(
                 text = stringResource(R.string.lyrics_choose_hint),
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = AppColors.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
             )
 
-            HorizontalDivider()
+            HorizontalDivider(color = AppColors.outlineVariant)
 
             when {
                 isLoading -> CenteredMessage {
-                    LoadingIndicator(modifier = Modifier.size(48.dp))
+                    LoadingIndicator(color = AppColors.primary, modifier = Modifier.size(48.dp))
                 }
                 errorMessage != null -> CenteredMessage {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        MaterialSymbol("error_outline", size = 48.sp, color = MaterialTheme.colorScheme.error)
+                        MaterialSymbol("error", size = 48.sp, color = AppColors.error)
                         Spacer(Modifier.height(12.dp))
                         Text(
                             errorMessage,
-                            color = MaterialTheme.colorScheme.error,
+                            color = AppColors.error,
                             textAlign = androidx.compose.ui.text.style.TextAlign.Center
                         )
                         // Reintentar: la búsqueda de candidatos suele fallar por timeout de
                         // LrcLib; relanza la misma consulta sin cerrar la hoja.
                         Spacer(Modifier.height(16.dp))
                         val retryButtonHeight = ButtonDefaults.MinHeight
-                        Button(onClick = onRetry, shapes = ButtonDefaults.shapes()) {
+                        Button(colors = appButtonColors(), onClick = onRetry, shapes = ButtonDefaults.shapes()) {
                             // Sin color explícito: hereda el LocalContentColor del Button (así se
                             // atenúa solo si alguna vez se deshabilita, en vez de quedar brillante
                             // sobre un texto apagado — mismo criterio que el botón del onboarding).
@@ -95,9 +98,9 @@ fun LyricsSearchSheet(
                 }
                 candidates != null && candidates.isEmpty() -> CenteredMessage {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        MaterialSymbol("search_off", size = 48.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        MaterialSymbol("search_off", size = 48.sp, color = AppColors.onSurfaceVariant)
                         Spacer(Modifier.height(12.dp))
-                        Text(stringResource(R.string.lyrics_no_matches), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(stringResource(R.string.lyrics_no_matches), color = AppColors.onSurfaceVariant)
                     }
                 }
                 candidates != null -> LazyColumn(modifier = Modifier.heightIn(max = 480.dp)) {
@@ -167,7 +170,7 @@ private fun CandidateItem(
                     Text(
                         candidate.albumName,
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = AppColors.onSurfaceVariant,
                         maxLines = 1
                     )
                 }
@@ -177,7 +180,7 @@ private fun CandidateItem(
                         Text(
                             text = formatDuration(d),
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = AppColors.onSurfaceVariant
                         )
                         Spacer(Modifier.width(8.dp))
                     }
@@ -209,7 +212,7 @@ private fun LyricsPreviewDialog(
                 Text(
                     candidate.artistName,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
             }
         },
@@ -224,10 +227,10 @@ private fun LyricsPreviewDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onUse) { Text(stringResource(R.string.lyrics_use)) }
+            TextButton(colors = appTextButtonColors(), onClick = onUse) { Text(stringResource(R.string.lyrics_use)) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_close)) }
+            TextButton(colors = appTextButtonColors(), onClick = onDismiss) { Text(stringResource(R.string.common_close)) }
         }
     )
 }
@@ -266,17 +269,17 @@ private data class BadgeColors(
 @Composable
 private fun LyricsCandidate.badgeColors(): BadgeColors = when {
     instrumental -> BadgeColors(
-        MaterialTheme.colorScheme.tertiaryContainer,
-        MaterialTheme.colorScheme.onTertiaryContainer
+        AppColors.tertiaryContainer,
+        AppColors.onTertiaryContainer
     )
     hasSynced -> BadgeColors(
-        MaterialTheme.colorScheme.primaryContainer,
-        MaterialTheme.colorScheme.onPrimaryContainer
+        AppColors.primaryContainer,
+        AppColors.onPrimaryContainer
     )
     // `onSurfaceVariant` no tiene par de contenedor; el neutro va sobre `surfaceContainerHighest`.
     else -> BadgeColors(
-        MaterialTheme.colorScheme.surfaceContainerHighest,
-        MaterialTheme.colorScheme.onSurfaceVariant
+        AppColors.surfaceContainerHighest,
+        AppColors.onSurfaceVariant
     )
 }
 

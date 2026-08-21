@@ -15,6 +15,7 @@ import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import com.qhana.siku.ui.theme.appVibrantFloatingToolbarColors
 import com.qhana.siku.R
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
@@ -23,6 +24,8 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.ui.model.SongUiModel
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
 
@@ -69,7 +72,7 @@ fun QueueBottomSheet(
     modifier: Modifier = Modifier,
     accentColor: Color? = null
 ) {
-    val materialPrimary = MaterialTheme.colorScheme.primary
+    val materialPrimary = AppColors.primary
     // Énfasis homogéneo con el NowPlaying: usa el acento del álbum (si se pasa).
     val effectiveAccent = accentColor ?: materialPrimary
 
@@ -82,9 +85,9 @@ fun QueueBottomSheet(
     // Las keys son los COLORES, nunca el `ColorScheme`: `MaterialTheme` conserva una única
     // instancia y le muta los estados internos al cambiar de tema, así que un `remember(scheme)`
     // no se invalidaría jamás y la hoja se quedaría con la paleta de la canción anterior.
-    val background = MaterialTheme.colorScheme.surface
-    val onBackground = MaterialTheme.colorScheme.onSurface
-    val onBackgroundVariant = MaterialTheme.colorScheme.onSurfaceVariant
+    val background = AppColors.surface
+    val onBackground = AppColors.onSurface
+    val onBackgroundVariant = AppColors.onSurfaceVariant
     val colors = remember(background, onBackground, onBackgroundVariant, effectiveAccent) {
         QueueColors(
             backgroundColor = background,
@@ -357,12 +360,12 @@ private fun QueueActionsToolbar(
     // Contenido de los botones planos = `onPrimaryContainer`: es el `on-` del contenedor real de la
     // barra y el token que M3 usa para su texto (`VibrantButtonUnselectedTextColor`). Los TextButton
     // fuerzan `primary`, que sobre este contenedor apenas se ve, así que se pasa explícito.
-    val toolbarContent = MaterialTheme.colorScheme.onPrimaryContainer
+    val toolbarContent = AppColors.onPrimaryContainer
 
     Box(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         HorizontalFloatingToolbar(
             expanded = true,
-            colors = FloatingToolbarDefaults.vibrantFloatingToolbarColors(),
+            colors = appVibrantFloatingToolbarColors(),
             // Mismo motivo que en el NowPlaying: el componente no respeta su token de altura por
             // sí solo (acolcha alrededor de los touch targets), así que se fuerza.
             contentPadding = PaddingValues(ComponentConfig.FloatingBarInnerPadding),
@@ -380,8 +383,8 @@ private fun QueueActionsToolbar(
                 // en `primaryContainer` da una píldora sólida de alto contraste con la barra en los
                 // cuatro casos (vívido/apagado × claro/oscuro), sin depender del croma de la carátula.
                 colors = ToggleButtonDefaults.tonalToggleButtonColors(
-                    checkedContainerColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    checkedContentColor = MaterialTheme.colorScheme.primaryContainer
+                    checkedContainerColor = AppColors.onPrimaryContainer,
+                    checkedContentColor = AppColors.primaryContainer
                 ),
                 // PÍLDORA también encendido. El default de `ToggleButton` lleva
                 // `SelectedContainerShapeSquare` en `checkedShape`, así que al activarse morfeaba a
@@ -447,9 +450,9 @@ private fun QueueItemRow(
     // En un álbum monocromo el tema entero es neutro y este contenedor queda tonalmente cerca del
     // resto de filas: es el límite del enfoque por contenedor cuando no hay color con el que teñir.
     val backgroundColor = if (isCurrentSong) {
-        MaterialTheme.colorScheme.primaryContainer
+        AppColors.primaryContainer
     } else {
-        MaterialTheme.colorScheme.surfaceContainerHigh
+        AppColors.surfaceContainerHigh
     }
     // Contenido de la fila activa: el `on-` de ese relleno con contraste garantizado (el porqué vive
     // en `rememberActiveRowContentColor`, que es la definición ÚNICA que comparten las cuatro
@@ -468,7 +471,7 @@ private fun QueueItemRow(
 
     // Usar Surface es más eficiente que Modifier.clip().background()
     // Surface maneja el clipping y el dibujo de fondo en una sola pasada de renderizado cuando es posible.
-    Surface(
+    AppSurface(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 1.dp)

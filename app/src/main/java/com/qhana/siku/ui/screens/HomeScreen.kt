@@ -23,7 +23,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MaterialTheme.colorScheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.carousel.CarouselItemScope
 import androidx.compose.material3.carousel.HorizontalMultiBrowseCarousel
@@ -56,6 +55,7 @@ import com.qhana.siku.ui.components.entityImageSharedBounds
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.onContainerColor
 import com.qhana.siku.ui.components.vividAccentColor
+import com.qhana.siku.ui.theme.AppColors
 import com.qhana.siku.ui.viewmodel.HomeArtistPick
 import com.qhana.siku.ui.viewmodel.RelatedArtistUi
 import com.qhana.siku.ui.viewmodel.HomeStats
@@ -304,13 +304,13 @@ private fun GreetingHeader(stats: HomeStats) {
         Text(
             text = stringResource(greetingRes),
             style = MaterialTheme.typography.headlineMediumEmphasized,
-            color = colorScheme.onSurface
+            color = AppColors.onSurface
         )
         if (subtitle != null) {
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.bodyMedium,
-                color = colorScheme.onSurfaceVariant
+                color = AppColors.onSurfaceVariant
             )
         }
     }
@@ -413,9 +413,9 @@ private fun QuickActionChip(
         // atenúa solo cuando está deshabilitado).
         leadingIcon = { MaterialSymbol(icon, size = 18.sp, fill = fill) },
         colors = androidx.compose.material3.AssistChipDefaults.assistChipColors(
-            containerColor = colorScheme.secondaryContainer,
-            labelColor = colorScheme.onSecondaryContainer,
-            leadingIconContentColor = colorScheme.onSecondaryContainer
+            containerColor = AppColors.secondaryContainer,
+            labelColor = AppColors.onSecondaryContainer,
+            leadingIconContentColor = AppColors.onSecondaryContainer
         ),
         border = null
     )
@@ -426,7 +426,7 @@ private fun SectionHeader(title: String) {
     Text(
         text = title,
         style = MaterialTheme.typography.titleMediumEmphasized,
-        color = colorScheme.onSurface,
+        color = AppColors.onSurface,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
         modifier = Modifier.padding(
@@ -754,7 +754,7 @@ private fun HomeCarouselCard(
             // Sin indication: el ripple rectangular gris se hacía muy visible al presionar
             // (no hay long-press que lo amerite).
             .clickable(interactionSource = null, indication = null, onClick = onClick)
-            .background(colorScheme.surfaceContainerHighest)
+            .background(AppColors.surfaceContainerHighest)
     ) {
         when {
             !collage.isNullOrEmpty() -> AdaptiveCollage(collage, Modifier.fillMaxSize())
@@ -780,7 +780,7 @@ private fun HomeCarouselCard(
             }
             else -> {
                 Box(modifier = artModifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    MaterialSymbol(placeholderIcon, size = 44.sp, color = colorScheme.onSurfaceVariant)
+                    MaterialSymbol(placeholderIcon, size = 44.sp, color = AppColors.onSurfaceVariant)
                 }
             }
         }
@@ -827,7 +827,7 @@ private fun HomeCarouselCard(
 
         // Distintivo de tipo (esquina superior DERECHA).
         if (badgeIcon != null) {
-            val badge = vividAccentColor(colorScheme.primary)
+            val badge = vividAccentColor(AppColors.primary)
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
@@ -842,7 +842,7 @@ private fun HomeCarouselCard(
 
         // Indicador de "en reproducción" (esquina superior derecha).
         if (isCurrent) {
-            val accent = vividAccentColor(colorScheme.primary)
+            val accent = vividAccentColor(AppColors.primary)
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
@@ -870,19 +870,19 @@ private fun HomeEmptyState(modifier: Modifier, contentPadding: PaddingValues) {
             MaterialSymbol(
                 "music_note",
                 size = 64.sp,
-                color = colorScheme.outline
+                color = AppColors.outline
             )
             Spacer(Modifier.height(16.dp))
             Text(
                 text = stringResource(R.string.home_empty_title),
                 style = MaterialTheme.typography.titleMedium,
-                color = colorScheme.onSurface
+                color = AppColors.onSurface
             )
             Spacer(Modifier.height(6.dp))
             Text(
                 text = stringResource(R.string.home_empty_subtitle),
                 style = MaterialTheme.typography.bodyMedium,
-                color = colorScheme.onSurfaceVariant
+                color = AppColors.onSurfaceVariant
             )
         }
     }

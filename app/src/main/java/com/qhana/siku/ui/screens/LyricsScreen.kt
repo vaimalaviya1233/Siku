@@ -46,6 +46,8 @@ import com.qhana.siku.ui.components.LyricsSearchSheet
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.maxContrastOn
 import com.qhana.siku.ui.state.LyricsFailure
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
 import com.qhana.siku.ui.viewmodel.LyricLine
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -87,10 +89,12 @@ private val LyricLineHeight = 34.sp
  *     (48→64) y eso hacía latir el alto de la fila entera al pausar.
  *  2. **El play mantiene la proporción 1,5:1** en pausa (96×64, como 120×80 allá): es lo que lo hace
  *     leerse como píldora y no como un óvalo.
- *  3. **Los laterales SÍ son del spec**: icon button `Small` (`SmallIconButtonTokens`, leído del
- *     jar): contenedor 40, icono 24, ancho `Uniform` 40 (24 + 8 + 8) y `Narrow` 32 (24 + 4 + 4). El
- *     dibujo baja de 48 a 40 pero el objetivo TÁCTIL no: `FilledIconButton` aplica
- *     `minimumInteractiveComponentSize` (48dp) por su cuenta.
+ *  3. **Los laterales van a la talla VISUAL del play** (20 ago 2026, la misma decisión que en el
+ *     NowPlaying, ver `CookieVisualRatio` allá): la cookie de 9 lados tiene `innerRadius = 0.8`,
+ *     así que un círculo que PESE lo mismo mide 0,9 de sus bounds — 64 × 0,9 = 57,6 → **56** en la
+ *     rejilla de 4, con el mismo glifo (28). En pausa se estrechan con la proporción de allá
+ *     (narrow/uniform = 0,8): 56 × 0,8 = 44,8 → **44**. Antes eran un icon button `Small` (40 de
+ *     alto, 40/32 de ancho, icono 24) y se leían como piezas de otro rango.
  *
  * Del play, como en el NowPlaying, solo el ICONO sale de token; sus medidas son propias.
  */
@@ -100,15 +104,15 @@ private val LyricsPlayPlayingWidth = 64.dp
 
 private val LyricsPlayPausedWidth = 96.dp
 
-private val LyricsSideHeight = 40.dp
+private val LyricsSideHeight = 56.dp
 
-private val LyricsSideUniformWidth = 40.dp
+private val LyricsSideUniformWidth = LyricsSideHeight
 
-private val LyricsSideNarrowWidth = 32.dp
+private val LyricsSideNarrowWidth = 44.dp
 
 private val LyricsPlayIconSize = 28.sp
 
-private val LyricsSideIconSize = 24.sp
+private val LyricsSideIconSize = LyricsPlayIconSize
 
 private val ControlsFadeHeight = 132.dp
 
@@ -179,10 +183,20 @@ fun LyricsScreen(
     // Auto-detect mode capability
     val hasSyncedData = remember(lyricLines) { lyricLines.any { it.startTime > 0 } }
 
+    // "Sin letra y sin fallo" NO es "no se encontró": es que NADIE HA BUSCADO TODAVÍA. Al cambiar de
+    // canción el ViewModel siembra el estado por-canción desde cero (`lyrics` y `lyricsFailure` a
+    // null) y la búsqueda la dispara un `LaunchedEffect` del NowPlaying UN FRAME DESPUÉS, así que
+    // leer esa ausencia como estado vacío pintaba "No se encontró la letra" y acto seguido el
+    // loading — visible en cada salto con los controles de esta pantalla. Toda salida de
+    // `fetchLyrics` deja letra o un `lyricsFailure`, de modo que la ausencia de ambos es PENDIENTE
+    // y se dibuja como la carga que ya viene. Solo aquí: con la hoja cerrada ese mismo estado es
+    // normal (el prefetch es silencioso) y el toolbar no debe girar por él.
+    val isResolving = isLyricsLoading || (lyrics == null && lyricLines.isEmpty() && lyricsFailure == null)
+
     // Sin letra que mostrar: manda el estado vacío, que YA ofrece las acciones pertinentes a la
     // causa. Los iconos del header (lupa + refresco) se ocultan ahí: serían redundantes, y en el
     // caso sin red directamente engañosos.
-    val showEmptyState = !isLyricsLoading && lyrics == null && lyricLines.isEmpty()
+    val showEmptyState = !isResolving && lyrics == null && lyricLines.isEmpty()
 
     // Acento "seguro": el del álbum si contrasta con el fondo, si no contentColor.
     // Se usa para los iconos del header, el pill del toggle y la línea activa.
@@ -233,7 +247,7 @@ fun LyricsScreen(
                 )
 
                 // Mode Toggle - pill deslizante custom sólido (sin bordes)
-                if (hasSyncedData && !lyrics.isNullOrBlank() && !isLyricsLoading) {
+                if (hasSyncedData && !lyrics.isNullOrBlank() && !isResolving) {
                     LyricsModeToggle(
                         viewMode = viewMode,
                         pillColor = safeAccent,
@@ -260,11 +274,11 @@ fun LyricsScreen(
                             onClick = onSearchManually,
                             icon = "manage_search",
                             description = stringResource(R.string.lyrics_search_manual_desc),
-                            contentColor = safeAccent.copy(alpha = if (isLyricsLoading) 0.3f else 1f),
-                            enabled = !isLyricsLoading
+                            contentColor = safeAccent.copy(alpha = if (isResolving) 0.3f else 1f),
+                            enabled = !isResolving
                         )
                         // Una canción marcada como instrumental no tiene nada que guardar.
-                        val canSave = !isLyricsLoading && !isSavingLyrics && lyrics != INSTRUMENTAL_SENTINEL
+                        val canSave = !isResolving && !isSavingLyrics && lyrics != INSTRUMENTAL_SENTINEL
                         ExpressiveActionIcon(
                             onClick = onSaveLyrics,
                             icon = "save",
@@ -286,7 +300,7 @@ fun LyricsScreen(
                     .fillMaxWidth(),
                 contentAlignment = Alignment.Center
             ) {
-                if (isLyricsLoading) {
+                if (isResolving) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -397,8 +411,8 @@ fun LyricsScreen(
                 val isPlaying = playbackState == PlaybackState.PLAYING || playbackState == PlaybackState.BUFFERING
                 // Transporte alineado con el NowPlaying: play resaltado (primary), laterales
                 // tonales (secondaryContainer). Roles del scheme sembrado con el álbum.
-                val playContainer = MaterialTheme.colorScheme.primary
-                val playContent = MaterialTheme.colorScheme.onPrimary
+                val playContainer = AppColors.primary
+                val playContent = AppColors.onPrimary
                 val spin = rememberPlayButtonSpin(isPlaying)
                 val playMorphProgress by spin.morphProgress
                 val cookieAngle = spin.angle
@@ -407,8 +421,8 @@ fun LyricsScreen(
                     PlaybackState.PLAYING -> stringResource(R.string.common_pause)
                     else -> stringResource(R.string.common_play)
                 }
-                val sideContainer = MaterialTheme.colorScheme.secondaryContainer
-                val sideContent = MaterialTheme.colorScheme.onSecondaryContainer
+                val sideContainer = AppColors.secondaryContainer
+                val sideContent = AppColors.onSecondaryContainer
                 // Mismo token que el transporte del NowPlaying: este bloque es el MISMO control en
                 // otra pantalla, y hasta ahora coincidía por tener los números copiados.
                 val transportSpec = appSpatialSpec<Dp>()
@@ -441,7 +455,7 @@ fun LyricsScreen(
                     MaterialSymbol("skip_previous", size = LyricsSideIconSize, color = sideContent, fill = true)
                 }
 
-                Surface(
+                AppSurface(
                     onClick = {
                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                         onPlayPause()
@@ -558,8 +572,8 @@ private fun LyricsModeToggle(
     // contenido `onSurfaceVariant`. La píldora ACTIVA sí es el acento dinámico del álbum (`pillColor`),
     // con su contenido decidido por contraste unas líneas más arriba.
     val colors = ToggleButtonDefaults.toggleButtonColors(
-        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        containerColor = AppColors.surfaceContainerHighest,
+        contentColor = AppColors.onSurfaceVariant,
         checkedContainerColor = pillColor,
         checkedContentColor = activeContentColor
     )
@@ -833,7 +847,7 @@ private fun InstrumentalView(contentColor: Color) {
         // ese solo agrandaba la caja dejando el icono en 24sp (default).
         // Icono decorativo de estado vacío → rol `outline`, NO un alpha sobre `onSurface`
         // (jerarquía por rol, no por opacidad).
-        MaterialSymbol("music_note", size = 120.sp, color = MaterialTheme.colorScheme.outline)
+        MaterialSymbol("music_note", size = 120.sp, color = AppColors.outline)
         Spacer(modifier = Modifier.height(24.dp))
         Text(
             text = stringResource(R.string.lyrics_badge_instrumental),
@@ -888,7 +902,7 @@ private fun EmptyStateView(
     ) {
         // Jerarquía por ROL, no por alpha: icono decorativo → `outline`; título (mensaje
         // principal) → `contentColor` pleno; subtítulo → `onSurfaceVariant`.
-        MaterialSymbol(icon, size = 120.sp, color = MaterialTheme.colorScheme.outline)
+        MaterialSymbol(icon, size = 120.sp, color = AppColors.outline)
         Spacer(modifier = Modifier.height(32.dp))
         Text(
             text = title,
@@ -901,7 +915,7 @@ private fun EmptyStateView(
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = AppColors.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )
         }

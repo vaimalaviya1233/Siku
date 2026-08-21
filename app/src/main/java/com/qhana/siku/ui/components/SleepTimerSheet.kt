@@ -10,6 +10,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.qhana.siku.R
 import com.qhana.siku.player.MusicController
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
+import com.qhana.siku.ui.theme.appFilledTonalButtonColors
+import com.qhana.siku.ui.theme.appSwitchColors
 import kotlinx.coroutines.delay
 
 /**
@@ -62,9 +66,9 @@ fun SleepTimerSheet(
                     }
                 }
                 val remainingMs = (state.endAtMs - now).coerceAtLeast(0L)
-                Surface(
+                AppSurface(
                     shape = MaterialTheme.shapes.extraLarge,
-                    color = MaterialTheme.colorScheme.primaryContainer,
+                    color = AppColors.primaryContainer,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(
@@ -76,29 +80,29 @@ fun SleepTimerSheet(
                             Text(
                                 text = stringResource(R.string.sleep_timer_awaiting_song_end),
                                 style = MaterialTheme.typography.titleMedium,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                                color = AppColors.onPrimaryContainer
                             )
                         } else {
                             Text(
                                 text = formatTime(remainingMs),
                                 style = MaterialTheme.typography.displaySmallEmphasized,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                                color = AppColors.onPrimaryContainer
                             )
                             Text(
                                 text = stringResource(R.string.sleep_timer_remaining),
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                                color = AppColors.onPrimaryContainer
                             )
                             if (state.finishSong) {
                                 Text(
                                     text = stringResource(R.string.sleep_timer_then_finish_song),
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = ACCENT_SECONDARY_ALPHA)
+                                    color = AppColors.onPrimaryContainer.copy(alpha = ACCENT_SECONDARY_ALPHA)
                                 )
                             }
                         }
                         Spacer(modifier = Modifier.height(8.dp))
-                        FilledTonalButton(onClick = {
+                        FilledTonalButton(colors = appFilledTonalButtonColors(), onClick = {
                             close { onCancel(); onDismiss() }
                         }) {
                             Text(stringResource(R.string.sleep_timer_cancel))
@@ -116,6 +120,7 @@ fun SleepTimerSheet(
             ) {
                 listOf(10, 15, 30, 45, 60, 90).forEach { minutes ->
                     FilledTonalButton(
+                        colors = appFilledTonalButtonColors(),
                         onClick = {
                             close { onStart(minutes, finishSong); onDismiss() }
                         },
@@ -137,7 +142,7 @@ fun SleepTimerSheet(
                     style = MaterialTheme.typography.bodyLarge,
                     modifier = Modifier.weight(1f).padding(end = 16.dp)
                 )
-                Switch(checked = finishSong, onCheckedChange = { finishSong = it })
+                Switch(colors = appSwitchColors(), checked = finishSong, onCheckedChange = { finishSong = it })
             }
         }
     }

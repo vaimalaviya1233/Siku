@@ -20,8 +20,6 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MaterialTheme.colorScheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
@@ -37,6 +35,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
 import com.qhana.siku.data.model.Song
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
+import com.qhana.siku.ui.theme.appButtonColors
+import com.qhana.siku.ui.theme.appCheckboxColors
+import com.qhana.siku.ui.theme.appTextFieldColors
 
 /**
  * Selector de canciones para engordar una lista de reproducción: búsqueda + selección
@@ -76,16 +79,17 @@ fun AddSongsToPlaylistSheet(
 
             // FILLED (`TextField`), la variante por defecto de M3.
             TextField(
+                colors = appTextFieldColors(),
                 value = query,
                 onValueChange = onQueryChange,
                 singleLine = true,
                 placeholder = { Text(stringResource(R.string.playlist_add_songs_search)) },
-                leadingIcon = { MaterialSymbol("search", color = colorScheme.onSurfaceVariant) },
+                leadingIcon = { MaterialSymbol("search", color = AppColors.onSurfaceVariant) },
                 trailingIcon = {
                     if (query.isNotEmpty()) {
                         MaterialSymbol(
                             "close",
-                            color = colorScheme.onSurfaceVariant,
+                            color = AppColors.onSurfaceVariant,
                             modifier = Modifier.clickable { onQueryChange("") }
                         )
                     }
@@ -109,7 +113,7 @@ fun AddSongsToPlaylistSheet(
                         MaterialSymbol(
                             if (hasSongsAvailable) "search_off" else "library_music",
                             size = 48.sp,
-                            color = colorScheme.onSurfaceVariant
+                            color = AppColors.onSurfaceVariant
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
@@ -118,7 +122,7 @@ fun AddSongsToPlaylistSheet(
                                 else R.string.playlist_add_songs_none
                             ),
                             style = MaterialTheme.typography.bodyMedium,
-                            color = colorScheme.onSurfaceVariant
+                            color = AppColors.onSurfaceVariant
                         )
                     }
                 }
@@ -129,8 +133,8 @@ fun AddSongsToPlaylistSheet(
                 ) {
                     itemsIndexed(candidates, key = { _, song -> song.id }) { index, song ->
                         val checked = song.id in selectedIds
-                        Surface(
-                            color = if (checked) colorScheme.secondaryContainer else colorScheme.surfaceContainer,
+                        AppSurface(
+                            color = if (checked) AppColors.secondaryContainer else AppColors.surfaceContainer,
                             shape = rememberListItemShape(index, candidates.size),
                             modifier = Modifier
                                 .animateItem()
@@ -146,6 +150,7 @@ fun AddSongsToPlaylistSheet(
                                 },
                                 trailingContent = {
                                     Checkbox(
+                                        colors = appCheckboxColors(),
                                         checked = checked,
                                         onCheckedChange = {
                                             selectedIds = if (checked) selectedIds - song.id else selectedIds + song.id
@@ -161,6 +166,7 @@ fun AddSongsToPlaylistSheet(
             Spacer(modifier = Modifier.height(8.dp))
 
             Button(
+                colors = appButtonColors(),
                 // A través de [LocalSheetCloser]: `onConfirm` apaga el flag que monta esta hoja, y
                 // llamarlo directo la arrancaría del árbol sin darle tiempo a animar la salida —
                 // se veía desaparecer de golpe. Así primero se oculta y LUEGO se confirma.
@@ -172,7 +178,7 @@ fun AddSongsToPlaylistSheet(
                     .padding(horizontal = 20.dp)
                     .height(56.dp)
             ) {
-                MaterialSymbol("playlist_add", size = 22.sp, color = colorScheme.onPrimary)
+                MaterialSymbol("playlist_add", size = 22.sp, color = AppColors.onPrimary)
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     text = stringResource(R.string.playlist_add_songs_confirm, selectedIds.size),

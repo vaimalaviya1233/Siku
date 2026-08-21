@@ -17,7 +17,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+import com.qhana.siku.ui.theme.AppColors
 import com.qhana.siku.ui.theme.AppMotionScheme
+import com.qhana.siku.ui.theme.appButtonColors
 import kotlinx.coroutines.launch
 
 /**
@@ -76,6 +78,7 @@ fun AppModalSheet(
     }
     MaterialTheme(motionScheme = SheetMotionScheme) {
         ModalBottomSheet(
+            containerColor = AppColors.surfaceContainerLow,
             onDismissRequest = onDismissRequest,
             modifier = modifier,
             sheetState = sheetState

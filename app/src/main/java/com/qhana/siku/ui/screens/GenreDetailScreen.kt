@@ -12,7 +12,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.*
-import androidx.compose.material3.MaterialTheme.colorScheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,6 +48,8 @@ import com.qhana.siku.ui.components.songRowBackground
 import com.qhana.siku.ui.components.TonalChip
 import com.qhana.siku.ui.components.overSharedElementsModifier
 import com.qhana.siku.ui.components.rememberListItemShape
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
 import com.qhana.siku.ui.viewmodel.BrowseViewModel
 
 import com.qhana.siku.ui.theme.appEffectsSpec
@@ -139,7 +140,7 @@ fun GenreDetailScreen(
         // `surfaceContainerHigh` (92). Mismo reparto que la biblioteca; el porqué, en `headerColor`
         // de LibraryScreen. Si se cambia, hay que mover CON él el degradado del header inmersivo,
         // que funde la imagen contra este color y dejaría costura.
-        containerColor = colorScheme.surfaceContainer
+        containerColor = AppColors.surfaceContainer
     ) { paddingValues ->
         if (songs.isEmpty()) {
             Box(
@@ -152,13 +153,13 @@ fun GenreDetailScreen(
                     MaterialSymbol(
                         "genres",
                         size = 64.sp,
-                        color = colorScheme.outline
+                        color = AppColors.outline
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
                         text = stringResource(R.string.genre_empty_detail),
                         style = MaterialTheme.typography.bodyLarge,
-                        color = colorScheme.onSurfaceVariant
+                        color = AppColors.onSurfaceVariant
                     )
                 }
             }
@@ -207,7 +208,7 @@ fun GenreDetailScreen(
                         // La canción actual, esté sonando o en PAUSA: mismo criterio que la cola y
                         // la lista de canciones (el resaltado marca "cargada", no "sonando ahora").
                         val isPlaying = currentSong?.id == song.id
-                        val rowBackground = songRowBackground(colorScheme.surface, isPlaying)
+                        val rowBackground = songRowBackground(AppColors.surface, isPlaying)
                         // Punta ORIGEN del container transform hacia el reproductor: la fila crece
                         // hasta ser el player. Fuera del envoltorio va lo que la coloca en la lista;
                         // dentro, la superficie que morfa (ver [SongRowContainer]).
@@ -218,8 +219,8 @@ fun GenreDetailScreen(
                                 .fillMaxWidth()
                                 .padding(horizontal = 16.dp, vertical = 1.dp)
                         ) {
-                            Surface(
-                                color = colorScheme.surface,
+                            AppSurface(
+                                color = AppColors.surface,
                                 // isActive: el ítem en reproducción usa la forma redondeada (16 dp),
                                 // igual que en la cola y la lista de canciones.
                                 shape = rememberListItemShape(index, songs.size, isActive = isPlaying),
@@ -249,7 +250,7 @@ fun GenreDetailScreen(
                         .align(Alignment.TopCenter)
                         .fillMaxWidth()
                         .then(overSharedElementsModifier(sharedTransitionScope, animatedVisibilityScope, headerImageSharedState))
-                        .background(colorScheme.surfaceContainerHigh.copy(alpha = topBarAlpha))
+                        .background(AppColors.surfaceContainerHigh.copy(alpha = topBarAlpha))
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -262,8 +263,8 @@ fun GenreDetailScreen(
                             onClick = onBackClick,
                             shapes = IconButtonDefaults.shapes(),
                             colors = IconButtonDefaults.filledIconButtonColors(
-                                containerColor = colorScheme.surface,
-                                contentColor = colorScheme.onSurface
+                                containerColor = AppColors.surface,
+                                contentColor = AppColors.onSurface
                             )
                         ) {
                             MaterialSymbol("arrow_back")
@@ -280,7 +281,7 @@ fun GenreDetailScreen(
                 Text(
                     text = genreName,
                     style = MaterialTheme.typography.headlineLargeEmphasized,
-                    color = colorScheme.onSurface,
+                    color = AppColors.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
@@ -373,10 +374,10 @@ private fun GenreImmersiveHeader(
             Box(
                 modifier = Modifier
                     .matchParentSize()
-                    .background(colorScheme.surfaceContainerHighest),
+                    .background(AppColors.surfaceContainerHighest),
                 contentAlignment = Alignment.Center
             ) {
-                MaterialSymbol("genres", size = 96.sp, color = colorScheme.onSurfaceVariant)
+                MaterialSymbol("genres", size = 96.sp, color = AppColors.onSurfaceVariant)
             }
         } else {
             AdaptiveCollage(arts = arts, modifier = Modifier.matchParentSize())
@@ -389,7 +390,7 @@ private fun GenreImmersiveHeader(
                 .background(
                     Brush.verticalGradient(
                         0.4f to Color.Transparent,
-                        1f to colorScheme.surfaceContainer
+                        1f to AppColors.surfaceContainer
                     )
                 )
         )
@@ -402,7 +403,7 @@ private fun GenreImmersiveHeader(
             Text(
                 text = genreName,
                 style = MaterialTheme.typography.headlineLargeEmphasized,
-                color = colorScheme.onSurface,
+                color = AppColors.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 // PLACEHOLDER invisible: aporta el layout y reporta su ancla; el texto visible
@@ -414,19 +415,19 @@ private fun GenreImmersiveHeader(
             Spacer(modifier = Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TonalChip {
-                    MaterialSymbol("music_note", size = 14.sp, color = colorScheme.onSecondaryContainer)
+                    MaterialSymbol("music_note", size = 14.sp, color = AppColors.onSecondaryContainer)
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = pluralStringResource(R.plurals.song_count, songCount, songCount),
-                        color = colorScheme.onSecondaryContainer
+                        color = AppColors.onSecondaryContainer
                     )
                 }
                 TonalChip {
-                    MaterialSymbol("artist", size = 14.sp, color = colorScheme.onSecondaryContainer)
+                    MaterialSymbol("artist", size = 14.sp, color = AppColors.onSecondaryContainer)
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = pluralStringResource(R.plurals.artist_count, artistCount, artistCount),
-                        color = colorScheme.onSecondaryContainer
+                        color = AppColors.onSecondaryContainer
                     )
                 }
             }

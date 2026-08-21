@@ -5,7 +5,6 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.DropdownMenuGroup
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FilledIconButton
@@ -13,7 +12,6 @@ import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MaterialTheme.colorScheme
 import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.SplitButtonDefaults
 import androidx.compose.material3.SplitButtonLayout
@@ -32,9 +30,15 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.qhana.siku.ui.theme.appSelectableMenuItemColors
+import com.qhana.siku.ui.theme.AppMenuGroup
 import com.qhana.siku.R
 import com.qhana.siku.data.model.Song
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.appButtonColors
 import com.qhana.siku.ui.theme.appFastSpatialSpec
+import com.qhana.siku.ui.theme.appFilledTonalIconButtonColors
+import com.qhana.siku.ui.theme.appMenuItemColors
 
 /**
  * Alto de TODOS los botones de [DetailPlayButtons] —las dos mitades del split button incluidas— y
@@ -129,7 +133,7 @@ private data class PlayMenuEntry(
  * El orden va de más a menos usado, y la última es además la única de EDICIÓN: las tres primeras
  * arrancan o extienden la reproducción, la cuarta cambia el contenido de la lista. Ninguna se
  * estira al ancho del padre. Componentes REALES de material3 (SplitButtonLayout /
- * FilledTonalIconButton / DropdownMenuGroup) con sus `shapes()` Expressive: shape-morph al
+ * FilledTonalIconButton / AppMenuGroup) con sus `shapes()` Expressive: shape-morph al
  * presionar —y en el trailing también al quedar SOSTENIDO mientras su menú está abierto—, en vez
  * de Surface+Box artesanal.
  *
@@ -249,6 +253,7 @@ fun DetailPlayButtons(
             SplitButtonLayout(
                 leadingButton = {
                     SplitButtonDefaults.LeadingButton(
+                        colors = appButtonColors(),
                         onClick = {
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             onPlayAll()
@@ -286,6 +291,7 @@ fun DetailPlayButtons(
                     // mientras dura el menú. Con la sobrecarga de `onClick` eso no ocurre y el
                     // botón se leería como una segunda acción suelta.
                     SplitButtonDefaults.TrailingButton(
+                        colors = appButtonColors(),
                         checked = playMenuOpen,
                         onCheckedChange = { playMenuOpen = it },
                         shapes = SplitButtonDefaults.trailingButtonShapesFor(DetailActionSize),
@@ -321,7 +327,7 @@ fun DetailPlayButtons(
                 expanded = playMenuOpen,
                 onDismissRequest = { playMenuOpen = false }
             ) {
-                DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
+                AppMenuGroup(shapes = MenuDefaults.groupShapes()) {
                     // La forma de cada entrada sale de su POSICIÓN en la lista
                     // ([menuItemShapeAt]) y no de `leading`/`trailing` escritos a mano: el menú
                     // dejó de tener un número fijo de items en cuanto [onPlayInOrder] pudo añadir
@@ -329,6 +335,7 @@ fun DetailPlayButtons(
                     // `trailing` cada vez que cambie el juego de entradas.
                     playMenuEntries.forEachIndexed { index, entry ->
                         DropdownMenuItem(
+                            colors = appMenuItemColors(),
                             onClick = {
                                 playMenuOpen = false
                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -356,6 +363,7 @@ fun DetailPlayButtons(
         // distingue sus acciones, y aquí separa "encolar" de la píldora partida que reproduce.
         if (onAddToQueue != null) {
             FilledTonalIconButton(
+                colors = appFilledTonalIconButtonColors(),
                 onClick = {
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     onAddToQueue()
@@ -368,7 +376,7 @@ fun DetailPlayButtons(
                     .size(DetailActionSize)
                     .semantics { contentDescription = addToQueueDesc }
             ) {
-                MaterialSymbol("low_priority", size = actionIconSize, color = colorScheme.onSecondaryContainer)
+                MaterialSymbol("low_priority", size = actionIconSize, color = AppColors.onSecondaryContainer)
             }
         }
         // Añadir canciones (solo playlists editables). PÍLDORA VERTICAL, la tercera forma de la
@@ -384,6 +392,7 @@ fun DetailPlayButtons(
         // accesibilidad en vez de un valor clavado.
         if (onAddSongs != null) {
             FilledTonalIconButton(
+                colors = appFilledTonalIconButtonColors(),
                 onClick = {
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     onAddSongs()
@@ -394,7 +403,7 @@ fun DetailPlayButtons(
                     .height(DetailActionSize)
                     .semantics { contentDescription = addSongsDesc }
             ) {
-                MaterialSymbol("playlist_add", size = actionIconSize, color = colorScheme.onSecondaryContainer)
+                MaterialSymbol("playlist_add", size = actionIconSize, color = AppColors.onSecondaryContainer)
             }
         }
     }
@@ -441,7 +450,7 @@ fun SongOverflowButton(
         }
         // Menú SEGMENTADO (popup + grupo), no el `DropdownMenu` clásico: ver la nota en SortChip.
         AppMenuPopup(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-            DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
+            AppMenuGroup(shapes = MenuDefaults.groupShapes()) {
                 // El favorito es opcional, así que las formas salen de la POSICIÓN
                 // ([menuItemShapeAt]) y no de `leading`/`middle`/`trailing` escritos a mano: sin
                 // esa entrada, "añadir a lista" pasa a ser la primera y con las constantes
@@ -453,6 +462,7 @@ fun SongOverflowButton(
                 // corazón, que un lector de pantalla no anuncia.
                 onToggleFavorite?.let { toggleFavorite ->
                     DropdownMenuItem(
+                        colors = appSelectableMenuItemColors(),
                         checked = isFavorite,
                         onCheckedChange = {
                             showMenu = false
@@ -464,6 +474,7 @@ fun SongOverflowButton(
                     )
                 }
                 DropdownMenuItem(
+                    colors = appMenuItemColors(),
                     onClick = {
                         showMenu = false
                         onAddToPlaylist()
@@ -473,6 +484,7 @@ fun SongOverflowButton(
                     leadingIcon = { MenuItemIcon("playlist_add") }
                 )
                 DropdownMenuItem(
+                    colors = appMenuItemColors(),
                     onClick = {
                         showMenu = false
                         onAddToQueue()
@@ -530,8 +542,9 @@ fun QueueOverflowButton(
         AppMenuPopup(expanded = showMenu, onDismissRequest = { showMenu = false }) {
             // Un solo item: el clip redondeado del grupo ya le da forma de píldora, así que no
             // hace falta repartir leading/middle/trailing como en los menús de varias entradas.
-            DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
+            AppMenuGroup(shapes = MenuDefaults.groupShapes()) {
                 DropdownMenuItem(
+                    colors = appMenuItemColors(),
                     onClick = {
                         showMenu = false
                         onAddToQueue()

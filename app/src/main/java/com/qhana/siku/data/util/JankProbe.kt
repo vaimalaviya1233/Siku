@@ -68,13 +68,21 @@ object JankProbe {
     private var winLabel = ""
     private var winReported = true
 
-    /** Arranca el bucle de frames (llamar una vez, desde `MainActivity.onCreate`). */
+    /**
+     * Arranca el bucle de frames (llamar una vez, desde `MainActivity.onCreate`).
+     *
+     * **Todo lo que imprime va por `Log.w`, también las notas y el RITMO** (20 ago 2026): en el Poco F5
+     * (MIUI/HyperOS) logcat NO entrega `Log.d` ni `Log.i` de una app no depurable — la release, que es
+     * donde se mide—, así que con `Log.i`/`Log.d` la sonda solo dejaba ver los `FRAME LARGO` y ni el
+     * `ARM` ni las `note` de estado llegaban, justo cuando el síntoma era "la animación no ocurre".
+     * El nivel no dice nada del contenido: solo vive con el `setprop`.
+     */
     fun start() {
         if (started) return
         started = true
         enabled = Log.isLoggable(TAG, Log.DEBUG)
         if (!enabled) return
-        Log.i(TAG, "sonda ACTIVA (log.tag.$TAG=DEBUG); frames > ${LONG_FRAME_MS.toInt()} ms en los ${WINDOW_MS} ms tras cada gesto")
+        Log.w(TAG, "sonda ACTIVA (log.tag.$TAG=DEBUG); frames > ${LONG_FRAME_MS.toInt()} ms en los ${WINDOW_MS} ms tras cada gesto")
         Choreographer.getInstance().postFrameCallback(object : Choreographer.FrameCallback {
             override fun doFrame(frameTimeNanos: Long) {
                 val armed = SystemClock.uptimeMillis() - armedAtMs < WINDOW_MS
@@ -131,7 +139,7 @@ object JankProbe {
     @PublishedApi
     internal fun noteNow(what: String) {
         if (SystemClock.uptimeMillis() - armedAtMs >= WINDOW_MS) return
-        Log.d(TAG, "   · +${sinceArm()} $what")
+        Log.w(TAG, "   · +${sinceArm()} $what")
         markNow(what)
     }
 
@@ -145,12 +153,12 @@ object JankProbe {
         winReported = false
         armedAtMs = SystemClock.uptimeMillis()
         marks.clear()
-        Log.i(TAG, "── ARM: $reason")
+        Log.w(TAG, "── ARM: $reason")
     }
 
     private fun reportRhythm(partial: Boolean) {
         winReported = true
-        Log.i(
+        Log.w(
             TAG,
             "── RITMO%s '%s': %d frames | ≤9 ms: %d · 9-17: %d · 17-25: %d · >25: %d | máx %.0f ms".format(
                 if (partial) " (parcial)" else "", winLabel, winFrames,

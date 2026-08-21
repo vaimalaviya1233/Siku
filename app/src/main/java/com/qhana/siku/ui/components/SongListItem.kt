@@ -26,6 +26,7 @@ import com.qhana.siku.ui.LocalRowOrigin
 import com.qhana.siku.ui.appSharedTransitionScope
 import com.qhana.siku.ui.model.SongUiModel
 import com.qhana.siku.ui.model.toUiModel
+import com.qhana.siku.ui.theme.AppColors
 import com.qhana.siku.ui.theme.AppContainerBoundsTransform
 
 // ============== FONDO Y ACCIONES DE LA FILA ==============
@@ -49,7 +50,7 @@ private const val ROW_ACTION_GLYPH_MIN_CONTRAST = 4.5f
  */
 @Composable
 fun songRowBackground(base: Color, isPlaying: Boolean): Color =
-    if (isPlaying) MaterialTheme.colorScheme.primaryContainer else base
+    if (isPlaying) AppColors.primaryContainer else base
 
 /**
  * Contraste mínimo del contenido de la fila ACTIVA sobre su relleno de acento. 4.5:1 = AA de TEXTO,
@@ -74,7 +75,7 @@ private const val ACTIVE_ROW_CONTENT_MIN_CONTRAST = 4.5f
  */
 @Composable
 fun rememberActiveRowContentColor(rowBackground: Color, isPlaying: Boolean): Color {
-    val onPrimaryContainer = MaterialTheme.colorScheme.onPrimaryContainer
+    val onPrimaryContainer = AppColors.onPrimaryContainer
     // Solo la fila que suena lo necesita, y solo cuando cambian esos colores: el barrido de contraste
     // no debe correr por cada fila en cada recomposición del scroll.
     return remember(isPlaying, onPrimaryContainer, rowBackground) {
@@ -126,9 +127,9 @@ fun SongStatusIcon(
     size: Dp = ComponentConfig.StatusIconSize,
     onClick: (() -> Unit)? = null,
     contrast: Boolean = false,
-    contrastColor: Color = MaterialTheme.colorScheme.primary
+    contrastColor: Color = AppColors.primary
 ) {
-    val primaryColor = if (!contrast) MaterialTheme.colorScheme.primary else contrastColor
+    val primaryColor = if (!contrast) AppColors.primary else contrastColor
 
     // Cache del tamaño en Sp para evitar recálculos
     val density = LocalDensity.current
@@ -167,7 +168,7 @@ fun SongStatusIcon(
                 // `outline` y no un gris FIJO: `Color.Gray` no se entera del tema, así que en
                 // oscuro este indicador quedaba casi invisible sobre el fondo. El rol tiene tono
                 // por tema (50 claro / 60 oscuro), que es lo que este glifo pedía.
-                MaterialSymbol("cloud_download", color = MaterialTheme.colorScheme.outline, size = sizeSp)
+                MaterialSymbol("cloud_download", color = AppColors.outline, size = sizeSp)
             }
         }
     }
@@ -409,7 +410,7 @@ fun SongItem(
     // Mismo contraste garantizado que cuando el relleno lo pinta un contenedor externo: el color de
     // la fila activa sale de una sola definición, la pinte quien la pinte.
     val ownActiveContent = rememberActiveRowContentColor(
-        rowBackground = MaterialTheme.colorScheme.primaryContainer,
+        rowBackground = AppColors.primaryContainer,
         isPlaying = paintsOwnActive
     )
     val effectiveActiveContent = when {
@@ -418,9 +419,9 @@ fun SongItem(
     }
     val useActiveContent = isPlaying && effectiveActiveContent.isSpecified
     val listColors = ListItemDefaults.colors(
-        containerColor = if (paintsOwnActive) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-        headlineColor = if (useActiveContent) effectiveActiveContent else MaterialTheme.colorScheme.onSurface,
-        supportingColor = if (useActiveContent) effectiveActiveContent else MaterialTheme.colorScheme.onSurfaceVariant
+        containerColor = if (paintsOwnActive) AppColors.primaryContainer else Color.Transparent,
+        headlineColor = if (useActiveContent) effectiveActiveContent else AppColors.onSurface,
+        supportingColor = if (useActiveContent) effectiveActiveContent else AppColors.onSurfaceVariant
     )
 
     // El indicador de estado del archivo (descargada / se transmitirá) es un concepto de NUBE:
@@ -440,7 +441,7 @@ fun SongItem(
                     Text(
                         text = song.durationText,
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = AppColors.onSurfaceVariant,
                         modifier = Modifier.semantics { contentDescription = durationDesc }
                     )
                 }

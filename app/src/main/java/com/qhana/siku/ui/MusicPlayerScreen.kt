@@ -1,5 +1,6 @@
 package com.qhana.siku.ui
 
+import com.qhana.siku.ui.theme.LocalAppColors
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.core.updateTransition
@@ -18,7 +19,6 @@ import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -45,6 +45,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import com.qhana.siku.ui.theme.AppSnackbar
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
 import com.qhana.siku.R
 import com.qhana.siku.data.model.PlaybackState
 import com.qhana.siku.data.util.SnackbarLength
@@ -250,12 +253,9 @@ fun MusicPlayerScreen(
     }
 
     // El estado "player abierto" lo POSEE el booleano izado a MainActivity y lo gobierna
-    // `MusicAppState` — no hay copia ni espejo. El TEMA lo lee por encima del NavHost
-    // (`MusicPlayerTheme(animateColors = ...)`, que congela la animación del esquema con el player
-    // abierto), así que tiene que enterarse EN EL MISMO frame en que la capa se expande: mientras se
-    // sincronizaba con un `LaunchedEffect` llegaba uno tarde, y en ese frame el seed de la canción
-    // nueva ya había cambiado con el fundido del esquema encendido — o sea una recomposición del
-    // árbol ENTERO sin skipping justo cuando arranca el container transform.
+    // `MusicAppState` — no hay copia ni espejo, para que quien lo lea se entere EN EL MISMO frame en
+    // que la capa se expande. (El lector que lo exigía era el TEMA, hasta el 20 ago 2026; ver el
+    // KDoc de `MusicAppState.playerExpandedState`, donde vive el motivo completo.)
     // Sonda (solo debug): cada recomposición de la raíz de la app.
     SideEffect { com.qhana.siku.data.util.JankProbe.mark { "MusicPlayerScreen recompuesta" } }
     val appState = rememberMusicAppState(
@@ -307,15 +307,13 @@ fun MusicPlayerScreen(
     // (ver el KDoc de rememberPlayerMorphOrigin). Va DESPUÉS de updateTransition a propósito: en el
     // frame que arranca una apertura o un cierre necesita ver ya el targetState nuevo.
     val morphOrigin = rememberPlayerMorphOrigin(playerLayerTransition, appState, currentSong?.id)
-    // La paleta de lo que queda DEBAJO del reproductor (NavHost y píldora), retenida mientras la capa
-    // transiciona. Ver el KDoc de [rememberUnderlayColorScheme]: es lo que evita que el cambio de seed
-    // de la canción nueva recomponga la biblioteca ENTERA en el mismo frame en que arranca el morph.
-    val underlayScheme = rememberUnderlayColorScheme(
+    // Los colores de lo que queda DEBAJO del reproductor, retenidos mientras la capa se abre. Ver el
+    // KDoc de [rememberUnderlayAppColors]: es lo que evita que el cambio de seed de la canción
+    // repinte la biblioteca en el mismo frame en que arranca el morph.
+    val underlayColors = rememberUnderlayAppColors(
         layerTransition = playerLayerTransition,
-        globalScheme = MaterialTheme.colorScheme,
         preparingOrigin = appState.pendingRowOrigin != null
     )
-
     // Reabrir el player al VOLVER de un detalle al que se navegó estando el player abierto (ver
     // `MusicAppState.navigateFromPlayer`). Se evalúa en cada cambio de destino: si la entrada actual
     // es la que se anotó al salir, el player se expande de nuevo. (`currentEntry` se lee arriba, junto
@@ -531,37 +529,38 @@ fun MusicPlayerScreen(
             ) {
             // Box: permite montar el PlayerOverlay como capa flotante SOBRE el NavHost.
             Box(modifier = Modifier.fillMaxSize()) {
-                // El NavHost va bajo la paleta RETENIDA (ver `underlayScheme`): mientras el
-                // reproductor crece o se contrae, la biblioteca conserva la paleta anterior y se
-                // repinta con la nueva cuando la capa asienta — con el player tapándola y sin nada
-                // en movimiento. `MaterialTheme` con la MISMA instancia de esquema no invalida su
-                // subárbol (`Values.equals`), así que esto no cuesta nada mientras no cambia.
-                MaterialTheme(colorScheme = underlayScheme) {
-                    AppNavHost(
-                        appState = appState,
-                        startDestination = startDestination,
-                        loggedIn = loggedIn,
-                        accountPhotoPath = accountPhotoPath,
-                        accountInitial = accountInitial,
-                        authLoading = authLoading,
-                        authError = authError,
-                        onConnectOneDrive = { activity -> authViewModel.signIn(activity) },
-                        onDisconnectOneDrive = { authViewModel.logout() },
-                        onRequestSync = { syncViewModel.refreshSongs(force = false) },
-                        playbackViewModel = playbackViewModel,
-                        libraryViewModel = libraryViewModel,
-                        sourcesViewModel = sourcesViewModel,
-                        syncViewModel = syncViewModel,
-                        snackbarManager = snackbarManager,
-                        sharedTransitionScope = this@SharedTransitionLayout
-                    )
+                // (Aquí vivió, del 16 al 20 ago, la paleta RETENIDA: el NavHost iba bajo un
+                // `MaterialTheme` anidado que conservaba los colores viejos mientras el reproductor
+                // crecía, para que el repintado de la biblioteca cayera con el player tapándola.
+                // Existía porque un cambio de esquema recomponía el árbol ENTERO; desde que el color
+                // viaja por [AppColors] eso ya no ocurre, así que no hay nada que esconder ni que
+                // retrasar y la biblioteca se tiñe en el acto. Ver el KDoc de `AppColorScheme`.)
+                CompositionLocalProvider(LocalAppColors provides underlayColors) {
+                AppNavHost(
+                    appState = appState,
+                    startDestination = startDestination,
+                    loggedIn = loggedIn,
+                    accountPhotoPath = accountPhotoPath,
+                    accountInitial = accountInitial,
+                    authLoading = authLoading,
+                    authError = authError,
+                    onConnectOneDrive = { activity -> authViewModel.signIn(activity) },
+                    onDisconnectOneDrive = { authViewModel.logout() },
+                    onRequestSync = { syncViewModel.refreshSongs(force = false) },
+                    playbackViewModel = playbackViewModel,
+                    libraryViewModel = libraryViewModel,
+                    sourcesViewModel = sourcesViewModel,
+                    syncViewModel = syncViewModel,
+                    snackbarManager = snackbarManager,
+                    sharedTransitionScope = this@SharedTransitionLayout
+                )
                 }
 
                 PlayerOverlay(
                     appState = appState,
                     layerTransition = playerLayerTransition,
                     morphOrigin = morphOrigin,
-                    underlayScheme = underlayScheme,
+                    underlayColors = underlayColors,
                     playbackViewModel = playbackViewModel,
                     libraryViewModel = libraryViewModel,
                     snackbarManager = snackbarManager,
@@ -572,6 +571,7 @@ fun MusicPlayerScreen(
                 // PlayerOverlay flotante).
                 SnackbarHost(
                     hostState = snackbarHostState,
+                    snackbar = { AppSnackbar(it) },
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .navigationBarsPadding()
@@ -597,9 +597,9 @@ fun MusicPlayerScreen(
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun SessionRestoreSlowScreen() {
-    Surface(
+    AppSurface(
         modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background
+        color = AppColors.background
     ) {
         Column(
             modifier = Modifier
@@ -608,19 +608,19 @@ private fun SessionRestoreSlowScreen() {
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            LoadingIndicator()
+            LoadingIndicator(color = AppColors.primary)
             Spacer(modifier = Modifier.height(24.dp))
             Text(
                 text = stringResource(R.string.session_restore_slow_title),
                 style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onBackground,
+                color = AppColors.onBackground,
                 textAlign = TextAlign.Center
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = stringResource(R.string.session_restore_slow_body),
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = AppColors.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )
         }

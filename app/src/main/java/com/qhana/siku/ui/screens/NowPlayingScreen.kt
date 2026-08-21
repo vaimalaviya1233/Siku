@@ -16,6 +16,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
@@ -38,6 +39,8 @@ import com.qhana.siku.data.model.ToolbarActionState
 import com.qhana.siku.ui.components.*
 import com.qhana.siku.ui.LocalPlayerOnScreen
 import com.qhana.siku.ui.model.toUiModel
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.appTextButtonColors
 import com.qhana.siku.ui.util.shareSong
 import com.qhana.siku.ui.state.NowPlayingUiState
 import com.qhana.siku.ui.theme.AppContainerBoundsTransform
@@ -274,29 +277,29 @@ fun NowPlayingScreen(
         // estado y COLAPSA el player, así que en la práctica no se llega aquí; es solo red de seguridad. Una
         // superficie lisa, NUNCA el layout viejo del reproductor (el antiguo NowPlayingSkeleton, ya
         // eliminado, era la PRIMERA versión de esta pantalla y no reflejaba el diseño actual).
-        Box(modifier = modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface))
+        Box(modifier = modifier.fillMaxSize().background(AppColors.surface))
         return
     }
 
     // Fondo del gradiente = `secondaryContainer` → `surface` (rol del esquema, SEED-ONLY): antes era
     // el color CRUDO del álbum mezclado 50%. Sigue teñido del álbum (tema seedeado) y el tema anima
     // `secondaryContainer` al cambiar de canción (animatedScheme).
-    val albumPrimary = MaterialTheme.colorScheme.secondaryContainer
+    val albumPrimary = AppColors.secondaryContainer
 
     // Play button + TODOS los acentos que derivan de esto = rol PRIMARY del esquema. El color
     // elegido/extraído es SOLO el SEED (el tema está seedeado de él vía MusicPlayerTheme), NO se usa
     // 1:1 — eso causaba las inconsistencias/parches (ensureContrast, onAccentContentColor y el viejo
     // `albumAccent`, ya eliminados). El tema anima primary al cambiar de canción (animatedScheme),
     // así que no hace falta el animateColorAsState local.
-    val playButtonColor = MaterialTheme.colorScheme.primary
+    val playButtonColor = AppColors.primary
     // Glifo del play por CONTRASTE real (`maxContrastOn`), NO `onPrimary`: en la mayoría de temas
     // coinciden, pero en Fidelity `onPrimary` puede ser un par de bajo contraste (gris azulado sobre
     // un primary casi negro) y el triángulo salía apagado. Mismo criterio que el play del MiniPlayer,
     // el chip de origen y el toggle de letras: contenido sobre un acento = maxContrastOn.
     val playButtonContentColor = maxContrastOn(playButtonColor)
 
-    val surfaceColor = MaterialTheme.colorScheme.surface
-    val solidBackgroundColor = MaterialTheme.colorScheme.surfaceContainer
+    val surfaceColor = AppColors.surface
+    val solidBackgroundColor = AppColors.surfaceContainer
 
     // Fondo según el ajuste del usuario: color SÓLIDO tonal M3 Expressive (surfaceContainer,
     // que ya viene teñido por el seed del álbum vía theme) o el degradado vertical clásico
@@ -320,8 +323,8 @@ fun NowPlayingScreen(
     // algún día el degradado arranca en otro color, el chip lo sigue solo.
     val topBackgroundColor = if (solidBackground) solidBackgroundColor else albumPrimary
 
-    val contentColor = MaterialTheme.colorScheme.onSurface
-    val variantColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val contentColor = AppColors.onSurface
+    val variantColor = AppColors.onSurfaceVariant
 
     // `song` viene del player; `uiState.isDownloaded` sale de la fila de la BD y se adelanta a él
     // en cuanto termina una descarga, así que gana sobre el `path` del MediaItem en curso.
@@ -483,16 +486,26 @@ fun NowPlayingScreen(
     //
     // `State` y lectura diferida por el mismo motivo que [contentFactor]; se multiplica con el alfa
     // del gesto de cierre en UN solo `graphicsLayer` para no apilar dos capas offscreen.
+    // **Se declara con `animatedVisibilityScope != null` y NADA MÁS** (21 ago 2026). Antes la
+    // condición llevaba también `containerSharedKey != null` (y `sharedTransitionScope`, que la
+    // ruta anula justo cuando no hay key), y eso es un LAZO: `containerSharedKey` sale de `onScreen`,
+    // que sale del `currentState` de esta misma `Transition`. Una animación cuya existencia depende
+    // del estado de su propia transición puede impedir que ésta adopte nunca su destino, y entonces
+    // la capa queda VARADA —colocada, así que se traga los toques, y con su hija en `PostExit`, así
+    // que se dibuja a alpha 0—. Se vio en device con el factor gemelo de `NowPlayingRoute`: la app
+    // "se colgaba" respondiendo a hojas invisibles y "atrás" la cerraba. Ver la sección Motion de
+    // CLAUDE.md. `animatedVisibilityScope` SÍ puede condicionar: es un parámetro, no estado animado.
+    //
+    // Lo que sí depende de la key es si se APLICA, y eso se decide en el `graphicsLayer` por lectura
+    // diferida ([morphInUse]), que es una decisión de dibujo y no cambia el árbol.
     val surfaceFactor: State<Float>? =
-        if (containerSharedKey != null && sharedTransitionScope != null && animatedVisibilityScope != null) {
-            animatedVisibilityScope.transition.animateFloat(
-                transitionSpec = {
-                    if (targetState == EnterExitState.Visible) snap<Float>()
-                    else appContainerSurfaceExitSpec()
-                },
-                label = "playerSurfaceFactor"
-            ) { if (it == EnterExitState.Visible) 1f else 0f }
-        } else null
+        animatedVisibilityScope?.transition?.animateFloat(
+            transitionSpec = {
+                if (targetState == EnterExitState.Visible) snap<Float>()
+                else appContainerSurfaceExitSpec()
+            },
+            label = "playerSurfaceFactor"
+        ) { if (it == EnterExitState.Visible) 1f else 0f }
 
     // Fade-in del CONTENIDO al ABRIR, gobernado por el PROGRESO del morph (mismo patrón que
     // `shadowFactor` en MiniPlayer): la superficie entra SÓLIDA (ver [surfaceFactor], o crecería
@@ -501,12 +514,13 @@ fun NowPlayingScreen(
     // va opaco desde el primer frame.
     //
     // **Dura el token *default* de effects (200 ms), NO el del morph (500)**: es un fundido de contenido
-    // —el spec lo hace en el primer tramo del container transform— y además tiene un coste que no se ve:
-    // un alpha < 1 sobre el Scaffold a pantalla completa obliga a HWUI a un `saveLayer` offscreen de la
-    // pantalla ENTERA en cada frame ("alpha caused saveLayer 1080x2400", medido con atrace el 17 ago),
-    // así que estiraba el RenderThread durante 500 ms cuando el bounds ya había asentado a ~350. Con
-    // 200 el contenido está opaco antes de que la superficie termine de crecer, y la capa cara dura
-    // menos de la mitad del morph.
+    // —el spec lo hace en el primer tramo del container transform— y con 200 el contenido está opaco
+    // antes de que la superficie termine de crecer. Tuvo además un coste que no se veía: un alpha < 1
+    // sobre el Scaffold a pantalla completa obligaba a HWUI a un `saveLayer` offscreen de la pantalla
+    // ENTERA en cada frame ("alpha caused saveLayer 1080x2400", atrace del 17 ago; 14-17 `drawLayer
+    // 1280×2772` por apertura y ~190 MB de memoria de GPU la primera vez, Perfetto del 20 ago). Acortar
+    // el fundido solo acortaba la capa; la quita `CompositingStrategy.ModulateAlpha` en el
+    // `graphicsLayer` del Scaffold (ver ahí el precio asumido).
     //
     // **Solo la ENTRADA se anima**: al cerrar, el contenido se apaga con SU superficie ([surfaceFactor],
     // 300 ms) mientras ENCOGE con ella; sumarle acá un segundo fade multiplicaría los dos alphas y lo
@@ -524,19 +538,26 @@ fun NowPlayingScreen(
     // Es un `State` y NO un valor con `by` A PROPÓSITO: se lee DIFERIDO dentro del `graphicsLayer` del
     // Scaffold — cambia en cada frame del morph y leerlo en composición recompondría la pantalla entera
     // por frame (el mismo criterio que las lecturas diferidas del progreso de reproducción).
+    // Se declara igual que [surfaceFactor] —solo con `animatedVisibilityScope`— y por el mismo motivo:
+    // ver allí.
     val contentFactor: State<Float>? =
-        if (containerSharedKey != null && sharedTransitionScope != null && animatedVisibilityScope != null) {
-            animatedVisibilityScope.transition.animateFloat(
-                transitionSpec = {
-                    if (targetState == EnterExitState.Visible) {
-                        tween(EXPRESSIVE_DEFAULT_EFFECTS_MS, easing = ExpressiveDefaultEffectsEasing)
-                    } else {
-                        snap<Float>(delayMillis = EXPRESSIVE_SLOW_EFFECTS_MS)
-                    }
-                },
-                label = "playerContentFactor"
-            ) { if (it == EnterExitState.Visible) 1f else 0f }
-        } else null
+        animatedVisibilityScope?.transition?.animateFloat(
+            transitionSpec = {
+                if (targetState == EnterExitState.Visible) {
+                    tween(EXPRESSIVE_DEFAULT_EFFECTS_MS, easing = ExpressiveDefaultEffectsEasing)
+                } else {
+                    snap<Float>(delayMillis = EXPRESSIVE_SLOW_EFFECTS_MS)
+                }
+            },
+            label = "playerContentFactor"
+        ) { if (it == EnterExitState.Visible) 1f else 0f }
+
+    // Si hay CONTAINER TRANSFORM en marcha, o sea si estos dos factores mandan. Lectura diferida (ver
+    // [surfaceFactor]): la key puede aparecer y desaparecer con el estado de la capa, y eso no debe
+    // reconstruir modifiers ni recomponer la pantalla.
+    val morphInUse = rememberUpdatedState(
+        containerSharedKey != null && sharedTransitionScope != null && animatedVisibilityScope != null
+    )
 
     // ¿Hay una hoja a pantalla completa TAPANDO el reproductor ahora mismo? (Las de esta pantalla o
     // la del ecualizador, que llega por parámetro.) Mientras la hay, el reproductor no se ve, y eso
@@ -586,10 +607,12 @@ fun NowPlayingScreen(
             // el contenido dejaría el degradado quieto detrás y se vería el hueco por abajo.
             .graphicsLayer {
                 translationY = dismissState.offsetY
-                // Ver [surfaceFactor]: solo se consulta yendo de salida.
+                // Ver [surfaceFactor]: solo se consulta yendo de salida, y solo si el morph manda
+                // (sin key de contenedor la entrada/salida la pinta `detachedAlpha` en la capa).
                 val closing = animatedVisibilityScope != null &&
                     animatedVisibilityScope.transition.targetState != EnterExitState.Visible
-                val surfaceAlpha = if (closing) surfaceFactor?.value ?: 1f else 1f
+                val surfaceAlpha =
+                    if (morphInUse.value && closing) surfaceFactor?.value ?: 1f else 1f
                 alpha = (1f - (1f - PlayerGestureConfig.DismissMinAlpha) * dismissState.progress) *
                     surfaceAlpha
             }
@@ -617,7 +640,35 @@ fun NowPlayingScreen(
         Scaffold(
             modifier = Modifier
                 .fillMaxSize()
-                .then(contentFactor?.let { f -> Modifier.graphicsLayer { alpha = f.value } } ?: Modifier),
+                .then(
+                    contentFactor?.let { f ->
+                        // `ModulateAlpha` y no la estrategia por defecto: con un alpha < 1 sobre un
+                        // subárbol con varios hijos HWUI renderiza el subárbol a una capa offscreen
+                        // de la PANTALLA ENTERA y la compone después, en cada frame del fundido.
+                        // Medido en Perfetto el 20 ago: 14-17 `drawLayer 1280×2772` por apertura,
+                        // ~190 MB de `allocateImageMemory` la primera vez (la reserva del pool de
+                        // Skia dispara `kswapd0`) y 25-60 ms de espera a la GPU — el peor frame de
+                        // cada apertura, fría o no. Modulando, el alpha se aplica primitiva a
+                        // primitiva, sin capa. El precio es que los hijos que se SOLAPAN se
+                        // transparentan entre sí durante los 200 ms (un glifo sobre su botón deja
+                        // ver el contenedor debajo): asumido, porque esta capa no tiene fondo —el
+                        // degradado es la Capa 1— y el fundido es corto.
+                        //
+                        // El `morphInUse` de dentro es la otra mitad de la regla de [surfaceFactor]:
+                        // el factor existe siempre, pero solo PINTA cuando hay container transform.
+                        // Sin key, quien funde es `detachedAlpha` en la capa y aquí no hay que tocar
+                        // nada — y desde luego no multiplicar los dos alfas.
+                        Modifier.graphicsLayer {
+                            if (!morphInUse.value) {
+                                alpha = 1f
+                                compositingStrategy = CompositingStrategy.Auto
+                                return@graphicsLayer
+                            }
+                            alpha = f.value
+                            compositingStrategy = CompositingStrategy.ModulateAlpha
+                        }
+                    } ?: Modifier
+                ),
             containerColor = Color.Transparent,
             topBar = {
                 if (!isLandscape) {
@@ -745,13 +796,13 @@ fun NowPlayingScreen(
             title = { Text(stringResource(R.string.ambient_title)) },
             text = { Text(stringResource(R.string.ambient_desc)) },
             confirmButton = {
-                TextButton(onClick = {
+                TextButton(colors = appTextButtonColors(), onClick = {
                     showAmbientModeDialog = false
                     navigationActions.onLaunchAmbientMode(-1)
                 }) { Text(stringResource(R.string.common_start)) }
             },
             dismissButton = {
-                TextButton(onClick = { showAmbientModeDialog = false }) { Text(stringResource(R.string.common_cancel)) }
+                TextButton(colors = appTextButtonColors(), onClick = { showAmbientModeDialog = false }) { Text(stringResource(R.string.common_cancel)) }
             }
         )
     }
@@ -789,7 +840,16 @@ fun NowPlayingScreen(
                 onShuffleToggle = playerActions.onShuffleToggle,
                 onRemoveSong = playerActions.onRemoveFromQueue,
                 onSaveAsPlaylist = playerActions.onSaveQueueAsPlaylist,
-                onClearQueue = playerActions.onClearQueue,
+                // Vaciar CIERRA la hoja en el mismo gesto, antes de que la cola quede vacía. Sin esto
+                // la hoja se quedaba puesta enseñando su estado "La cola está vacía" durante todo el
+                // cierre del reproductor: un cartel que informa de lo que el usuario acaba de hacer, y
+                // que además sobrevive a la pantalla que lo contiene. La hoja es hermana del layout del
+                // reproductor (no cuelga de su `graphicsLayer`), así que no se va con él: hay que
+                // retirarla explícitamente.
+                onClearQueue = {
+                    showQueueSheet = false
+                    playerActions.onClearQueue()
+                },
                 accentColor = albumPrimary
             )
         }
@@ -832,7 +892,7 @@ fun NowPlayingScreen(
                                         // sólido"), no el degradado del álbum: el overlay de letras se
                                         // lee como una superficie neutra estable. Contraste = onSurface.
                                         backgroundColor = solidBackgroundColor,
-                                        contentColor = MaterialTheme.colorScheme.onSurface,
+                                        contentColor = AppColors.onSurface,
                                         accentColor = playButtonColor
                                     )
     }

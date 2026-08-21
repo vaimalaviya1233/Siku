@@ -17,8 +17,6 @@ import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MaterialTheme.colorScheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.toShape
@@ -57,6 +55,8 @@ import com.qhana.siku.ui.components.RoundedPolygonMaskTransformation
 import com.qhana.siku.ui.components.TonalChip
 import com.qhana.siku.ui.components.onContainerColor
 import com.qhana.siku.ui.components.rememberRowActionColors
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
 
 /**
  * Máscara heptagonal COMPARTIDA por todas las filas: una sola instancia (el path unitario se
@@ -105,13 +105,13 @@ fun ArtistsScreen(
                 MaterialSymbol(
                     "artist",
                     size = 64.sp,
-                    color = colorScheme.outline
+                    color = AppColors.outline
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
                     text = stringResource(R.string.artist_empty),
                     style = MaterialTheme.typography.bodyLarge,
-                    color = colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
             }
         }
@@ -138,7 +138,7 @@ fun ArtistsScreen(
                 TonalChip {
                     Text(
                         text = pluralStringResource(R.plurals.artist_count, artists.size, artists.size),
-                        color = colorScheme.onSecondaryContainer
+                        color = AppColors.onSecondaryContainer
                     )
                 }
                 SortChip(
@@ -279,10 +279,10 @@ private fun ArtistRow(
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(colorScheme.surfaceContainerHighest, HeptagonShape.toShape()),
+                            .background(AppColors.surfaceContainerHighest, HeptagonShape.toShape()),
                         contentAlignment = Alignment.Center
                     ) {
-                        MaterialSymbol("artist", color = colorScheme.onSurfaceVariant)
+                        MaterialSymbol("artist", color = AppColors.onSurfaceVariant)
                     }
                 }
             }
@@ -297,7 +297,7 @@ private fun ArtistRow(
                 // única lista de la app cuyos labels no se enteraban del color dinámico —
                 // `onSurface`/`onSurfaceVariant` llevan el tinte del seed de la carátula y esos
                 // hexes no, así que la pestaña Artistas se veía gris al lado de Todas y Álbumes.
-                color = colorScheme.onSurface,
+                color = AppColors.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -308,7 +308,7 @@ private fun ArtistRow(
             Text(
                 text = "$albumsText · $songsText",
                 style = MaterialTheme.typography.bodyMedium,
-                color = colorScheme.onSurfaceVariant,
+                color = AppColors.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -326,7 +326,7 @@ private fun ArtistRow(
                     MaterialSymbol(
                         "play_circle",
                         size = 30.sp,
-                        color = colorScheme.primary,
+                        color = AppColors.primary,
                         fill = true
                     )
                 }
@@ -339,7 +339,7 @@ private fun ArtistRow(
                 // encolar es una acción de segundo orden frente a "reproducir".
                 QueueOverflowButton(
                     onAddToQueue = onAddToQueue,
-                    colors = rememberRowActionColors(colorScheme.surface),
+                    colors = rememberRowActionColors(AppColors.surface),
                     contentDescription = stringResource(R.string.common_artist_options),
                     menuLabel = stringResource(R.string.detail_add_all_to_queue)
                 )
@@ -361,7 +361,7 @@ private fun ArtistPhotosMeteredBanner(
     val container = if (dark) Color(0xFF2A2016) else Color(0xFFFFF3E0)
     val accent = if (dark) Color(0xFFFFB74D) else Color(0xFFE65100)
 
-    Surface(
+    AppSurface(
         color = container,
         contentColor = accent,
         shape = RoundedCornerShape(24.dp),
@@ -374,7 +374,7 @@ private fun ArtistPhotosMeteredBanner(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Surface(shape = CircleShape, color = accent, modifier = Modifier.size(40.dp)) {
+            AppSurface(shape = CircleShape, color = accent, modifier = Modifier.size(40.dp)) {
                 Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
                     MaterialSymbol(
                         "signal_cellular_alt",

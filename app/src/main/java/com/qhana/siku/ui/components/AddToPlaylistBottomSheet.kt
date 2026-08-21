@@ -12,6 +12,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.qhana.siku.R
 import com.qhana.siku.data.model.Playlist
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.appListItemColors
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -37,6 +39,7 @@ fun AddToPlaylistBottomSheet(
             )
 
             ListItem(
+                colors = appListItemColors(),
                 headlineContent = { Text(stringResource(R.string.playlist_create_title)) },
                 leadingContent = {
                     MaterialSymbol("add")
@@ -44,7 +47,7 @@ fun AddToPlaylistBottomSheet(
                 modifier = Modifier.clickable { close(onCreateNewPlaylist) }
             )
 
-            HorizontalDivider()
+            HorizontalDivider(color = AppColors.outlineVariant)
 
             LazyColumn {
                 // `key` explícita: sin ella Lazy identifica los items por posición, así que crear
@@ -52,6 +55,7 @@ fun AddToPlaylistBottomSheet(
                 // insertar una nueva — y `animateItem` no tendría a quién seguir.
                 items(playlists, key = { it.id }) { playlist ->
                     ListItem(
+                        colors = appListItemColors(),
                         headlineContent = { Text(playlist.name) },
                         leadingContent = {
                             MaterialSymbol("queue_music")
@@ -72,7 +76,7 @@ fun AddToPlaylistBottomSheet(
                 ) {
                     Text(
                         stringResource(R.string.playlist_none_created),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = AppColors.onSurfaceVariant
                     )
                 }
             }

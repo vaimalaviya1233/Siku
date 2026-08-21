@@ -15,7 +15,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Button
@@ -36,6 +35,12 @@ import com.qhana.siku.data.lyrics.SaveBlocker
 import com.qhana.siku.data.lyrics.SaveEffect
 import com.qhana.siku.data.lyrics.SaveOption
 import com.qhana.siku.data.model.LyricsSaveMode
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
+import com.qhana.siku.ui.theme.appButtonColors
+import com.qhana.siku.ui.theme.appCheckboxColors
+import com.qhana.siku.ui.theme.appRadioButtonColors
+import com.qhana.siku.ui.theme.appTextButtonColors
 
 /**
  * Pregunta dónde guardar la letra.
@@ -69,7 +74,7 @@ fun SaveLyricsDialog(
                 Text(
                     text = stringResource(R.string.lyrics_save_subtitle),
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
                 Spacer(Modifier.height(16.dp))
 
@@ -107,7 +112,7 @@ fun SaveLyricsDialog(
                         .padding(vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Checkbox(checked = dontAskAgain, onCheckedChange = null)
+                    Checkbox(colors = appCheckboxColors(), checked = dontAskAgain, onCheckedChange = null)
                     Spacer(Modifier.width(8.dp))
                     Text(
                         text = stringResource(R.string.lyrics_save_dont_ask),
@@ -118,6 +123,7 @@ fun SaveLyricsDialog(
         },
         confirmButton = {
             Button(
+                colors = appButtonColors(),
                 onClick = { selected?.let { onConfirm(it, dontAskAgain) } },
                 enabled = selected != null
             ) {
@@ -125,10 +131,10 @@ fun SaveLyricsDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
+            TextButton(colors = appTextButtonColors(), onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
         shape = RoundedCornerShape(28.dp),
-        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+        containerColor = AppColors.surfaceContainerHigh
     )
 }
 
@@ -145,10 +151,10 @@ private fun SaveOptionRow(
 ) {
     val available = option is SaveOption.Available
     val container =
-        if (selected) MaterialTheme.colorScheme.secondaryContainer
-        else MaterialTheme.colorScheme.surfaceContainerHighest
+        if (selected) AppColors.secondaryContainer
+        else AppColors.surfaceContainerHighest
 
-    Surface(
+    AppSurface(
         color = container,
         shape = RoundedCornerShape(16.dp),
         modifier = Modifier
@@ -156,7 +162,7 @@ private fun SaveOptionRow(
             .selectable(selected = selected, enabled = available, role = Role.RadioButton, onClick = onSelect)
     ) {
         Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.Top) {
-            RadioButton(selected = selected, onClick = null, enabled = available)
+            RadioButton(colors = appRadioButtonColors(), selected = selected, onClick = null, enabled = available)
             Spacer(Modifier.width(8.dp))
             Column {
                 Text(
@@ -167,20 +173,20 @@ private fun SaveOptionRow(
                 Text(
                     text = description,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
                 when (option) {
                     is SaveOption.Available -> option.effects.forEach { effect ->
                         Text(
                             text = effectText(effect, uploadBytes, isLrc, lyricsFolderName),
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.tertiary
+                            color = AppColors.tertiary
                         )
                     }
                     is SaveOption.Blocked -> Text(
                         text = blockerText(option.reason),
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
+                        color = AppColors.error
                     )
                 }
             }
@@ -191,8 +197,8 @@ private fun SaveOptionRow(
 /** Nombre propio y no `contentColorFor`: ese ya existe en Material 3 con otra semántica. */
 @Composable
 private fun titleColorFor(enabled: Boolean) =
-    if (enabled) MaterialTheme.colorScheme.onSurface
-    else MaterialTheme.colorScheme.onSurface.copy(alpha = DISABLED_CONTENT_ALPHA)
+    if (enabled) AppColors.onSurface
+    else AppColors.onSurface.copy(alpha = DISABLED_CONTENT_ALPHA)
 
 /**
  * El peso solo se nombra cuando se sube el AUDIO: para el `.lrc` decir "se subirán 3 KB" es ruido,

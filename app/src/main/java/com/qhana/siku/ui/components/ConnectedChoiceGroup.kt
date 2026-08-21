@@ -23,6 +23,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.qhana.siku.ui.theme.appTonalToggleButtonColors
+import com.qhana.siku.ui.theme.appFilledTonalIconButtonColors
+import com.qhana.siku.ui.theme.appMenuItemColors
 
 /**
  * Selección exclusiva de una opción entre varias: **connected button group**.
@@ -77,7 +80,7 @@ fun <T> ConnectedChoiceGroup(
         // ceñidas, el overflow sí puede entrar en juego con etiquetas largas o fontScale alto. En
         // cualquier caso el API lo exige.
         overflowIndicator = { menuState ->
-            FilledTonalIconButton(onClick = { menuState.show() }) {
+            FilledTonalIconButton(colors = appFilledTonalIconButtonColors(), onClick = { menuState.show() }) {
                 MaterialSymbol(icon = "more_horiz", size = OverflowIconSize)
             }
         },
@@ -99,7 +102,7 @@ fun <T> ConnectedChoiceGroup(
                         onCheckedChange = { onSelect(option) },
                         enabled = enabled,
                         interactionSource = source,
-                        colors = colors ?: ToggleButtonDefaults.tonalToggleButtonColors(),
+                        colors = colors ?: appTonalToggleButtonColors(),
                         shapes = when (index) {
                             0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
                             options.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
@@ -129,6 +132,7 @@ fun <T> ConnectedChoiceGroup(
                     // `ButtonGroup` con un `DropdownMenu` normal, y los items que él mismo genera
                     // tampoco llevan forma.
                     DropdownMenuItem(
+                        colors = appMenuItemColors(),
                         text = { Text(label) },
                         leadingIcon = icon?.let { { MaterialSymbol(icon = it) } },
                         enabled = enabled,

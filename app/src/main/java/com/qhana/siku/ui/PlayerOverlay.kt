@@ -1,5 +1,7 @@
 package com.qhana.siku.ui
 
+import com.qhana.siku.ui.theme.LocalAppColors
+import com.qhana.siku.ui.theme.AppColorScheme
 import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
@@ -22,8 +24,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ColorScheme
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -53,6 +53,7 @@ import com.qhana.siku.ui.components.miniPlayerExpandDrag
 import com.qhana.siku.ui.navigation.Screen
 import com.qhana.siku.ui.theme.appFadeEnter
 import com.qhana.siku.ui.theme.appFadeExit
+import com.qhana.siku.ui.theme.appTextButtonColors
 import com.qhana.siku.ui.viewmodel.LibraryViewModel
 import com.qhana.siku.ui.viewmodel.PlaybackViewModel
 
@@ -69,7 +70,7 @@ import com.qhana.siku.ui.viewmodel.PlaybackViewModel
  * El `AnimatedContent` se queda con la PÍLDORA y sus TRES estados ([PlayerLayerState]): **Expanded**
  * (retirada, el player la tapa), **Collapsed** (en pantalla) y **Hidden** (nada, en rutas sin
  * reproducción o sin canción). Hidden↔Collapsed es su fundido al cambiar de ruta, y su transición es
- * además de la que cuelgan `rememberPlayerMorphOrigin` y `rememberUnderlayColorScheme`.
+ * además de la que cuelga `rememberPlayerMorphOrigin`.
  *
  * Collapsed↔Expanded sigue siendo el *container transform* (`sharedBounds` `PLAYER_CONTAINER_SHARED_KEY`
  * que declaran el Card de la píldora y la raíz del player), y que cada punta cuelgue ahora de una
@@ -111,12 +112,12 @@ fun BoxScope.PlayerOverlay(
      */
     morphOrigin: PlayerMorphOrigin,
     /**
-     * Paleta de lo que queda DEBAJO del reproductor, retenida mientras [layerTransition] corre (ver
-     * [rememberUnderlayColorScheme]). La PÍLDORA se pinta con ella: al abrir desde una fila con otra
-     * carátula, la barra que se está desvaneciendo no debe cambiar de color a mitad del fundido —
-     * pertenece al mismo mundo que la biblioteca de detrás, no al player que crece.
+     * Colores de lo que queda DEBAJO del reproductor (ver [rememberUnderlayAppColors]). La PÍLDORA
+     * se pinta con ellos: al abrir desde una fila con otra carátula, la barra que se está
+     * desvaneciendo no debe cambiar de color a mitad del fundido — pertenece al mismo mundo que la
+     * biblioteca de detrás, no al player que crece.
      */
-    underlayScheme: ColorScheme,
+    underlayColors: AppColorScheme,
     playbackViewModel: PlaybackViewModel,
     libraryViewModel: LibraryViewModel,
     snackbarManager: SnackbarManager,
@@ -183,12 +184,13 @@ fun BoxScope.PlayerOverlay(
             text = { Text(stringResource(R.string.lyrics_save_consent_message)) },
             confirmButton = {
                 TextButton(
+                    colors = appTextButtonColors(),
                     onClick = { activity?.let { playbackViewModel.grantCloudWriteConsent(it) } },
                     enabled = activity != null
                 ) { Text(stringResource(R.string.lyrics_save_consent_confirm)) }
             },
             dismissButton = {
-                TextButton(onClick = { playbackViewModel.cancelPendingSave() }) {
+                TextButton(colors = appTextButtonColors(), onClick = { playbackViewModel.cancelPendingSave() }) {
                     Text(stringResource(R.string.common_cancel))
                 }
             }
@@ -267,9 +269,7 @@ fun BoxScope.PlayerOverlay(
             // MiniPlayer.kt: al arrancar el cierre pintaba un blur de pantalla entera por frame.)
             PlayerLayerState.Expanded -> Box(Modifier.fillMaxSize())
 
-            // La píldora va bajo la paleta RETENIDA, igual que el NavHost: pertenece al mundo de
-            // debajo del reproductor (ver el KDoc de `underlayScheme`).
-            PlayerLayerState.Collapsed -> MaterialTheme(colorScheme = underlayScheme) { Box(Modifier.fillMaxSize()) {
+            PlayerLayerState.Collapsed -> CompositionLocalProvider(LocalAppColors provides underlayColors) { Box(Modifier.fillMaxSize()) {
                 // La VISIBILIDAD la decide `currentSong` (solo null sin sesión o tras stop()). Los DATOS
                 // salen de `nowPlayingUiState.song` (fila de Room, con carátula/colores/letras/descarga
                 // al día), cayendo a `currentSong` mientras el id no coincide (instante del cambio).
@@ -342,7 +342,7 @@ fun BoxScope.PlayerOverlay(
     // `MusicPlayerScreen`), así que no es por conveniencia: **es lo que mantiene el morph dentro de UNA
     // sola `Transition`**. Un `updateTransition` independiente dejaría la animación de bounds del
     // reproductor fuera del árbol de la capa, y de ese árbol dependen tres cosas ya calibradas:
-    // `rememberPlayerMorphOrigin` (congela el origen mientras `isRunning`), `rememberUnderlayColorScheme`
+    // `rememberPlayerMorphOrigin` (congela el origen mientras `isRunning`), la retención de paleta
     // (retiene la paleta hasta que asienta) y el `KeepUntilTransitionsFinished` de la píldora, que la
     // sostiene como punta de origen exactamente lo que el bounds tarda. Sueltas, la capa asentaría con
     // el fundido de contenido (300 ms) y soltaría la píldora ~30 ms antes de que la superficie

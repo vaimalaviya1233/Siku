@@ -11,8 +11,6 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -30,6 +28,8 @@ import com.qhana.siku.data.util.JankProbe
 import com.qhana.siku.data.util.SnackbarManager
 import com.qhana.siku.service.MusicPlaybackService
 import com.qhana.siku.ui.MusicPlayerScreen
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
 import com.qhana.siku.ui.theme.MusicPlayerTheme
 import com.qhana.siku.ui.theme.paletteStyleFromName
 import com.qhana.siku.ui.viewmodel.AuthViewModel
@@ -158,27 +158,24 @@ class MainActivity : ComponentActivity() {
             // Estilo elegido en Ajustes → Apariencia. Se observa del DataStore: cambiarlo
             // repinta el tema en vivo, sin recrear la Activity ni recompilar para probar otro.
             val paletteStyleName by themePlaybackViewModel.themePaletteStyle.collectAsStateWithLifecycle()
-            // Izado AQUÍ (y no dentro de MusicPlayerScreen, su dueño natural) porque el tema
-            // necesita leerlo: con el reproductor abierto la animación del esquema se CONGELA
-            // (ver `animateColors` en MusicPlayerTheme) y el cambio de canción lo coreografían
-            // los reveals del NowPlaying, no un fundido global.
+            // Izados AQUÍ y no dentro de MusicPlayerScreen, su dueño natural. El motivo original
+            // era que el TEMA los leía, para congelar el fundido del esquema con el reproductor
+            // abierto; eso se fue el 20 ago 2026 junto con su causa (ver `MusicPlayerTheme`). Se
+            // quedan izados porque `MusicPlayerScreen` los recibe por parámetro y el estado del
+            // reproductor tiene que sobrevivir a la recreación de la Activity.
             val playerExpandedState = rememberSaveable { mutableStateOf(false) }
             // La fila que se está PREPARANDO para abrir el player (ver `MusicAppState.openPlayer`):
-            // el frame ANTERIOR a expandir. El tema tiene que congelarse ya en ese frame y no en el
-            // siguiente — el seed de la canción tocada cambia en ese mismo frame, y con la
-            // animación encendida el esquema saldría a medias (roles animados viejos, fijos nuevos)
-            // y recompondría el árbol entero dos veces: ahí y al llegar el definitivo. Transitorio,
-            // no `rememberSaveable`: nunca hay que restaurar una preparación a medias.
+            // el frame ANTERIOR a expandir. Transitorio, no `rememberSaveable`: nunca hay que
+            // restaurar una preparación a medias.
             val pendingRowOriginState = remember { mutableStateOf<String?>(null) }
             MusicPlayerTheme(
                 seedColor = seedColor,
                 monochrome = useMonochrome,
-                paletteStyle = paletteStyleFromName(paletteStyleName),
-                animateColors = !playerExpandedState.value && pendingRowOriginState.value == null
+                paletteStyle = paletteStyleFromName(paletteStyleName)
             ) {
-                Surface(
+                AppSurface(
                     modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
+                    color = AppColors.background
                 ) {
                     MusicPlayerScreen(
                         snackbarManager = snackbarManager,

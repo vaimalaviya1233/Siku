@@ -11,6 +11,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import com.qhana.siku.R
+import com.qhana.siku.ui.theme.AppColors
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.layout.ContentScale
@@ -60,9 +61,9 @@ fun AlbumArt(
      */
     useRingProgress: Boolean = false
 ) {
-    val primaryColor = MaterialTheme.colorScheme.primary
+    val primaryColor = AppColors.primary
     // Velo sobre la carátula durante la descarga (M3 scrim token, no negro fijo).
-    val scrimColor = MaterialTheme.colorScheme.scrim
+    val scrimColor = AppColors.scrim
     // Track NO recorrido del aro: el MISMO acento del tramo recorrido (`primaryColor`), muy
     // rebajado con la constante compartida, para que el aro se lea como una sola pieza —canal y
     // relleno— igual que el resto de barras de progreso de la app. Antes era un `onSurface @ 0.18`
@@ -82,8 +83,8 @@ fun AlbumArt(
     // lleva el tinte del seed, igual que el contenedor de la fila sobre el que se apoya. Se leen
     // sueltos y sin `remember`: leer dos roles del colorScheme no asigna nada, mientras que el
     // objeto que los agrupaba sí lo hacía en cada recomposición desde que dejó de cachearse.
-    val placeholderColor = MaterialTheme.colorScheme.surfaceContainerHighest
-    val iconTint = MaterialTheme.colorScheme.onSurfaceVariant
+    val placeholderColor = AppColors.surfaceContainerHighest
+    val iconTint = AppColors.onSurfaceVariant
 
     val density = LocalDensity.current
     val iconSizeSp = remember(size, density) { with(density) { (size / 2).toSp() } }
@@ -263,20 +264,20 @@ fun AccountAvatar(
             modifier = modifier
                 .size(size)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primary),
+                .background(AppColors.primary),
             contentAlignment = Alignment.Center
         ) {
             if (!initial.isNullOrBlank()) {
                 Text(
                     text = initial,
-                    color = MaterialTheme.colorScheme.onPrimary,
+                    color = AppColors.onPrimary,
                     style = MaterialTheme.typography.labelLarge
                 )
             } else {
                 MaterialSymbol(
                     icon = "person",
                     size = (size.value * 0.6f).sp,
-                    color = MaterialTheme.colorScheme.onPrimary
+                    color = AppColors.onPrimary
                 )
             }
         }

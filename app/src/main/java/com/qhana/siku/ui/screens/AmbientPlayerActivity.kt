@@ -41,6 +41,7 @@ import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.repository.IMusicRepository
 import com.qhana.siku.player.MusicController
 import com.qhana.siku.ui.components.UnifiedProgressBar
+import com.qhana.siku.ui.theme.AppSurface
 import com.qhana.siku.ui.theme.MusicPlayerTheme
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.delay
@@ -177,7 +178,7 @@ fun AmbientPlayerScreen(
 private fun AmbientAlbumArt(song: Song?, modifier: Modifier = Modifier) {
     var isImageLoaded by remember { mutableStateOf(false) }
     LaunchedEffect(song) { isImageLoaded = false }
-    Surface(modifier = modifier, shape = RoundedCornerShape(24.dp), shadowElevation = 16.dp, color = if (isImageLoaded) Color.Transparent else Color(0xFF2A2A2A)) {
+    AppSurface(modifier = modifier, shape = RoundedCornerShape(24.dp), shadowElevation = 16.dp, color = if (isImageLoaded) Color.Transparent else Color(0xFF2A2A2A)) {
         Box(contentAlignment = Alignment.Center) {
             if (!isImageLoaded) MaterialSymbol("music_note", color = Color.White.copy(alpha = 0.2f), modifier = Modifier.fillMaxSize(0.5f))
             if (song?.albumArtUri != null) AsyncImage(model = ImageRequest.Builder(LocalContext.current).data(song.albumArtUri).crossfade(true).build(), contentDescription = stringResource(R.string.common_album_art), contentScale = ContentScale.Crop, onSuccess = { isImageLoaded = true }, onError = { isImageLoaded = false }, modifier = Modifier.fillMaxSize().scale(1.02f))

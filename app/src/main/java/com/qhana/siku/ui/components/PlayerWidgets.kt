@@ -22,6 +22,8 @@ import androidx.compose.ui.unit.dp
 
 import com.materialkolor.contrast.Contrast
 import com.materialkolor.hct.Hct
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
 import com.qhana.siku.ui.theme.appSpatialSpec
 
 /**
@@ -39,10 +41,10 @@ import com.qhana.siku.ui.theme.appSpatialSpec
 @Composable
 fun TonalChip(
     modifier: Modifier = Modifier,
-    containerColor: Color = MaterialTheme.colorScheme.secondaryContainer,
+    containerColor: Color = AppColors.secondaryContainer,
     content: @Composable RowScope.() -> Unit
 ) {
-    Surface(
+    AppSurface(
         modifier = modifier,
         shape = RoundedCornerShape(50),
         color = containerColor
@@ -223,8 +225,8 @@ data class TonalLayerColors(val container: Color, val content: Color)
 @Composable
 fun rememberTonalLayerColors(
     background: Color,
-    role: Color = MaterialTheme.colorScheme.secondaryContainer,
-    onRole: Color = MaterialTheme.colorScheme.onSecondaryContainer,
+    role: Color = AppColors.secondaryContainer,
+    onRole: Color = AppColors.onSecondaryContainer,
     minContrast: Float = TONAL_LAYER_MIN_CONTRAST
 ): TonalLayerColors = remember(background, role, onRole, minContrast) {
     val backgroundTone = Hct.fromInt(background.toArgb()).tone
@@ -360,9 +362,9 @@ fun UnifiedProgressBar(
     currentPosition: Long,
     duration: Long,
     onSeek: ((Long) -> Unit)? = null,
-    trackColor: Color = MaterialTheme.colorScheme.primary,
-    inactiveTrackColor: Color = MaterialTheme.colorScheme.surfaceContainerHighest,
-    textColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    trackColor: Color = AppColors.primary,
+    inactiveTrackColor: Color = AppColors.surfaceContainerHighest,
+    textColor: Color = AppColors.onSurfaceVariant,
     showThumb: Boolean = true,
     trackHeight: Dp = 6.dp,
     modifier: Modifier = Modifier

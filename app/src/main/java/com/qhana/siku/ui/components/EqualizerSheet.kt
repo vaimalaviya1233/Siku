@@ -30,6 +30,7 @@ import androidx.compose.ui.semantics.semantics
 import kotlinx.coroutines.launch
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.qhana.siku.ui.theme.appSelectableMenuItemColors
 import com.qhana.siku.R
 import com.qhana.siku.data.model.EqSettings
 import com.qhana.siku.data.model.EqProfile
@@ -42,10 +43,20 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.roundToInt
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
+import com.qhana.siku.ui.theme.appCheckboxColors
 import com.qhana.siku.ui.theme.appEffectsSpec
 import com.qhana.siku.ui.theme.appFastEffectsSpec
+import com.qhana.siku.ui.theme.appFilledTonalButtonColors
+import com.qhana.siku.ui.theme.appFilledTonalIconButtonColors
+import com.qhana.siku.ui.theme.appMenuItemColors
 import com.qhana.siku.ui.theme.appShrinkFadeOut
 import com.qhana.siku.ui.theme.appExpandFadeIn
+import com.qhana.siku.ui.theme.appSliderColors
+import com.qhana.siku.ui.theme.appSwitchColors
+import com.qhana.siku.ui.theme.appTextButtonColors
+import com.qhana.siku.ui.theme.appTextFieldColors
 
 /**
  * Presets del EQ. Cada curva se define con 5 ANCLAS en las frecuencias del modo de 5 bandas
@@ -316,7 +327,7 @@ fun EqualizerSheet(
     // mide 48dp con el glifo de 24 centrado, así que dentro de un contenedor con padding el símbolo
     // aparece 12dp más adentro que todo lo demás. Esa cuenta la hace `TopAppBar` sola.
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.surface,
+        containerColor = AppColors.surface,
         topBar = {
             TopAppBar(
                 // Título A SECAS. Debajo vivía `eq_desc` (el aviso de que el EQ desactiva el
@@ -330,6 +341,7 @@ fun EqualizerSheet(
                 },
                 actions = {
                     Switch(
+                        colors = appSwitchColors(),
                         checked = enabled,
                         // Al encender pedimos confirmación (posible doble ecualización con un EQ
                         // del sistema), salvo "No volver a mostrar" ya marcado; al apagar no hay
@@ -508,7 +520,7 @@ fun EqualizerSheet(
                 Text(
                     text = stringResource(R.string.eq_boost_section),
                     style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 BoostSlider(
@@ -563,7 +575,7 @@ fun EqualizerSheet(
                 Text(
                     text = stringResource(R.string.eq_protection_section),
                     style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 PreampSlider(
@@ -602,7 +614,7 @@ fun EqualizerSheet(
                 Text(
                     text = stringResource(R.string.clarity_section),
                     style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 ClarityCard(
@@ -637,7 +649,7 @@ fun EqualizerSheet(
                 // Los tres botones reparten el ancho por weight, así que no debería desbordar
                 // nunca; el indicador existe solo porque el API lo exige.
                 overflowIndicator = { menuState ->
-                    FilledTonalIconButton(onClick = { menuState.show() }) {
+                    FilledTonalIconButton(colors = appFilledTonalIconButtonColors(), onClick = { menuState.show() }) {
                         MaterialSymbol(icon = "more_horiz", size = 18.sp)
                     }
                 },
@@ -651,6 +663,7 @@ fun EqualizerSheet(
                     buttonGroupContent = {
                         val saveSource = remember { MutableInteractionSource() }
                         FilledTonalButton(
+                            colors = appFilledTonalButtonColors(),
                             onClick = { showSaveDialog = true },
                             enabled = enabled,
                             interactionSource = saveSource,
@@ -669,6 +682,7 @@ fun EqualizerSheet(
                         // items que él mismo genera tampoco llevan forma. Ver la nota larga en
                         // NowPlayingControls.
                         DropdownMenuItem(
+                            colors = appMenuItemColors(),
                             text = { Text(stringResource(R.string.eq_preset_save_short)) },
                             leadingIcon = { MaterialSymbol(icon = "save") },
                             enabled = enabled,
@@ -683,6 +697,7 @@ fun EqualizerSheet(
                     buttonGroupContent = {
                         val resetSource = remember { MutableInteractionSource() }
                         FilledTonalButton(
+                            colors = appFilledTonalButtonColors(),
                             onClick = onReset,
                             enabled = enabled,
                             interactionSource = resetSource,
@@ -697,6 +712,7 @@ fun EqualizerSheet(
                     },
                     menuContent = { state ->
                         DropdownMenuItem(
+                            colors = appMenuItemColors(),
                             text = { Text(stringResource(R.string.eq_reset)) },
                             leadingIcon = { MaterialSymbol(icon = "restart_alt") },
                             enabled = enabled,
@@ -711,6 +727,7 @@ fun EqualizerSheet(
                     buttonGroupContent = {
                         val systemSource = remember { MutableInteractionSource() }
                         FilledTonalButton(
+                            colors = appFilledTonalButtonColors(),
                             // Con el EQ propio encendido, abrir el del sistema es el mismo
                             // conflicto de doble ecualización que cubre el aviso del toggle: se
                             // ofrece apagar antes.
@@ -727,6 +744,7 @@ fun EqualizerSheet(
                     },
                     menuContent = { state ->
                         DropdownMenuItem(
+                            colors = appMenuItemColors(),
                             text = { Text(stringResource(R.string.eq_system_short)) },
                             leadingIcon = { MaterialSymbol(icon = "equalizer") },
                             onClick = {
@@ -754,6 +772,7 @@ fun EqualizerSheet(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Checkbox(
+                            colors = appCheckboxColors(),
                             checked = dontShowAgain,
                             onCheckedChange = { dontShowAgain = it }
                         )
@@ -765,7 +784,7 @@ fun EqualizerSheet(
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
+                TextButton(colors = appTextButtonColors(), onClick = {
                     if (dontShowAgain) onSuppressConflictWarning()
                     onEnabledChange(true)
                     showSystemEqWarning = false
@@ -774,7 +793,7 @@ fun EqualizerSheet(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showSystemEqWarning = false }) {
+                TextButton(colors = appTextButtonColors(), onClick = { showSystemEqWarning = false }) {
                     Text(stringResource(R.string.common_cancel))
                 }
             }
@@ -791,7 +810,7 @@ fun EqualizerSheet(
             title = { Text(stringResource(R.string.eq_open_system_conflict_title)) },
             text = { Text(stringResource(R.string.eq_open_system_conflict_message)) },
             confirmButton = {
-                TextButton(onClick = {
+                TextButton(colors = appTextButtonColors(), onClick = {
                     onEnabledChange(false)
                     showOpenSystemWarning = false
                     onOpenSystemEq()
@@ -800,7 +819,7 @@ fun EqualizerSheet(
                 }
             },
             dismissButton = {
-                TextButton(onClick = {
+                TextButton(colors = appTextButtonColors(), onClick = {
                     showOpenSystemWarning = false
                     onOpenSystemEq()
                 }) {
@@ -919,6 +938,7 @@ private fun BandCountChip(
     ) { dismiss ->
         BAND_COUNTS.forEachIndexed { index, count ->
             DropdownMenuItem(
+                colors = appSelectableMenuItemColors(),
                 selected = selected == count,
                 onClick = {
                     if (selected != count) onSelect(count)
@@ -943,8 +963,9 @@ private fun routeIcon(route: AudioRoute): String = when (route) {
     AudioRoute.USB -> "usb"
     AudioRoute.WIRED -> "headphones"
     // El altavoz del teléfono: "speaker" en Material Symbols es un altavoz de estantería, que
-    // sugeriría un equipo externo — justo lo contrario de lo que esta ruta significa.
-    AudioRoute.SPEAKER -> "smartphone"
+    // sugeriría un equipo externo — justo lo contrario de lo que esta ruta significa. Y "mobile"
+    // y no "smartphone", que NO está en la fuente empaquetada (se pintaba un hueco).
+    AudioRoute.SPEAKER -> "mobile"
     AudioRoute.OTHER -> "volume_up"
 }
 
@@ -1021,6 +1042,7 @@ private fun ProfileSelector(
         // hay que explicar; decir dónde están es más barato y no le quita el control a nadie.
         if (visible.isEmpty()) {
             DropdownMenuItem(
+                colors = appMenuItemColors(),
                 text = { Text(stringResource(R.string.eq_presets_all_hidden)) },
                 onClick = {},
                 enabled = false,
@@ -1077,6 +1099,7 @@ private fun PresetSelector(
         // que en el menú de perfiles, para que el mismo estado no se señale en sitios opuestos.
         visible.forEachIndexed { index, preset ->
             DropdownMenuItem(
+                colors = appSelectableMenuItemColors(),
                 selected = match == preset,
                 onClick = {
                     onApplyPreset(EqPresets.gainsFor(preset, bandCount))
@@ -1090,6 +1113,7 @@ private fun PresetSelector(
         }
         if (visible.isEmpty()) {
             DropdownMenuItem(
+                colors = appMenuItemColors(),
                 text = { Text(stringResource(R.string.eq_presets_all_hidden)) },
                 onClick = {},
                 enabled = false,
@@ -1120,6 +1144,7 @@ private fun ProfileMenuItem(
     onDelete: () -> Unit
 ) {
     DropdownMenuItem(
+        colors = appSelectableMenuItemColors(),
         selected = selected,
         onClick = onApply,
         text = { Text(profile.name) },
@@ -1131,7 +1156,7 @@ private fun ProfileMenuItem(
                 MaterialSymbol(
                     icon = "delete",
                     size = 20.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
             }
         }
@@ -1201,12 +1226,12 @@ private fun SaveProfileDialog(
             // alternativa, en el sitio donde normalmente está cancelar — y cancelar sigue
             // disponible tocando fuera o con el back, como en cualquier diálogo de la app.
             confirmButton = {
-                TextButton(onClick = { onConfirm(currentProfileName) }) {
+                TextButton(colors = appTextButtonColors(), onClick = { onConfirm(currentProfileName) }) {
                     Text(stringResource(R.string.eq_profile_update_confirm))
                 }
             },
             dismissButton = {
-                TextButton(onClick = { choosingAction = false }) {
+                TextButton(colors = appTextButtonColors(), onClick = { choosingAction = false }) {
                     Text(stringResource(R.string.eq_profile_save_as_new))
                 }
             }
@@ -1222,6 +1247,7 @@ private fun SaveProfileDialog(
                 // FILLED, igual que el selector: los dos campos de esta pantalla siguen la misma
                 // variante.
                 TextField(
+                    colors = appTextFieldColors(),
                     value = name,
                     // Editar el nombre CANCELA la confirmación pendiente: si el usuario cambia el
                     // texto tras ver el aviso, ya no está confirmando sobre el mismo perfil.
@@ -1236,13 +1262,14 @@ private fun SaveProfileDialog(
                         stringResource(R.string.eq_profile_save_hint)
                     },
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (confirmingOverwrite) MaterialTheme.colorScheme.error
-                    else MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (confirmingOverwrite) AppColors.error
+                    else AppColors.onSurfaceVariant
                 )
             }
         },
         confirmButton = {
             TextButton(
+                colors = appTextButtonColors(),
                 onClick = {
                     // Nombre repetido y aún sin confirmar: primer toque solo PIDE confirmación. Con
                     // el nombre libre (o ya confirmada la sobrescritura), guarda directo.
@@ -1261,7 +1288,7 @@ private fun SaveProfileDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(colors = appTextButtonColors(), onClick = onDismiss) {
                 Text(stringResource(R.string.common_cancel))
             }
         }
@@ -1458,8 +1485,8 @@ private fun BoostSlider(
 ) {
     val warnColor = when {
         !atFault || !enabled -> null
-        severe -> MaterialTheme.colorScheme.error
-        else -> MaterialTheme.colorScheme.tertiary
+        severe -> AppColors.error
+        else -> AppColors.tertiary
     }
     EqSliderRow(
         label = stringResource(labelRes),
@@ -1479,7 +1506,7 @@ private fun BoostSlider(
                 enter = fadeIn(appEffectsSpec()),
                 exit = fadeOut(appFastEffectsSpec())
             ) {
-                SaturationBadge(severe = severe, color = warnColor ?: MaterialTheme.colorScheme.tertiary)
+                SaturationBadge(severe = severe, color = warnColor ?: AppColors.tertiary)
             }
         }
     ) { modifier ->
@@ -1494,7 +1521,7 @@ private fun BoostSlider(
                     thumbColor = warnColor,
                     activeTrackColor = warnColor
                 )
-            } else SliderDefaults.colors(),
+            } else appSliderColors(),
             interactionSource = interactionSource,
             modifier = modifier
         )
@@ -1566,6 +1593,7 @@ private fun PreampSlider(
         enabled = enabled
     ) { modifier ->
         Slider(
+            colors = appSliderColors(),
             value = value,
             onValueChange = { v -> onValueChange(snapGain(v)) },
             onValueChangeFinished = onValueChangeFinished,
@@ -1596,9 +1624,9 @@ private fun LimiterCard(
     onThresholdChangeFinished: () -> Unit,
     onThresholdAutoChange: (Boolean) -> Unit
 ) {
-    Surface(
+    AppSurface(
         shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        color = AppColors.surfaceContainerHigh,
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
@@ -1607,17 +1635,18 @@ private fun LimiterCard(
                     Text(
                         text = stringResource(R.string.eq_limiter),
                         style = MaterialTheme.typography.labelLarge,
-                        color = if (enabled) MaterialTheme.colorScheme.onSurface
-                        else MaterialTheme.colorScheme.onSurfaceVariant
+                        color = if (enabled) AppColors.onSurface
+                        else AppColors.onSurfaceVariant
                     )
                     Text(
                         text = stringResource(R.string.eq_limiter_desc),
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = AppColors.onSurfaceVariant
                     )
                 }
                 Spacer(Modifier.width(12.dp))
                 Switch(
+                    colors = appSwitchColors(),
                     checked = limiterEnabled,
                     onCheckedChange = onEnabledChange,
                     enabled = enabled
@@ -1644,6 +1673,7 @@ private fun LimiterCard(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Checkbox(
+                            colors = appCheckboxColors(),
                             checked = limiterThresholdAuto,
                             onCheckedChange = onThresholdAutoChange,
                             enabled = enabled
@@ -1651,7 +1681,7 @@ private fun LimiterCard(
                         Text(
                             text = stringResource(R.string.eq_limiter_threshold_auto),
                             style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = AppColors.onSurfaceVariant
                         )
                     }
                     EqSliderRow(
@@ -1662,6 +1692,7 @@ private fun LimiterCard(
                         enabled = enabled && !limiterThresholdAuto
                     ) { modifier ->
                         Slider(
+                            colors = appSliderColors(),
                             value = limiterThresholdDb,
                             onValueChange = { v -> onThresholdChange(snapGain(v)) },
                             onValueChangeFinished = onThresholdChangeFinished,
@@ -1714,9 +1745,9 @@ private fun ClarityCard(
     onGainChange: (Float) -> Unit,
     onGainChangeFinished: () -> Unit
 ) {
-    Surface(
+    AppSurface(
         shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        color = AppColors.surfaceContainerHigh,
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
@@ -1727,11 +1758,12 @@ private fun ClarityCard(
                     Text(
                         text = stringResource(R.string.clarity_desc),
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = AppColors.onSurfaceVariant
                     )
                 }
                 Spacer(Modifier.width(12.dp))
                 Switch(
+                    colors = appSwitchColors(),
                     checked = clarityEnabled,
                     onCheckedChange = onEnabledChange,
                     enabled = enabled
@@ -1751,6 +1783,7 @@ private fun ClarityCard(
                         enabled = enabled
                     ) { modifier ->
                         Slider(
+                            colors = appSliderColors(),
                             value = gainDb,
                             onValueChange = { v -> onGainChange(snapGain(v)) },
                             onValueChangeFinished = onGainChangeFinished,
@@ -1789,15 +1822,15 @@ private fun GainReductionMeter(
     val shape = RoundedCornerShape(MeterHeight / 2)
     // Inactivo va en `outline` y no en `primary`: el número es igual de real, pero no está
     // pasando. Un medidor hipotético pintado con el color de acento se leería como que sí.
-    val barColor = if (active) MaterialTheme.colorScheme.primary
-    else MaterialTheme.colorScheme.outline
+    val barColor = if (active) AppColors.primary
+    else AppColors.outline
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
         Text(
             text = stringResource(
                 if (active) R.string.eq_limiter_meter else R.string.eq_limiter_meter_would
             ),
             style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = AppColors.onSurfaceVariant,
             // Mínimo y no fijo, igual que en [EqSliderRow]: esta etiqueta es de las largas
             // ("Reduciendo" / "Reduciría") y es la primera que se saldría con la fuente en grande.
             modifier = Modifier.widthIn(min = EqLabelWidth)
@@ -1807,7 +1840,7 @@ private fun GainReductionMeter(
                 .weight(1f)
                 .height(MeterHeight)
                 .clip(shape)
-                .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                .background(AppColors.surfaceContainerHighest)
         ) {
             Box(
                 modifier = Modifier
@@ -1824,8 +1857,8 @@ private fun GainReductionMeter(
                 String.format(Locale.getDefault(), "%.1f dB", -gainReductionDb)
             },
             style = MaterialTheme.typography.labelMedium,
-            color = if (gainReductionDb > 0f && active) MaterialTheme.colorScheme.onSurface
-            else MaterialTheme.colorScheme.onSurfaceVariant,
+            color = if (gainReductionDb > 0f && active) AppColors.onSurface
+            else AppColors.onSurfaceVariant,
             modifier = Modifier.widthIn(min = EqValueWidth),
             textAlign = androidx.compose.ui.text.style.TextAlign.End,
             maxLines = 1
@@ -1871,6 +1904,7 @@ private fun FreqSlider(
         enabled = enabled
     ) { modifier ->
         Slider(
+            colors = appSliderColors(),
             value = freqStopPosition(value, stops),
             // El componente ya entrega la posición imantada a la marca; el redondeo es la red de
             // seguridad que garantiza que lo que sale de aquí sea SIEMPRE una parada de la rejilla.
@@ -2026,8 +2060,8 @@ private fun BandSlider(
         Text(
             text = String.format(Locale.getDefault(), "%+.1f", value),
             style = MaterialTheme.typography.labelSmall,
-            color = if (enabled) MaterialTheme.colorScheme.onSurface
-            else MaterialTheme.colorScheme.onSurfaceVariant,
+            color = if (enabled) AppColors.onSurface
+            else AppColors.onSurfaceVariant,
             maxLines = 1
         )
         Spacer(Modifier.height(4.dp))
@@ -2043,7 +2077,7 @@ private fun BandSlider(
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = AppColors.onSurfaceVariant,
             maxLines = 1
         )
     }
@@ -2102,7 +2136,7 @@ private fun EqSliderRow(
         Text(
             text = label,
             style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = AppColors.onSurfaceVariant,
             // MÍNIMO, no ancho fijo: con la fuente del sistema en grande —o en un idioma con
             // palabras más largas— un ancho cerrado partiría el texto en dos líneas y la fila
             // crecería de alto. Así la columna se ensancha solo lo que le falte, y lo que cede es el
@@ -2146,8 +2180,8 @@ private fun EqSliderRow(
             text = readout,
             style = MaterialTheme.typography.labelMedium,
             color = readoutColor
-                ?: if (enabled) MaterialTheme.colorScheme.onSurface
-                else MaterialTheme.colorScheme.onSurfaceVariant,
+                ?: if (enabled) AppColors.onSurface
+                else AppColors.onSurfaceVariant,
             maxLines = 1,
             // Ceñida al valor más ancho en las filas de ganancia (así el icono a su izquierda no se
             // mueve al pasar de "+0.0" a "+12.0"); con el piso normal en el resto. En ambos casos el
@@ -2197,16 +2231,16 @@ private fun HeadroomIndicator(
     // suprimirlo. Ocultarlo del todo mentiría igual que no mostrarlo antes.
     val severe = routeAtRisk || (risky && !limiterEnabled)
     val container = when {
-        !enabled -> MaterialTheme.colorScheme.surfaceContainerHigh
-        severe -> MaterialTheme.colorScheme.errorContainer
-        caution -> MaterialTheme.colorScheme.tertiaryContainer
-        else -> MaterialTheme.colorScheme.surfaceContainerHigh
+        !enabled -> AppColors.surfaceContainerHigh
+        severe -> AppColors.errorContainer
+        caution -> AppColors.tertiaryContainer
+        else -> AppColors.surfaceContainerHigh
     }
     val content = when {
-        !enabled -> MaterialTheme.colorScheme.onSurfaceVariant
-        severe -> MaterialTheme.colorScheme.onErrorContainer
-        caution -> MaterialTheme.colorScheme.onTertiaryContainer
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
+        !enabled -> AppColors.onSurfaceVariant
+        severe -> AppColors.onErrorContainer
+        caution -> AppColors.onTertiaryContainer
+        else -> AppColors.onSurfaceVariant
     }
     val messageRes = when {
         routeAtRisk -> R.string.eq_headroom_bluetooth
@@ -2215,7 +2249,7 @@ private fun HeadroomIndicator(
         caution -> R.string.eq_headroom_caution
         else -> R.string.eq_headroom_ok
     }
-    Surface(
+    AppSurface(
         shape = MaterialTheme.shapes.large,
         color = container,
         modifier = Modifier.fillMaxWidth()

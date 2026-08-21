@@ -3,12 +3,12 @@ package com.qhana.siku.ui.components
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.ListItemDefaults
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SegmentedListItem
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import com.qhana.siku.ui.theme.AppColors
 
 /**
  * Fila de una LISTA AGRUPADA de M3, canónica y COMPARTIDA por las listas de navegación de la app.
@@ -49,7 +49,7 @@ fun GroupedListRow(
     modifier: Modifier = Modifier,
     supportingContent: (@Composable () -> Unit)? = null,
     trailingContent: (@Composable () -> Unit)? = null,
-    containerColor: Color = MaterialTheme.colorScheme.surface
+    containerColor: Color = AppColors.surface
 ) {
     SegmentedListItem(
         onClick = onClick,

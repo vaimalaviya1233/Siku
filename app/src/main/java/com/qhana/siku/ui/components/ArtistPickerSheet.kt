@@ -31,6 +31,8 @@ import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
 import coil3.compose.AsyncImage
 import com.qhana.siku.data.repository.DeezerArtistCandidate
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.appListItemColors
 
 /**
  * Sheet de selección manual de artista (resultados de Deezer), por si el auto-match
@@ -60,10 +62,10 @@ fun ArtistPickerSheet(
             Text(
                 text = stringResource(R.string.artist_picker_subtitle, artistName),
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = AppColors.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp)
             )
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+            HorizontalDivider(color = AppColors.outlineVariant, modifier = Modifier.padding(vertical = 8.dp))
 
             when {
                 isLoading -> Box(
@@ -72,7 +74,7 @@ fun ArtistPickerSheet(
                         .padding(vertical = 40.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    LoadingIndicator(modifier = Modifier.size(48.dp))
+                    LoadingIndicator(color = AppColors.primary, modifier = Modifier.size(48.dp))
                 }
 
                 errorMessage != null -> Column(
@@ -81,9 +83,9 @@ fun ArtistPickerSheet(
                         .padding(vertical = 32.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    MaterialSymbol("error_outline", size = 40.sp, color = MaterialTheme.colorScheme.error)
+                    MaterialSymbol("error", size = 40.sp, color = AppColors.error)
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text(errorMessage, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(errorMessage, color = AppColors.onSurfaceVariant)
                 }
 
                 candidates.isNullOrEmpty() -> Column(
@@ -92,21 +94,22 @@ fun ArtistPickerSheet(
                         .padding(vertical = 32.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    MaterialSymbol("search_off", size = 40.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    MaterialSymbol("search_off", size = 40.sp, color = AppColors.onSurfaceVariant)
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text(stringResource(R.string.artist_picker_empty), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(stringResource(R.string.artist_picker_empty), color = AppColors.onSurfaceVariant)
                 }
 
                 else -> LazyColumn(modifier = Modifier.heightIn(max = 480.dp)) {
                     items(candidates, key = { it.deezerId }) { candidate ->
                         ListItem(
+                            colors = appListItemColors(),
                             headlineContent = { Text(candidate.name, maxLines = 1) },
                             leadingContent = {
                                 Box(
                                     modifier = Modifier
                                         .size(48.dp)
                                         .clip(CircleShape)
-                                        .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                                        .background(AppColors.surfaceContainerHighest),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     if (candidate.thumbUrl != null) {
@@ -117,7 +120,7 @@ fun ArtistPickerSheet(
                                             modifier = Modifier.size(48.dp)
                                         )
                                     } else {
-                                        MaterialSymbol("person", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        MaterialSymbol("person", color = AppColors.onSurfaceVariant)
                                     }
                                 }
                             },
@@ -134,8 +137,9 @@ fun ArtistPickerSheet(
             // también sin resultados o con error — "Deezer no encuentra a este artista" es
             // justamente cuando uno quiere zanjarlo y quedarse con la carátula del álbum.
             if (!isLoading) {
-                HorizontalDivider()
+                HorizontalDivider(color = AppColors.outlineVariant)
                 ListItem(
+                    colors = appListItemColors(),
                     headlineContent = { Text(stringResource(R.string.artist_picker_none)) },
                     supportingContent = { Text(stringResource(R.string.artist_picker_none_desc)) },
                     leadingContent = {
@@ -143,10 +147,10 @@ fun ArtistPickerSheet(
                             modifier = Modifier
                                 .size(48.dp)
                                 .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                                .background(AppColors.surfaceContainerHighest),
                             contentAlignment = Alignment.Center
                         ) {
-                            MaterialSymbol("person_off", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            MaterialSymbol("person_off", color = AppColors.onSurfaceVariant)
                         }
                     },
                     modifier = Modifier.clickable { close(onNoneSelected) }

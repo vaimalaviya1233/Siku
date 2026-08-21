@@ -18,6 +18,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.qhana.siku.R
 import androidx.compose.ui.unit.sp
@@ -34,6 +35,10 @@ import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.SongItem
 import com.qhana.siku.ui.components.rememberListItemShape
 import com.qhana.siku.ui.model.toUiModel
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
+import com.qhana.siku.ui.theme.appButtonColors
+import com.qhana.siku.ui.theme.appFilledTonalIconButtonColors
 import com.qhana.siku.ui.viewmodel.StorageUsage
 import com.qhana.siku.ui.viewmodel.SyncViewModel
 import java.text.SimpleDateFormat
@@ -75,6 +80,7 @@ fun DownloadManagerScreen(
 
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
     Scaffold(
+        containerColor = AppColors.background,
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             // Sin subtitle: el progreso de la cola vive en la tarjeta de resumen (con su barra y
@@ -157,6 +163,27 @@ fun DownloadManagerScreen(
             // exactamente lo que se quiere.
             PrimaryTabRow(
                 selectedTabIndex = selectedTabIndex,
+                // **Los colores van EXPLÍCITOS, también los del contenedor y el INDICADOR.** Los
+                // `Tab` de abajo ya los pasaban, pero la fila no, y sus defaults salen de
+                // `TabRowDefaults` → `MaterialTheme.colorScheme`, que desde la migración a
+                // [AppColors] (20 ago 2026) NO lleva el color de la carátula: el indicador de la
+                // pestaña activa se quedaba con el acento base mientras el resto de la pantalla iba
+                // teñido. Es el modo de fallo que describe CLAUDE.md — "un componente al que no se
+                // le pasan colores no los recibe: los va a buscar al tema".
+                //
+                // Los valores son los de los tokens (`PrimaryNavigationTabTokens`: contenedor
+                // `Surface`, indicador y etiqueta activa `Primary`), leídos del jar y traducidos a
+                // [AppColors]; del indicador solo se sobrescribe el COLOR, porque su alto (3dp) y su
+                // forma son constantes del token y no dependen del esquema.
+                containerColor = AppColors.surface,
+                contentColor = AppColors.primary,
+                indicator = {
+                    TabRowDefaults.PrimaryIndicator(
+                        modifier = Modifier.tabIndicatorOffset(selectedTabIndex, matchContentSize = true),
+                        width = Dp.Unspecified,
+                        color = AppColors.primary
+                    )
+                },
                 // El divisor del default marca un borde a todo lo ancho bajo la fila; aquí debajo
                 // viene contenido que ya trae sus propias tarjetas y el corte sobraba.
                 divider = {}
@@ -169,8 +196,8 @@ fun DownloadManagerScreen(
                         // `unselectedContentColor = selectedContentColor`, o sea que sin esto las
                         // inactivas se pintan igual que la activa y la fila deja de decir dónde
                         // estás. Mismo cuidado que en la fila de la biblioteca.
-                        selectedContentColor = MaterialTheme.colorScheme.primary,
-                        unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        selectedContentColor = AppColors.primary,
+                        unselectedContentColor = AppColors.onSurfaceVariant,
                         text = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                     )
                 }
@@ -243,11 +270,11 @@ private fun OverallProgressCard(syncStatus: SyncStatus, usage: StorageUsage?) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 8.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
+        colors = CardDefaults.cardColors(containerColor = AppColors.surfaceContainer)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                MaterialSymbol("cloud_download", color = MaterialTheme.colorScheme.primary)
+                MaterialSymbol("cloud_download", color = AppColors.primary)
                 Spacer(modifier = Modifier.width(12.dp))
                 Text(
                     stringResource(R.string.download_global_progress),
@@ -265,8 +292,8 @@ private fun OverallProgressCard(syncStatus: SyncStatus, usage: StorageUsage?) {
                         else 0f
                     },
                     modifier = Modifier.fillMaxWidth(),
-                    color = MaterialTheme.colorScheme.primary,
-                    trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+                    color = AppColors.primary,
+                    trackColor = AppColors.surfaceContainerHighest
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
@@ -276,14 +303,14 @@ private fun OverallProgressCard(syncStatus: SyncStatus, usage: StorageUsage?) {
                         downloading.total
                     ),
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
             }
 
             if (usage != null && hasStorageInfo) {
                 if (downloading != null) {
                     Spacer(modifier = Modifier.height(16.dp))
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    HorizontalDivider(color = AppColors.outlineVariant)
                 }
                 Spacer(modifier = Modifier.height(16.dp))
 
@@ -308,7 +335,7 @@ private fun OverallProgressCard(syncStatus: SyncStatus, usage: StorageUsage?) {
                             stringResource(R.string.download_storage_used_only, used)
                         },
                         style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = AppColors.onSurfaceVariant
                     )
                 }
 
@@ -317,8 +344,8 @@ private fun OverallProgressCard(syncStatus: SyncStatus, usage: StorageUsage?) {
                     LinearWavyProgressIndicator(
                         progress = { usage.fraction },
                         modifier = Modifier.fillMaxWidth(),
-                        color = MaterialTheme.colorScheme.primary,
-                        trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+                        color = AppColors.primary,
+                        trackColor = AppColors.surfaceContainerHighest
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     // Por encima del tope no se dice "quedan -2 GB": se nombra el exceso, que es
@@ -337,7 +364,7 @@ private fun OverallProgressCard(syncStatus: SyncStatus, usage: StorageUsage?) {
                             )
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = AppColors.onSurfaceVariant
                     )
                 }
             }
@@ -375,17 +402,17 @@ fun ActiveDownloadsTab(
                         syncStatus is SyncStatus.Preparing
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            LoadingIndicator(modifier = Modifier.size(48.dp))
+                            LoadingIndicator(color = AppColors.primary, modifier = Modifier.size(48.dp))
                             Spacer(modifier = Modifier.height(16.dp))
-                            Text(stringResource(R.string.download_syncing), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(stringResource(R.string.download_syncing), color = AppColors.onSurfaceVariant)
                         }
                     } else {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             // Sin atenuar, al revés que los glifos de estado VACÍO (que van en `outline`): este
                             // anuncia un éxito —"todo al día"— y apagarlo lo dejaba pareciendo deshabilitado.
-                            MaterialSymbol("check_circle", size = 64.sp, color = MaterialTheme.colorScheme.primary)
+                            MaterialSymbol("check_circle", size = 64.sp, color = AppColors.primary)
                             Spacer(modifier = Modifier.height(16.dp))
-                            Text(stringResource(R.string.download_up_to_date), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(stringResource(R.string.download_up_to_date), style = MaterialTheme.typography.titleMedium, color = AppColors.onSurfaceVariant)
                         }
                     }
                 }
@@ -398,9 +425,9 @@ fun ActiveDownloadsTab(
                 // Forma dinámica basada en posición
                 val shape = rememberListItemShape(index = index, count = activeDownloads.size)
 
-                Surface(
+                AppSurface(
                     shape = shape,
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    color = AppColors.surfaceContainerHigh,
                     // Esta lista se vacía sola conforme terminan las descargas: es donde el
                     // jump-cut más se notaba.
                     modifier = Modifier
@@ -418,7 +445,7 @@ fun ActiveDownloadsTab(
                                                         trailingContent = {                            Text(
                                 "${(download.progress * 100).toInt()}%",
                                 style = MaterialTheme.typography.labelSmallEmphasized,
-                                color = MaterialTheme.colorScheme.primary
+                                color = AppColors.primary
                             )
                         }
                     )
@@ -438,14 +465,15 @@ fun FailedDownloadsTab(
     if (failedDownloads.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                MaterialSymbol("check", size = 64.sp, color = MaterialTheme.colorScheme.outline)
+                MaterialSymbol("check", size = 64.sp, color = AppColors.outline)
                 Spacer(modifier = Modifier.height(16.dp))
-                Text(stringResource(R.string.download_no_errors), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(stringResource(R.string.download_no_errors), color = AppColors.onSurfaceVariant)
             }
         }
     } else {
         Column {
             Button(
+                colors = appButtonColors(),
                 onClick = onRetryAll,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -462,9 +490,9 @@ fun FailedDownloadsTab(
                 itemsIndexed(failedDownloads, key = { _, item -> item.song.id }) { index, failed ->
                     val shape = rememberListItemShape(index = index, count = failedDownloads.size)
 
-                    Surface(
+                    AppSurface(
                         shape = shape,
-                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        color = AppColors.surfaceContainerHigh,
                         modifier = Modifier
                             .animateItem()
                             .padding(horizontal = 16.dp, vertical = 1.dp)
@@ -477,6 +505,7 @@ fun FailedDownloadsTab(
                                 trailingContent = {
                                     val retryDesc = stringResource(R.string.download_retry_one)
                                     FilledTonalIconButton(
+                                        colors = appFilledTonalIconButtonColors(),
                                         onClick = { onRetryOne(failed.song.id) },
                                         shapes = IconButtonDefaults.shapes(),
                                         modifier = Modifier
@@ -511,7 +540,7 @@ private fun FailedDownloadCause(failed: FailedDownload) {
             MaterialSymbol(
                 if (failed.isTransient) "schedule" else "error",
                 size = 14.sp,
-                color = MaterialTheme.colorScheme.error
+                color = AppColors.error
             )
             Spacer(modifier = Modifier.width(6.dp))
             val kindLabel = stringResource(
@@ -521,7 +550,7 @@ private fun FailedDownloadCause(failed: FailedDownload) {
             Text(
                 text = "$kindLabel · $attempts",
                 style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.error
+                color = AppColors.error
             )
         }
         val retryAt = failed.nextRetryAt?.takeIf { it > now }
@@ -536,7 +565,7 @@ private fun FailedDownloadCause(failed: FailedDownload) {
             Text(
                 text = detail,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = AppColors.onSurfaceVariant,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )

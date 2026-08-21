@@ -3,9 +3,7 @@ package com.qhana.siku.ui.components
 import androidx.compose.foundation.layout.Box
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
-import androidx.compose.material3.DropdownMenuGroup
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorPosition
 import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.Text
@@ -20,7 +18,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.sp
+import com.qhana.siku.ui.theme.appSelectableMenuItemColors
+import com.qhana.siku.ui.theme.AppMenuGroup
 import com.qhana.siku.R
+import com.qhana.siku.ui.theme.AppColors
 
 /**
  * Chip de ORDEN con menú desplegable, genérico sobre el tipo de orden. Sustituyó a un icono suelto
@@ -55,15 +56,15 @@ fun <T> SortChip(
             leadingIcon = { MaterialSymbol("sort", size = 18.sp) },
             trailingIcon = { MaterialSymbol("arrow_drop_down", size = 18.sp) },
             colors = AssistChipDefaults.assistChipColors(
-                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                labelColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                leadingIconContentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                trailingIconContentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                containerColor = AppColors.secondaryContainer,
+                labelColor = AppColors.onSecondaryContainer,
+                leadingIconContentColor = AppColors.onSecondaryContainer,
+                trailingIconContentColor = AppColors.onSecondaryContainer
             ),
             border = null
         )
         // Menú SEGMENTADO de M3 Expressive = `AppMenuPopup` (nuestro `DropdownMenuPopup`, ver su
-        // kdoc) + `DropdownMenuGroup`. No basta
+        // kdoc) + `AppMenuGroup`. No basta
         // con dar forma a los items: `DropdownMenu` es el contenedor CLÁSICO (`MenuTokens`) y
         // mete los items en una superficie única, así que items con forma dentro de él no son ni
         // una cosa ni la otra. El grupo es quien aporta el contenedor `SegmentedMenuTokens`.
@@ -89,9 +90,10 @@ fun <T> SortChip(
                     MenuAnchorPosition.Start
                 )
             ) {
-                DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
+                AppMenuGroup(shapes = MenuDefaults.groupShapes()) {
                     options.forEachIndexed { index, (labelRes, value) ->
                         DropdownMenuItem(
+                            colors = appSelectableMenuItemColors(),
                             selected = current == value,
                             onClick = { onChange(value); showMenu = false },
                             text = { Text(stringResource(labelRes)) },

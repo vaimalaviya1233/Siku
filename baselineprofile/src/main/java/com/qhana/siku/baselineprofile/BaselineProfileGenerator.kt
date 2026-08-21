@@ -4,6 +4,7 @@ import androidx.benchmark.macro.junit4.BaselineProfileRule
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.Direction
 import androidx.test.uiautomator.StaleObjectException
+import androidx.test.uiautomator.UiObject2
 import androidx.test.uiautomator.Until
 import org.junit.Rule
 import org.junit.Test
@@ -93,6 +94,17 @@ class BaselineProfileGenerator {
      * profile (todo lo que toca se compila AOT al instalar) pero **NO en el startup profile** — ver
      * [startup] para por qué esa distinción importa.
      */
+    /**
+     * Dónde se rindió la ÚLTIMA iteración de [exercisePlayer].
+     *
+     * Existe porque los cuatro puntos de rendición de ese recorrido devolvían el mismo `false`, así
+     * que cuando ninguna iteración lo lograba el mensaje del `check` solo podía enumerar hipótesis —
+     * y la ejecución no deja ni capturas ni logcat que reconstruyan el paso (comprobado el 20 ago
+     * 2026, tras un fallo que costó una tarde de deducción sobre los TIEMPOS de los testcases). El
+     * dato lo tiene el propio recorrido en el momento de fallar; solo hacía falta guardarlo.
+     */
+    private var lastStop: String = "no llegó a intentarse"
+
     @Test
     fun criticalJourney() {
         var playerCovered = false
@@ -109,7 +121,13 @@ class BaselineProfileGenerator {
 
             // La biblioteca puede tardar en poblarse (escaneo de arranque). Se espera por CONTENIDO y
             // no con un sleep fijo: en un emulador frío el margen real varía mucho.
-            device.wait(Until.hasObject(By.scrollable(true)), CONTENT_TIMEOUT_MS)
+            //
+            // Y el contenido se mide con el CHIP, no con `By.scrollable(true)`: desde que las
+            // pestañas son un `PrimaryScrollableTabRow` eso último acierta al instante aunque no haya
+            // ni una canción, así que la espera no esperaba nada (ver [mainList]). Cada iteración
+            // arranca en frío —`BaselineProfileRule` mata el proceso— así que siempre se entra por la
+            // pestaña Inicio, que es donde vive el chip.
+            device.wait(Until.hasObject(By.text(PLAY_IN_ORDER_CHIP)), CONTENT_TIMEOUT_MS)
 
             scrollLibrary()
             // Basta con que UNA iteración lo consiga: lo que se comprueba es que el camino EXISTE.
@@ -120,6 +138,7 @@ class BaselineProfileGenerator {
             val covered = try {
                 exercisePlayer()
             } catch (_: StaleObjectException) {
+                lastStop = "el nodo se recompuso a mitad del gesto (StaleObjectException)"
                 false
             }
             if (covered) playerCovered = true
@@ -131,10 +150,8 @@ class BaselineProfileGenerator {
         // Se comprueba DESPUÉS de `collect` y no dentro, para no tirar la generación entera por una
         // iteración en la que un `click` no llegó a tiempo.
         check(playerCovered) {
-            "El recorrido del reproductor no corrió en NINGUNA iteración. Casi siempre es que el " +
-                "device no tiene biblioteca (la app se queda en el onboarding) o que su idioma no " +
-                "es ni español ni inglés — ver PLAY_IN_ORDER_CHIP. Un perfil generado así solo " +
-                "cubre el arranque."
+            "El recorrido del reproductor no corrió en NINGUNA iteración. Se rindió en: $lastStop. " +
+                "Un perfil generado así solo cubre el arranque."
         }
     }
 
@@ -167,7 +184,7 @@ class BaselineProfileGenerator {
         percent: Float
     ): Boolean {
         repeat(STALE_RETRIES) {
-            val list = device.findObject(By.scrollable(true)) ?: return false
+            val list = mainList() ?: return false
             try {
                 list.setGestureMargin(device.displayWidth / GESTURE_MARGIN_DIVISOR)
                 list.scroll(direction, percent)
@@ -180,6 +197,27 @@ class BaselineProfileGenerator {
         }
         return false
     }
+
+    /**
+     * La lista VERTICAL de contenido, elegida por **tamaño** entre todos los nodos scrolleables.
+     *
+     * `findObject(By.scrollable(true))` devuelve el PRIMERO del árbol, y desde el 20 ago 2026 ese ya
+     * no es la lista: la navegación de la biblioteca pasó a ser un `PrimaryScrollableTabRow` —un
+     * componente de pestañas de verdad, que scrollea— y vive por encima del contenido, así que se
+     * llevaba todos los gestos. El síntoma no era un error sino un recorrido que no encontraba nada:
+     * `scrollLibrary` bajaba la lista, los cuatro "volver arriba" de [exercisePlayer] movían la fila
+     * de pestañas (que no se mueve), la lista se quedaba abajo y los chips del Inicio ni siquiera
+     * estaban compuestos. De ahí "no se encontró el chip En orden" con la biblioteca llena y la
+     * música sonando. **Es exactamente por qué el perfil se generó bien el 19 y dejó de hacerlo el
+     * 20.** Hoy hay tres scrollables en pantalla (pestañas, chips del Inicio y contenido).
+     *
+     * Por ALTO y no por posición en el árbol: la lista ocupa el resto de la pantalla, mientras que la
+     * fila de pestañas mide ~54dp y la de chips ~40dp. No depende del orden de composición ni de
+     * `testTag`s (que además exigirían `testTagsAsResourceId` en la app solo para esto).
+     */
+    private fun androidx.benchmark.macro.MacrobenchmarkScope.mainList(): UiObject2? =
+        device.findObjects(By.scrollable(true))
+            .maxByOrNull { it.visibleBounds.height() }
 
     /**
      * Poner música y ABRIR Y CERRAR el reproductor, por sus DOS caminos, que compilan cosas distintas:
@@ -225,19 +263,38 @@ class BaselineProfileGenerator {
         // pasarse es gratis y quedarse corto no.
         repeat(SCROLL_TO_TOP_PASSES) { scrollMainList(Direction.UP, 1f) }
 
-        val chip = device.findObject(By.text(PLAY_IN_ORDER_CHIP)) ?: return false
+        // Cada rendición ANOTA su paso en [lastStop]: los cinco devolvían el mismo `false` y el
+        // mensaje del `check` no podía decir cuál fue.
+        val chip = device.findObject(By.text(PLAY_IN_ORDER_CHIP)) ?: run {
+            lastStop = "no se encontró el chip \"En orden\" en el Inicio — casi siempre la app se " +
+                "quedó en el onboarding (device sin biblioteca), o el idioma no es ni español ni " +
+                "inglés (ver PLAY_IN_ORDER_CHIP)"
+            return false
+        }
         chip.click()
-        if (!device.wait(Until.hasObject(PLAYER_CLOSE_BUTTON), PLAYER_TIMEOUT_MS)) return false
+        if (!device.wait(Until.hasObject(PLAYER_CLOSE_BUTTON), PLAYER_TIMEOUT_MS)) {
+            lastStop = "el chip se pulsó pero el reproductor no apareció en ${PLAYER_TIMEOUT_MS} ms"
+            return false
+        }
         device.waitForIdle()
 
         device.pressBack()
-        if (!device.wait(Until.hasObject(MINI_PLAYER), PLAYER_TIMEOUT_MS)) return false
+        if (!device.wait(Until.hasObject(MINI_PLAYER), PLAYER_TIMEOUT_MS)) {
+            lastStop = "el reproductor se abrió pero \"atrás\" no lo cerró a la píldora"
+            return false
+        }
         device.waitForIdle()
 
         // Segunda vuelta: ahora el morph completo desde la barra.
-        val pill = device.findObject(MINI_PLAYER) ?: return false
+        val pill = device.findObject(MINI_PLAYER) ?: run {
+            lastStop = "la píldora desapareció entre la espera y el click"
+            return false
+        }
         pill.click()
-        if (!device.wait(Until.hasObject(PLAYER_CLOSE_BUTTON), PLAYER_TIMEOUT_MS)) return false
+        if (!device.wait(Until.hasObject(PLAYER_CLOSE_BUTTON), PLAYER_TIMEOUT_MS)) {
+            lastStop = "la píldora se pulsó pero el reproductor no volvió a abrirse"
+            return false
+        }
         device.waitForIdle()
 
         device.pressBack()

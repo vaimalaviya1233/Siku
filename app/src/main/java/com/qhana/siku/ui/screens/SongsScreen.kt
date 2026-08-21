@@ -26,6 +26,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.paging.compose.collectAsLazyPagingItems
 import coil3.compose.AsyncImage
 import androidx.compose.ui.res.stringResource
+import com.qhana.siku.ui.theme.appSelectableMenuItemColors
+import com.qhana.siku.ui.theme.AppMenuGroup
 import com.qhana.siku.R
 import com.qhana.siku.data.local.AlbumSummary
 import com.qhana.siku.data.local.ArtistSummary
@@ -36,6 +38,8 @@ import com.qhana.siku.data.model.SortOrder
 import com.qhana.siku.data.model.SourceType
 import com.qhana.siku.data.util.JankProbe
 import com.qhana.siku.ui.components.*
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.appMenuItemColors
 import com.qhana.siku.ui.viewmodel.LibraryViewModel
 import com.qhana.siku.ui.viewmodel.PlaybackViewModel
 import my.nanihadesuka.compose.LazyColumnScrollbar
@@ -85,7 +89,7 @@ fun SongsScreen(
 
     // Derived State (optimized to prevent unnecessary recompositions)
     val currentSongId by remember { derivedStateOf { currentSong?.id } }
-    val primaryColor = MaterialTheme.colorScheme.primary
+    val primaryColor = AppColors.primary
 
     // Scrollbar Configuration
     val listState = rememberLazyListState()
@@ -93,8 +97,8 @@ fun SongsScreen(
     // `outlineVariant` (el rol de los elementos decorativos/limítrofes) en los DOS modos. Antes
     // era `#4A4A4A` en oscuro y `surfaceDim` en claro: además de un gris fijo sin tinte, eran dos
     // roles distintos según el modo, así que el thumb no tenía un peso comparable en cada tema.
-    val scrollbarThumbColor = MaterialTheme.colorScheme.outlineVariant
-    val scrollbarActiveColor = MaterialTheme.colorScheme.primary
+    val scrollbarThumbColor = AppColors.outlineVariant
+    val scrollbarActiveColor = AppColors.primary
     val scrollbarSettings = remember(scrollbarThumbColor, scrollbarActiveColor) {
         ScrollbarSettings(
             thumbUnselectedColor = scrollbarThumbColor,
@@ -356,12 +360,12 @@ private fun SongItemOptimized(
     // `headerColor` en LibraryScreen). Estuvo en `surfaceContainerHigh` (92) y luego en
     // `surfaceContainer` (94), las dos apilando hacia el lado oscuro: así la cabecera nunca
     // conseguía separarse de la banda de filas que le pasa por debajo al scrollear.
-    val rowSurface = MaterialTheme.colorScheme.surface
+    val rowSurface = AppColors.surface
     // Resaltado del ítem en reproducción: `primaryContainer` (contenedor de acento sólido, sin
     // opacidad), el MISMO tratamiento que la cola. Sustituye al blend del acento del álbum al 30%
     // sobre el fondo de la fila, que en un álbum monocromo quedaba casi idéntico al resto de
     // filas (ese acento venía ya proyectado a un tono cercano a la superficie).
-    val backgroundColor = if (isPlaying) MaterialTheme.colorScheme.primaryContainer else rowSurface
+    val backgroundColor = if (isPlaying) AppColors.primaryContainer else rowSurface
 
     // Fondo REAL bajo el contenido de la fila, contra el que se mide la píldora de acciones: es
     // `backgroundColor` a secas porque el resaltado del ítem activo lo pinta el `Row` de abajo, no
@@ -472,14 +476,16 @@ private fun SongItemMenu(
         }
         // Menú SEGMENTADO (popup + grupo), no el `DropdownMenu` clásico: ver la nota en SortChip.
         AppMenuPopup(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-            DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
+            AppMenuGroup(shapes = MenuDefaults.groupShapes()) {
                 DropdownMenuItem(
+                    colors = appMenuItemColors(),
                     onClick = { onAddToPlaylistRequest(songId); showMenu = false },
                     text = { Text(stringResource(R.string.menu_add_to_playlist)) },
                     shape = MenuDefaults.leadingItemShape,
                     leadingIcon = { MenuItemIcon("playlist_add") }
                 )
                 DropdownMenuItem(
+                    colors = appMenuItemColors(),
                     onClick = { onAddToQueue(); showMenu = false },
                     text = { Text(stringResource(R.string.common_add_to_queue)) },
                     shape = MenuDefaults.middleItemShape,
@@ -488,6 +494,7 @@ private fun SongItemMenu(
                 // Sin sentido para música LOCAL (no hay copia en la nube que volver a bajar).
                 if (showRedownload) {
                     DropdownMenuItem(
+                        colors = appMenuItemColors(),
                         onClick = { onRedownload(); showMenu = false },
                         // "Redescargar" solo si YA está en disco; para una canción en streaming
                         // la acción es una primera descarga y la etiqueta debe decirlo. En curso
@@ -507,6 +514,7 @@ private fun SongItemMenu(
                 // de forma y `Role.Checkbox`. Antes el único indicio de estado era el relleno del
                 // corazón, invisible para un lector de pantalla.
                 DropdownMenuItem(
+                    colors = appSelectableMenuItemColors(),
                     checked = isFavorite,
                     onCheckedChange = { onToggleFavorite(songId); showMenu = false },
                     text = { Text(if (isFavorite) stringResource(R.string.menu_remove_favorite) else stringResource(R.string.menu_favorite)) },
@@ -555,7 +563,7 @@ private fun SourceFilterRow(
                 text = androidx.compose.ui.res.pluralStringResource(
                     R.plurals.song_count, songCount, songCount
                 ),
-                color = MaterialTheme.colorScheme.onSecondaryContainer
+                color = AppColors.onSecondaryContainer
             )
         }
         SortChip(
@@ -581,7 +589,7 @@ private fun SearchSectionHeader(title: String) {
     Text(
         text = title,
         style = MaterialTheme.typography.titleSmallEmphasized,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        color = AppColors.onSurfaceVariant,
         modifier = Modifier.padding(start = 20.dp, end = 16.dp, top = 12.dp, bottom = 8.dp)
     )
 }
@@ -604,7 +612,7 @@ private fun SearchArtistCard(
             modifier = Modifier
                 .size(72.dp)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                .background(AppColors.surfaceContainerHighest),
             contentAlignment = Alignment.Center
         ) {
             // Foto del artista → carátula de alguno de sus álbumes → placeholder (misma cascada
@@ -618,7 +626,7 @@ private fun SearchArtistCard(
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
-                MaterialSymbol("artist", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                MaterialSymbol("artist", color = AppColors.onSurfaceVariant)
             }
         }
         Spacer(modifier = Modifier.height(6.dp))
@@ -671,13 +679,13 @@ private fun SearchNoResults() {
                     MaterialSymbol(
                         "search_off",
                         size = 64.sp,
-                        color = MaterialTheme.colorScheme.outline
+                        color = AppColors.outline
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
                         text = stringResource(R.string.search_no_results),
                         style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = AppColors.onSurfaceVariant
                     )
                 }
             }
@@ -710,19 +718,19 @@ private fun LazyItemScope.FilteredEmptyBody() {
             MaterialSymbol(
                 "filter_alt_off",
                 size = 64.sp,
-                color = MaterialTheme.colorScheme.outline
+                color = AppColors.outline
             )
             Spacer(modifier = Modifier.height(16.dp))
             Text(
                 text = stringResource(R.string.filter_empty_title),
                 style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = AppColors.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = stringResource(R.string.filter_empty_subtitle),
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = AppColors.onSurfaceVariant,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
             )
         }
@@ -760,20 +768,20 @@ private fun LazyItemScope.EmptyContentBody(currentFilter: SongFilter) {
             MaterialSymbol(
                 icon,
                 size = 64.sp,
-                color = MaterialTheme.colorScheme.outline
+                color = AppColors.outline
             )
             Spacer(modifier = Modifier.height(16.dp))
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = AppColors.onSurfaceVariant
             )
             if (subtitle.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = AppColors.onSurfaceVariant,
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center
                 )
             }

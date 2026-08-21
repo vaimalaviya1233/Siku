@@ -18,7 +18,6 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MaterialTheme.colorScheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -37,6 +36,7 @@ import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.SortChip
 import com.qhana.siku.ui.components.SourceFilterChips
 import com.qhana.siku.ui.components.TonalChip
+import com.qhana.siku.ui.theme.AppColors
 
 /**
  * Pestaña "Álbumes": cuadrícula de 2 columnas con carátula representativa.
@@ -67,13 +67,13 @@ fun AlbumsScreen(
                 MaterialSymbol(
                     "album",
                     size = 64.sp,
-                    color = colorScheme.outline
+                    color = AppColors.outline
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
                     text = stringResource(R.string.album_empty),
                     style = MaterialTheme.typography.bodyLarge,
-                    color = colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
             }
         }
@@ -109,7 +109,7 @@ fun AlbumsScreen(
                 TonalChip {
                     Text(
                         text = pluralStringResource(R.plurals.album_count, albums.size, albums.size),
-                        color = colorScheme.onSecondaryContainer
+                        color = AppColors.onSecondaryContainer
                     )
                 }
                 SortChip(

@@ -29,7 +29,6 @@ import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -50,6 +49,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
 import com.qhana.siku.data.config.AppConfig
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
+import com.qhana.siku.ui.theme.appButtonColors
+import com.qhana.siku.ui.theme.appOutlinedButtonColors
+import com.qhana.siku.ui.theme.appSliderColors
+import com.qhana.siku.ui.theme.appTextButtonColors
 
 /**
  * Tarjeta de una fuente de música. La comparten el onboarding de primer arranque y la sección
@@ -76,10 +81,10 @@ fun SourceCard(
     /** El rojo señala lo que BORRA (quitar una carpeta). Una acción neutra no debe llevarlo. */
     secondaryActionDestructive: Boolean = true
 ) {
-    Surface(
+    AppSurface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh
+        color = AppColors.surfaceContainerHigh
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             SourceCardHeader(
@@ -97,26 +102,27 @@ fun SourceCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (isLoading) {
-                    LoadingIndicator(modifier = Modifier.size(24.dp))
+                    LoadingIndicator(color = AppColors.primary, modifier = Modifier.size(24.dp))
                     Spacer(modifier = Modifier.width(12.dp))
                     Text(
                         text = stringResource(R.string.common_connecting),
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = AppColors.onSurfaceVariant
                     )
                 } else {
                     if (secondaryActionLabel != null && onSecondaryAction != null) {
-                        TextButton(onClick = onSecondaryAction) {
+                        TextButton(colors = appTextButtonColors(), onClick = onSecondaryAction) {
                             Text(
                                 text = secondaryActionLabel,
-                                color = if (secondaryActionDestructive) MaterialTheme.colorScheme.error
-                                else MaterialTheme.colorScheme.primary
+                                color = if (secondaryActionDestructive) AppColors.error
+                                else AppColors.primary
                             )
                         }
                         Spacer(modifier = Modifier.width(8.dp))
                     }
                     if (isConfigured) {
                         OutlinedButton(
+                            colors = appOutlinedButtonColors(),
                             onClick = onPrimaryAction,
                             enabled = primaryActionEnabled,
                             shapes = ButtonDefaults.shapes()
@@ -124,7 +130,12 @@ fun SourceCard(
                             Text(primaryActionLabel)
                         }
                     } else {
-                        Button(
+                        // Sin configurar la acción va en TEXT BUTTON, no en botón relleno: la
+                        // tarjeta es UNA opción entre varias (nube, carpetas, dispositivo), así
+                        // que ninguna es la recomendada, y en el onboarding el énfasis pleno lo
+                        // tiene el botón que avanza de paso.
+                        TextButton(
+                            colors = appTextButtonColors(),
                             onClick = onPrimaryAction,
                             enabled = primaryActionEnabled,
                             shapes = ButtonDefaults.shapes()
@@ -217,7 +228,7 @@ fun rememberDeviceScanActivator(
             title = { Text(stringResource(R.string.source_device_permission_title)) },
             text = { Text(stringResource(R.string.source_device_permission_body)) },
             confirmButton = {
-                TextButton(onClick = {
+                TextButton(colors = appTextButtonColors(), onClick = {
                     showPermissionDenied = false
                     context.startActivity(
                         Intent(
@@ -228,7 +239,7 @@ fun rememberDeviceScanActivator(
                 }) { Text(stringResource(R.string.source_device_permission_settings)) }
             },
             dismissButton = {
-                TextButton(onClick = { showPermissionDenied = false }) {
+                TextButton(colors = appTextButtonColors(), onClick = { showPermissionDenied = false }) {
                     Text(stringResource(R.string.common_cancel))
                 }
             }
@@ -252,7 +263,7 @@ fun DeviceScanSourceCard(
 ) {
     SourceCard(
         modifier = modifier,
-        icon = "smartphone",
+        icon = "mobile",
         title = stringResource(R.string.source_device_title),
         description = stringResource(R.string.source_device_desc),
         statusText = if (isEnabled) stringResource(R.string.source_device_active) else null,
@@ -319,10 +330,10 @@ fun LocalFoldersSourceCard(
         }
     }
 
-    Surface(
+    AppSurface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh
+        color = AppColors.surfaceContainerHigh
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             SourceCardHeader(
@@ -345,7 +356,7 @@ fun LocalFoldersSourceCard(
                         MaterialSymbol(
                             icon = "folder_open",
                             size = 20.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = AppColors.onSurfaceVariant
                         )
                         Spacer(modifier = Modifier.width(12.dp))
                         Text(
@@ -359,7 +370,7 @@ fun LocalFoldersSourceCard(
                             MaterialSymbol(
                                 icon = "close",
                                 size = 20.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = AppColors.onSurfaceVariant
                             )
                         }
                     }
@@ -379,11 +390,11 @@ fun LocalFoldersSourceCard(
                 horizontalArrangement = Arrangement.End
             ) {
                 if (folderUris.isEmpty()) {
-                    Button(onClick = { folderPicker.launch(null) }, shapes = ButtonDefaults.shapes()) {
+                    Button(colors = appButtonColors(), onClick = { folderPicker.launch(null) }, shapes = ButtonDefaults.shapes()) {
                         Text(stringResource(R.string.settings_local_pick))
                     }
                 } else {
-                    OutlinedButton(onClick = { folderPicker.launch(null) }, shapes = ButtonDefaults.shapes()) {
+                    OutlinedButton(colors = appOutlinedButtonColors(), onClick = { folderPicker.launch(null) }, shapes = ButtonDefaults.shapes()) {
                         Text(stringResource(R.string.settings_local_add))
                     }
                 }
@@ -418,26 +429,26 @@ fun LocalFoldersSourceCard(
                     // Con la última carpeta se ofrece cambiar a escanear todo ahí mismo, en vez de
                     // obligar a buscarlo después (y es la ÚNICA salida cuando no hay otra fuente).
                     if (isLast) {
-                        TextButton(onClick = {
+                        TextButton(colors = appTextButtonColors(), onClick = {
                             pendingRemoval = null
                             onScanWholeDevice()
                         }) { Text(stringResource(R.string.local_folder_remove_scan_all)) }
                     }
                     if (!lockedLast) {
-                        TextButton(onClick = {
+                        TextButton(colors = appTextButtonColors(), onClick = {
                             pendingRemoval = null
                             onRemoveFolder(removing)
                         }) {
                             Text(
                                 stringResource(R.string.settings_local_remove),
-                                color = MaterialTheme.colorScheme.error
+                                color = AppColors.error
                             )
                         }
                     }
                 }
             },
             dismissButton = {
-                TextButton(onClick = { pendingRemoval = null }) {
+                TextButton(colors = appTextButtonColors(), onClick = { pendingRemoval = null }) {
                     Text(stringResource(R.string.common_cancel))
                 }
             }
@@ -491,14 +502,16 @@ fun PhoneMusicSourceCard(
         else -> stringResource(R.string.source_phone_music_desc)
     }
 
-    Surface(
+    AppSurface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh
+        color = AppColors.surfaceContainerHigh
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             SourceCardHeader(
-                icon = "library_music",
+                // "mobile" y no "library_music": lo que la tarjeta ofrece es el DISPOSITIVO como
+                // fuente, y la nota musical la repiten el hero del paso y la tarjeta de la nube.
+                icon = "mobile",
                 title = stringResource(R.string.source_phone_music_title),
                 subtitle = subtitle,
                 isConfigured = isConfigured
@@ -513,9 +526,9 @@ fun PhoneMusicSourceCard(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     MaterialSymbol(
-                        icon = "smartphone",
+                        icon = "mobile",
                         size = 20.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = AppColors.onSurfaceVariant
                     )
                     Spacer(modifier = Modifier.width(12.dp))
                     Text(
@@ -527,7 +540,7 @@ fun PhoneMusicSourceCard(
                         MaterialSymbol(
                             icon = "close",
                             size = 20.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = AppColors.onSurfaceVariant
                         )
                     }
                 }
@@ -542,7 +555,7 @@ fun PhoneMusicSourceCard(
                         MaterialSymbol(
                             icon = "folder_open",
                             size = 20.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = AppColors.onSurfaceVariant
                         )
                         Spacer(modifier = Modifier.width(12.dp))
                         Text(
@@ -557,7 +570,7 @@ fun PhoneMusicSourceCard(
                             MaterialSymbol(
                                 icon = "close",
                                 size = 20.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = AppColors.onSurfaceVariant
                             )
                         }
                     }
@@ -575,10 +588,13 @@ fun PhoneMusicSourceCard(
                     horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    OutlinedButton(onClick = onScanWholeDevice) {
+                    // Las DOS en text button: son las dos mitades de la MISMA decisión ("de dónde
+                    // sale la música del teléfono"), así que ninguna es la recomendada, y en el
+                    // onboarding el énfasis lo tiene el botón de avance del paso.
+                    TextButton(colors = appTextButtonColors(), onClick = onScanWholeDevice) {
                         Text(stringResource(R.string.source_device_enable))
                     }
-                    Button(onClick = { folderPicker.launch(null) }) {
+                    TextButton(colors = appTextButtonColors(), onClick = { folderPicker.launch(null) }) {
                         Text(stringResource(R.string.settings_local_add))
                     }
                 }
@@ -596,10 +612,15 @@ private fun SourceCardHeader(
     isConfigured: Boolean
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Surface(
+        // Sin configurar va TONAL (`secondaryContainer`), no neutro: sobre una tarjeta que ya es
+        // `surfaceContainerHigh`, el `surfaceContainerHighest` de antes quedaba a UN peldaño de su
+        // fondo —invisible con un tema dinámico, cuya escala neutra apenas tiene croma—, así que el
+        // icono no se leía como una pieza. El acento pleno se reserva para el estado configurado,
+        // que además rellena el glifo y añade el check.
+        AppSurface(
             shape = RoundedCornerShape(14.dp),
-            color = if (isConfigured) MaterialTheme.colorScheme.primaryContainer
-            else MaterialTheme.colorScheme.surfaceContainerHighest,
+            color = if (isConfigured) AppColors.primaryContainer
+            else AppColors.secondaryContainer,
             modifier = Modifier.size(48.dp)
         ) {
             Box(contentAlignment = Alignment.Center) {
@@ -607,8 +628,8 @@ private fun SourceCardHeader(
                     icon = icon,
                     size = 26.sp,
                     fill = isConfigured,
-                    color = if (isConfigured) MaterialTheme.colorScheme.onPrimaryContainer
-                    else MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (isConfigured) AppColors.onPrimaryContainer
+                    else AppColors.onSecondaryContainer
                 )
             }
         }
@@ -620,7 +641,7 @@ private fun SourceCardHeader(
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = AppColors.onSurfaceVariant,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
@@ -632,7 +653,7 @@ private fun SourceCardHeader(
                 icon = "check_circle",
                 size = 22.sp,
                 fill = true,
-                color = MaterialTheme.colorScheme.primary
+                color = AppColors.primary
             )
         }
     }
@@ -658,6 +679,9 @@ private fun displayFolderName(treeUri: String): String =
  * @param limitGb valor persistido; siembra el slider y se muestra mientras no se arrastre.
  * @param onLimitChangeFinished se llama al SOLTAR, no en cada frame del arrastre: fijar el tope
  *        dispara el desalojo LRU del excedente, que no debe correr en cada píxel.
+ * @param icon con un glifo, la tarjeta lleva la cabecera con icono de las demás del onboarding
+ *        (donde una pantalla ES una tarjeta y todas tienen que leerse igual). En Ajustes va sin
+ *        él: allí la tarjeta vive en una lista de ajustes y el icono sería un adorno.
  */
 @Composable
 fun StorageLimitCard(
@@ -666,7 +690,8 @@ fun StorageLimitCard(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     description: String = stringResource(R.string.download_storage_limit_desc),
-    shape: Shape = RoundedCornerShape(20.dp)
+    shape: Shape = RoundedCornerShape(20.dp),
+    icon: String? = null
 ) {
     val context = LocalContext.current
     // Volumen donde viven los archivos de la app: total para el techo del slider, libre para
@@ -679,22 +704,59 @@ fun StorageLimitCard(
     var sliderValue by remember(limitGb, maxGb) { mutableFloatStateOf(limitGb.coerceIn(0f, maxGb)) }
     val gb = sliderValue.toInt()
 
-    Surface(
+    AppSurface(
         modifier = modifier.fillMaxWidth(),
         shape = shape,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh
+        color = AppColors.surfaceContainerHigh
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = stringResource(R.string.download_storage_limit_title),
-                style = MaterialTheme.typography.titleSmall
-            )
-            Text(
-                text = description,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp)
-            )
+            if (icon != null) {
+                // Cabecera con icono, como las demás tarjetas del onboarding. NO se reutiliza
+                // [SourceCardHeader]: ahí el subtítulo es una línea de estado y va a `maxLines = 2`
+                // con elipsis, y esta descripción es el párrafo que explica qué pasa al llegar al
+                // tope (que se borran las canciones menos escuchadas), o sea justo lo que no se
+                // puede truncar. Por eso va debajo y entera, como en la tarjeta del permiso.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AppSurface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = AppColors.secondaryContainer,
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            MaterialSymbol(
+                                icon = icon,
+                                size = 26.sp,
+                                color = AppColors.onSecondaryContainer
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.width(16.dp))
+
+                    Text(
+                        text = stringResource(R.string.download_storage_limit_title),
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Text(
+                    text = description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AppColors.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 12.dp)
+                )
+            } else {
+                Text(
+                    text = stringResource(R.string.download_storage_limit_title),
+                    style = MaterialTheme.typography.titleSmall
+                )
+                Text(
+                    text = description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AppColors.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
             Spacer(modifier = Modifier.height(16.dp))
             // Número grande SIEMPRE visible: es el valor persistido, así al volver a entrar se
             // ve el tope actual sin tener que arrastrar (el tooltip del thumb solo sale al
@@ -703,12 +765,13 @@ fun StorageLimitCard(
                 text = if (gb <= 0) stringResource(R.string.download_storage_limit_unlimited)
                 else stringResource(R.string.download_storage_limit_value, gb.toString()),
                 style = MaterialTheme.typography.headlineSmallEmphasized,
-                color = if (enabled) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.primary.copy(alpha = DISABLED_CONTENT_ALPHA)
+                color = if (enabled) AppColors.primary
+                else AppColors.primary.copy(alpha = DISABLED_CONTENT_ALPHA)
             )
             // Slider Expressive (thumb de barra fina). El track ondulado NO existe en el Slider
             // de esta versión de material3 (solo en WavyProgressIndicator).
             Slider(
+                colors = appSliderColors(),
                 value = sliderValue,
                 onValueChange = { sliderValue = it },
                 valueRange = 0f..maxGb,
@@ -719,7 +782,7 @@ fun StorageLimitCard(
             Text(
                 text = stringResource(R.string.download_storage_free_space, freeSpaceText),
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = AppColors.onSurfaceVariant
             )
         }
     }
@@ -733,15 +796,15 @@ fun DisconnectOneDriveDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
         title = { Text(stringResource(R.string.source_disconnect_title)) },
         text = { Text(stringResource(R.string.source_disconnect_message)) },
         confirmButton = {
-            TextButton(onClick = onConfirm) {
+            TextButton(colors = appTextButtonColors(), onClick = onConfirm) {
                 Text(
                     stringResource(R.string.source_disconnect_confirm),
-                    color = MaterialTheme.colorScheme.error
+                    color = AppColors.error
                 )
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
+            TextButton(colors = appTextButtonColors(), onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         }
     )
 }
@@ -791,11 +854,11 @@ private fun ReadOnlyFolderNotice(onReauthorize: () -> Unit) {
         Text(
             text = stringResource(R.string.source_local_folder_read_only),
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = AppColors.onSurfaceVariant,
             modifier = Modifier.weight(1f)
         )
         Spacer(modifier = Modifier.width(8.dp))
-        TextButton(onClick = onReauthorize) {
+        TextButton(colors = appTextButtonColors(), onClick = onReauthorize) {
             Text(stringResource(R.string.source_local_folder_reauthorize))
         }
     }

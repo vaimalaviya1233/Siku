@@ -8,6 +8,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.qhana.siku.R
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.appButtonColors
+import com.qhana.siku.ui.theme.appTextButtonColors
+import com.qhana.siku.ui.theme.appTextFieldColors
 
 @Composable
 fun CreatePlaylistDialog(
@@ -29,6 +33,7 @@ fun CreatePlaylistDialog(
                 // el `RoundedCornerShape(12.dp)` que traía de outlined, deja la línea inferior
                 // colgando de un contorno que ya no existe.
                 TextField(
+                    colors = appTextFieldColors(),
                     value = text,
                     onValueChange = { text = it },
                     singleLine = true,
@@ -39,6 +44,7 @@ fun CreatePlaylistDialog(
         },
         confirmButton = {
             Button(
+                colors = appButtonColors(),
                 onClick = { if (text.isNotBlank()) onConfirm(text) },
                 enabled = text.isNotBlank()
             ) {
@@ -46,12 +52,12 @@ fun CreatePlaylistDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(colors = appTextButtonColors(), onClick = onDismiss) {
                 Text(stringResource(R.string.common_cancel))
             }
         },
         shape = RoundedCornerShape(28.dp),
-        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+        containerColor = AppColors.surfaceContainerHigh
     )
 }
 
@@ -70,6 +76,7 @@ fun RenamePlaylistDialog(
         text = {
             // FILLED, igual que el de crear (ver la nota de arriba sobre la shape).
             TextField(
+                colors = appTextFieldColors(),
                 value = text,
                 onValueChange = { text = it },
                 singleLine = true,
@@ -78,6 +85,7 @@ fun RenamePlaylistDialog(
         },
         confirmButton = {
             Button(
+                colors = appButtonColors(),
                 onClick = { if (text.isNotBlank()) onConfirm(text) },
                 enabled = text.isNotBlank() && text.trim() != currentName
             ) {
@@ -85,12 +93,12 @@ fun RenamePlaylistDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(colors = appTextButtonColors(), onClick = onDismiss) {
                 Text(stringResource(R.string.common_cancel))
             }
         },
         shape = RoundedCornerShape(28.dp),
-        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+        containerColor = AppColors.surfaceContainerHigh
     )
 }
 

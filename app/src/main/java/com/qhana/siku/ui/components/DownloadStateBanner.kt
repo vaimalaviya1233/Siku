@@ -18,7 +18,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -32,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qhana.siku.R
 import com.qhana.siku.data.model.DownloadControlState
+import com.qhana.siku.ui.theme.AppSurface
 
 /**
  * Banner reutilizable del estado de las descargas cuando NO están activas (pausadas o
@@ -59,7 +59,7 @@ fun DownloadStateBanner(
     val container = if (dark) Color(0xFF2A2016) else Color(0xFFFFF3E0)
     val accent = if (dark) Color(0xFFFFB74D) else Color(0xFFE65100)
 
-    Surface(
+    AppSurface(
         color = container,
         contentColor = accent,
         shape = RoundedCornerShape(24.dp),
@@ -71,7 +71,7 @@ fun DownloadStateBanner(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Surface(shape = CircleShape, color = accent, modifier = Modifier.size(40.dp)) {
+            AppSurface(shape = CircleShape, color = accent, modifier = Modifier.size(40.dp)) {
                 Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
                     MaterialSymbol(
                         if (stopped) "stop_circle" else "pause_circle",

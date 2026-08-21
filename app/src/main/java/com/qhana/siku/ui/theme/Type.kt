@@ -1,18 +1,17 @@
 package com.qhana.siku.ui.theme
 
+import android.content.Context
+import android.content.res.AssetManager
 import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalFontFamilyResolver
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import androidx.compose.ui.text.font.createFontFamilyResolver
 
 /**
  * Tipografía de la app: **la escala de M3 tal cual, dibujada con Google Sans Flex**.
@@ -71,87 +70,77 @@ fun rememberAppTypography(): Typography {
      * `ROND 100` es el eje de redondez de Google Sans Flex, y eso SÍ es una decisión de marca: es
      * la variante redondeada la que acompaña al lenguaje Expressive del resto de la app.
      */
-    val googleSansFlex = remember(assets) {
-        FontFamily(
-            Font(
-                path = "fonts/GoogleSansFlex.ttf",
-                assetManager = assets,
-                variationSettings = FontVariation.Settings(
-                    FontVariation.weight(400),
-                    FontVariation.Setting("ROND", 100f)
-                )
-            ),
-            Font(
-                path = "fonts/GoogleSansFlex.ttf",
-                assetManager = assets,
-                weight = FontWeight.Medium,
-                variationSettings = FontVariation.Settings(
-                    FontVariation.weight(500),
-                    FontVariation.Setting("ROND", 100f)
-                )
-            ),
-            Font(
-                path = "fonts/GoogleSansFlex.ttf",
-                assetManager = assets,
-                weight = FontWeight.SemiBold,
-                variationSettings = FontVariation.Settings(
-                    FontVariation.weight(600),
-                    FontVariation.Setting("ROND", 100f)
-                )
-            ),
-            Font(
-                path = "fonts/GoogleSansFlex.ttf",
-                assetManager = assets,
-                weight = FontWeight.Bold,
-                variationSettings = FontVariation.Settings(
-                    FontVariation.weight(700),
-                    FontVariation.Setting("ROND", 100f)
-                )
-            )
-        )
-    }
-
-    // --- PRECALENTADO DE LA CACHÉ DE TYPEFACES ---
-    //
-    // Derivar el `Typeface` de cada peso es lo caro de esta familia: los cuatro salen del MISMO
-    // archivo y se distinguen por `variationSettings`, así que cada uno hay que construirlo con
-    // `Typeface.Builder(...).setFontVariationSettings(...)` la primera vez que alguien lo pide.
-    //
-    // Sin esto, esa factura la paga el primer frame que necesite cada peso. **Medido con Perfetto el
-    // 20 ago 2026**: un frame de 172 ms al empezar a sonar la primera canción, del que 150 eran
-    // `measure` y 114 cuatro `TextStringSimpleNode::measure` de 42/42/16/14 ms. Que era resolución de
-    // fuente y no medida de texto lo dice el propio trace: `TextLayout:initLayout` corre 651 veces
-    // en 23 ms —0,035 ms cada una— y esas cuatro medidas caras son las ÚNICAS de toda la captura.
-    //
-    // **`FontFamily.Resolver.preload` NO vale para esto**, aunque el nombre lo prometa: su
-    // implementación filtra `loadingStrategy == Async` ("only preload styles that can be satisfied by
-    // async fonts") y una fuente de assets es `AndroidAssetFont` → `AndroidPreloadedFont`, que pasa
-    // `FontLoadingStrategy.Blocking`. Con cero fuentes async recorre una lista vacía y no hace nada.
-    // Lo que sí puebla la caché de `TypefaceRequestCache` es pedir cada peso con `resolve`.
-    val resolver = LocalFontFamilyResolver.current
-    LaunchedEffect(googleSansFlex, resolver) {
-        // En background: construir los cuatro typefaces es justo el trabajo que no queremos en el
-        // hilo principal, y no hay nada que esperar — el resultado va a una caché compartida.
-        withContext(Dispatchers.Default) {
-            PRELOADED_WEIGHTS.forEach { weight ->
-                // Un fallo aquí no puede tumbar la app: sin caché, la fuente se resolverá luego por
-                // la vía normal y lo único que se pierde es el precalentado.
-                runCatching { resolver.resolve(googleSansFlex, weight, FontStyle.Normal) }
-            }
-        }
-    }
+    val googleSansFlex = remember(assets) { AppFonts.googleSansFlex(assets) }
 
     return remember(googleSansFlex) { Typography(fontFamily = googleSansFlex) }
 }
 
 /**
- * Los pesos que la app llega a pedir, y por tanto los que hay que tener construidos antes de que un
- * frame los necesite: 400/500 de la escala clásica de M3 y 600/700 de los roles `*Emphasized`. Es la
- * misma lista que declara la familia — si allí se añade un peso, aquí también.
+ * La familia **Google Sans Flex** y su precalentamiento.
+ *
+ * Vive fuera de [rememberAppTypography] para que `Application.onCreate` pueda pedir [preload] **antes
+ * de la primera composición**. Estuvo dentro, en un `LaunchedEffect`, y eso llegaba TARDE: medido con
+ * Perfetto el 21 ago 2026, el asset se abría a +490 ms, o sea DENTRO de la ventana del measure del
+ * segundo frame del arranque, que pagaba 41,9 ms de resolución de fuente. Un efecto de composición no
+ * puede adelantarse a la composición que lo lanza. Es el mismo camino —y el mismo motivo— que
+ * `MaterialSymbolFont.preload`, que sí llegó a tiempo (asset abierto a +265 ms) y bajó sus dos
+ * measure de 90+41 ms a 42+14.
+ *
+ * Reconstruir la familia NO rompe la caché: `FontListFontFamily` compara por lista de fuentes y
+ * `AndroidAssetFont` por ruta + ejes, así que la que arma la composición es IGUAL a la precalentada y
+ * acierta en `TypefaceRequestCache`.
  */
-private val PRELOADED_WEIGHTS = listOf(
-    FontWeight.Normal,
-    FontWeight.Medium,
-    FontWeight.SemiBold,
-    FontWeight.Bold
-)
+object AppFonts {
+
+    private const val PATH = "fonts/GoogleSansFlex.ttf"
+
+    /** Eje de redondez de Google Sans Flex. Decisión de MARCA: acompaña al lenguaje Expressive. */
+    private const val ROUNDNESS = 100f
+
+    /**
+     * Los pesos que la app llega a pedir: 400/500 de la escala clásica de M3 y 600/700 de los roles
+     * `*Emphasized`. Declararlos explícitamente evita que el sistema sintetice la negrita deformando
+     * los trazos. **Es la ÚNICA lista**: la familia y el precalentado salen los dos de aquí, así que
+     * ya no pueden divergir (antes eran dos listas paralelas que había que acordarse de sincronizar).
+     */
+    private val WEIGHTS = listOf(
+        FontWeight.Normal,
+        FontWeight.Medium,
+        FontWeight.SemiBold,
+        FontWeight.Bold
+    )
+
+    /** Fuente VARIABLE, con una instancia por peso (ver [WEIGHTS]). */
+    fun googleSansFlex(assetManager: AssetManager): FontFamily = FontFamily(
+        WEIGHTS.map { weight ->
+            Font(
+                path = PATH,
+                assetManager = assetManager,
+                weight = weight,
+                variationSettings = FontVariation.Settings(
+                    FontVariation.weight(weight.weight),
+                    FontVariation.Setting("ROND", ROUNDNESS)
+                )
+            )
+        }
+    )
+
+    /**
+     * Construye los cuatro typefaces y los deja en la caché global. Llamar desde un hilo de fondo
+     * (`Dispatchers.Default`: es CPU pura) lo antes posible en la vida del proceso.
+     *
+     * **`FontFamily.Resolver.preload` NO vale para esto**, aunque el nombre lo prometa: filtra
+     * `loadingStrategy == Async` ("only preload styles that can be satisfied by async fonts") y una
+     * fuente de assets es `AndroidAssetFont` → `AndroidPreloadedFont`, o sea `Blocking`. Con cero
+     * fuentes async recorre una lista vacía. Lo que sí puebla `TypefaceRequestCache` es `resolve`.
+     */
+    fun preload(context: Context) {
+        val resolver = createFontFamilyResolver(context.applicationContext)
+        val family = googleSansFlex(context.applicationContext.assets)
+        WEIGHTS.forEach { weight ->
+            // Un fallo aquí no puede tumbar la app: sin caché, la fuente se resuelve luego por la vía
+            // normal y lo único que se pierde es el precalentado.
+            runCatching { resolver.resolve(family, weight, FontStyle.Normal) }
+        }
+    }
+}

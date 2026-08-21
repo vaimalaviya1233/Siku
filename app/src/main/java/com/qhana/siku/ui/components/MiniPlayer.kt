@@ -24,6 +24,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import com.qhana.siku.ui.theme.LocalAppColors
 import com.qhana.siku.R
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
@@ -38,6 +39,7 @@ import androidx.compose.ui.unit.sp
 import com.qhana.siku.data.model.Song
 
 import com.qhana.siku.ui.theme.AppContainerBoundsTransform
+import com.qhana.siku.ui.theme.appCardColors
 import com.qhana.siku.ui.theme.appContainerContentEnter
 import com.qhana.siku.ui.theme.appContainerContentExitFast
 import com.qhana.siku.ui.theme.appSpatialSpec
@@ -613,7 +615,7 @@ fun MiniPlayer(
     //
     // Con el TONO enderezado al lado del tema, ver [miniPlayerContainer]: es lo que mantiene la
     // barra siendo una superficie del tema y no su negativo.
-    val scheme = MaterialTheme.colorScheme
+    val scheme = LocalAppColors.current
     val backgroundColor = remember(scheme.primaryContainer, scheme.surface) {
         miniPlayerContainer(scheme.primaryContainer, scheme.surface)
     }

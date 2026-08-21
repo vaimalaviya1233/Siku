@@ -30,7 +30,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MaterialTheme.colorScheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
@@ -45,6 +44,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.qhana.siku.ui.theme.LocalAppColors
 import com.qhana.siku.R
 import com.qhana.siku.data.local.GenreSummary
 import com.qhana.siku.ui.components.ACCENT_SECONDARY_ALPHA
@@ -53,6 +53,8 @@ import com.qhana.siku.ui.components.QueueOverflowButton
 import com.qhana.siku.ui.components.TonalChip
 import com.qhana.siku.ui.components.entityImageSharedBounds
 import com.qhana.siku.ui.components.rememberRowActionColors
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.appFilterChipColors
 
 /**
  * Pestaña "Géneros": cuadrícula de 2 columnas. Como un género no tiene carátula propia, cada tile es
@@ -91,19 +93,19 @@ fun GenresScreen(
                 MaterialSymbol(
                     "genres",
                     size = 64.sp,
-                    color = colorScheme.outline
+                    color = AppColors.outline
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
                     text = stringResource(R.string.genre_empty),
                     style = MaterialTheme.typography.bodyLarge,
-                    color = colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = stringResource(R.string.genre_empty_desc),
                     style = MaterialTheme.typography.bodySmall,
-                    color = colorScheme.onSurfaceVariant
+                    color = AppColors.onSurfaceVariant
                 )
             }
         }
@@ -135,10 +137,11 @@ fun GenresScreen(
                 TonalChip {
                     Text(
                         text = pluralStringResource(R.plurals.genre_count, genres.size, genres.size),
-                        color = colorScheme.onSecondaryContainer
+                        color = AppColors.onSecondaryContainer
                     )
                 }
                 FilterChip(
+                    colors = appFilterChipColors(),
                     selected = partialMatch,
                     onClick = { onPartialMatchChange(!partialMatch) },
                     label = { Text(stringResource(R.string.genre_partial_match)) },
@@ -310,12 +313,14 @@ private const val GENRE_PALETTE_COUNT = 6
  * claro pero T30 en oscuro— habrían dejado en tema oscuro media cuadrícula de tiles claros y media
  * de oscuros.
  *
- * Se lee del scheme en cada llamada, sin `remember`: el tema de esta app se ANIMA mutando la misma
- * instancia de `ColorScheme`, así que cachear por instancia serviría colores viejos.
+ * Se lee en cada llamada, sin `remember`: los colores de esta app cambian con la carátula, y desde
+ * el 20 ago 2026 lo hacen MUTANDO la misma instancia ([AppColorScheme]), así que cachear por
+ * instancia serviría colores viejos para siempre. (La frase anterior decía esto mismo de
+ * `ColorScheme`, donde era falso: ahí cada cambio construía una instancia nueva. Ahora es cierto.)
  */
 @Composable
 private fun genrePalette(name: String): Pair<Color, Color> {
-    val cs = colorScheme
+    val cs = LocalAppColors.current
     return when (Math.floorMod(mix32(genreSeed(name) xor COLOR_SALT), GENRE_PALETTE_COUNT)) {
         0 -> cs.primaryContainer to cs.onPrimaryContainer
         1 -> cs.secondaryContainer to cs.onSecondaryContainer

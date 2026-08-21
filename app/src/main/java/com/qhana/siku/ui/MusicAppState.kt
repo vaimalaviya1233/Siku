@@ -8,9 +8,11 @@ import androidx.compose.animation.core.Transition
 import androidx.compose.animation.core.ExperimentalTransitionApi
 import androidx.compose.animation.core.createChildTransition
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.compositionLocalOf
@@ -24,6 +26,8 @@ import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.qhana.siku.ui.theme.AppColorScheme
+import com.qhana.siku.ui.theme.LocalAppColors
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.data.util.JankProbe
 import com.qhana.siku.ui.navigation.Screen
@@ -377,25 +381,22 @@ fun rememberRowOriginHost(
 class MusicAppState(
     val navController: NavHostController,
     /**
-     * Estado de "player abierto", IZADO desde `MainActivity` porque el TEMA —que envuelve a toda la
-     * app— también lo lee: con el player abierto congela la animación del `ColorScheme`
-     * (`MusicPlayerTheme(animateColors = …)`).
+     * Estado de "player abierto", IZADO desde `MainActivity`.
      *
-     * Se recibe el `MutableState` en vez de exponer una copia y espejarla, y eso es load-bearing, no
-     * estilo: el espejo se sincronizaba con un `LaunchedEffect`, que corre DESPUÉS de la composición,
-     * así que el tema se enteraba **un frame tarde**. En ese frame el seed de la canción nueva ya había
-     * cambiado con la animación del esquema todavía encendida, y cada frame de ese fundido recompone
-     * TODO lo que hay bajo el `MaterialTheme` sin skipping (ver `animatedScheme` en Theme.kt) — justo
-     * encima del container transform que acaba de arrancar. Es exactamente la lección del 15 ago: no
-     * gatear una animación con un estado que se actualiza en otro frame que el que la dispara.
+     * Se recibe el `MutableState` en vez de exponer una copia y espejarla, y eso sigue siendo
+     * load-bearing aunque su motivo original —que el TEMA lo leía para congelar el fundido del
+     * esquema— desapareciera el 20 ago 2026: el espejo se sincronizaba con un `LaunchedEffect`, que
+     * corre DESPUÉS de la composición, así que quien lo leyera se enteraba **un frame tarde**. En
+     * ese frame el seed de la canción nueva ya había cambiado, y el repintado caía justo encima del
+     * container transform que acababa de arrancar. Es exactamente la lección del 15 ago: no gatear
+     * una animación con un estado que se actualiza en otro frame que el que la dispara.
      */
     private val playerExpandedState: MutableState<Boolean>,
     /**
      * La fila en PREPARACIÓN (ver [pendingRowOrigin]), izada a `MainActivity` por la misma razón que
-     * [playerExpandedState]: el tema se congela también en ese frame. El seed de la canción tocada
-     * cambia en el frame de preparación, y si la animación del esquema siguiera encendida ahí, el
-     * esquema saldría a medias (roles animados viejos, fijos nuevos) y el árbol entero se
-     * recompondría dos veces — en ese frame y en el siguiente con el definitivo.
+     * [playerExpandedState]. (Hasta el 20 ago 2026 el TEMA se congelaba también en este frame: el
+     * seed de la canción tocada cambia aquí y, con el fundido pasando por `MaterialTheme`, el árbol
+     * entero se recomponía dos veces. Con el color viajando por `AppColors` eso ya no ocurre.)
      */
     private val pendingRowOriginState: MutableState<String?>,
     /**
@@ -765,6 +766,11 @@ fun rememberPlayerMorphOrigin(
         val fromExpanded = layerTransition.currentState == PlayerLayerState.Expanded
         val requestedKind = appState.playerArtOrigin
         holder.value = when {
+            // Abriendo con lo que se pidió. **`NONE` se queda en `NONE` aunque la píldora esté en
+            // pantalla** (decisión del usuario, 20 ago 2026): un chip del inicio no es la píldora, así
+            // que no hay superficie que compartir y lo que corresponde es un shared axis, no un
+            // container transform prestado. Se probó caer a `PILL` en ese caso y se descartó. Quien
+            // anima `NONE` es `detachedFactor` (NowPlayingScreen).
             toExpanded && !fromExpanded ->
                 PlayerMorphOrigin(requestedKind, appState.playerOriginSongId)
             fromExpanded && !toExpanded -> {
@@ -799,79 +805,68 @@ private class MorphOriginHolder {
 }
 
 /**
- * La paleta de todo lo que queda DEBAJO del reproductor (el NavHost y la píldora), **retenida
- * mientras la transición de la capa corre** y puesta al día en cuanto asienta.
+ * Los [AppColors] de lo que queda DEBAJO del reproductor (NavHost y píldora), **retenidos mientras
+ * la capa se abre**.
  *
- * ## El problema que resuelve, medido en "Todas" el 16 ago
+ * ## Por qué existe, medido dos veces
  *
- * Tocar una canción con OTRA carátula cambia el seed del tema en el frame del tap. Material publica
- * el `ColorScheme` en un composition local ESTÁTICO, así que ese cambio **recompone sin skipping todo
- * lo que cuelga del `MaterialTheme`** — y en la biblioteca eso es la barra superior, las pestañas, el
- * pager, la lista paginada con cada `ListItem`, sus carátulas y sus menús — en el MISMO frame en que
- * arranca el container transform y se compone el NowPlaying por primera vez. Los specs de Compose
- * avanzan por tiempo, así que ese frame largo hace que el morph dé su primer paso ya avanzado: el
- * jank. Con la misma carátula no cambia el seed y no pasa; y en un DETALLE tampoco, porque
- * `DetailContentTheme` re-provee su propio esquema —independiente de la canción— y, como
- * `MaterialTheme.Values.equals` compara el esquema por identidad y `animatedScheme` devuelve la misma
- * instancia mientras nada cambie, ese subárbol queda **blindado** de la recomposición global. Era la
- * pista "solo en Todas, solo con carátula distinta".
+ * El seed del tema es la canción que suena, así que al abrir una canción de la biblioteca cambia el
+ * color justo en el frame del tap — el que arranca el morph. Repintar la biblioteca visible ahí
+ * costaba, en el trace del 20 ago a las 19:46, **26 bloques de recomposición y 11,7 ms** de un frame
+ * de 20. Se retiene mientras el reproductor crece y se aplica cuando asienta: con el player tapando
+ * la biblioteca y nada en movimiento.
  *
- * ## La regla
+ * **La prueba de que el problema es éste y no "abrir el reproductor" en general**: abriendo desde el
+ * detalle de un ÁLBUM no hay tirón, porque allí `DetailContentTheme` provee un [AppColorScheme]
+ * seedeado por el álbum, que no cambia al reproducir una canción. La diferencia entre las dos
+ * pantallas es exactamente esta retención.
  *
- * Es la misma que ya gobierna el tema con el reproductor abierto ("la paleta no se anima; la
- * coreografía la ponen los reveals"), llevada un paso más allá: **la paleta de lo que está debajo del
- * reproductor cambia cuando el morph termina, no mientras corre** — cuando el player la tapa y nada
- * se mueve. El reproductor, que es la superficie que crece desde la fila, sí nace ya con la paleta
- * de la canción nueva (lee el tema global directamente).
+ * Esto vivió como `rememberUnderlayColorScheme` (sobre `ColorScheme`) hasta que el refactor de
+ * `AppColors` lo dio por innecesario — el argumento fue que el coste "ya no existía", y era falso:
+ * había bajado de recomponer el árbol ENTERO sin skipping a invalidar sólo a los lectores de color,
+ * que sigue siendo el frame más caro de la apertura. **Que un coste baje no es que desaparezca.**
  *
- * ## Se retiene SOLO mientras se ABRE; cerrando se aplica en el acto, corra o no la transición
+ * ## Se retiene SOLO mientras se ABRE
  *
- * Si el usuario cierra antes de que la apertura asiente —tocar y bajar enseguida—, la paleta nueva
- * sigue pendiente, y "cuando asiente" pasa a ser el final del cierre: la biblioteca a la vista, quieta,
- * y el usuario probablemente ya scrolleando. Medido en "Todas" el 16 ago (dos veces): el frame de
- * 25-40 ms del repintado caía sistemáticamente ~530-550 ms después del `collapsePlayer`, dentro del
- * scroll siguiente, y el MiniPlayer —que vive bajo esta misma paleta— aparecía con el color viejo y lo
- * cambiaba medio segundo después. Por eso la regla es por DIRECCIÓN y no por "¿está corriendo?":
- * mientras el target es Expanded y no ha asentado se retiene; en cuanto el target deja de ser Expanded
- * se aplica lo pendiente en ese mismo frame, con el player todavía tapando. La primera versión de esta
- * regla retenía también con `isRunning`, y eso no cubría justo el caso que importa: cerrar con la
- * apertura aún en vuelo devuelve el target a Collapsed SIN que `currentState` haya llegado a Expanded,
- * así que ese frame contaba como "en vuelo" y lo pendiente se iba al asentar del cierre. Es el mismo
- * trato que ya tiene el frame del tap al abrir: una primera composición pesada se lee como latencia
- * de arranque, no como jank a mitad de animación. Coste asumido: si la paleta cambia MIENTRAS corre un
- * cierre (la canción avanza sola justo entonces), el repintado cae dentro del morph — raro, y medido
- * como mejor que caer en el scroll.
+ * Cerrando se aplica en el acto, corra o no la transición. Si el usuario cierra antes de que la
+ * apertura asiente —tocar y bajar enseguida—, "cuando asiente" pasaría a ser el final del cierre: la
+ * biblioteca a la vista, quieta, y el usuario probablemente ya scrolleando. Medido el 16 ago: el
+ * repintado caía ~530-550 ms después del `collapsePlayer`, dentro del scroll siguiente, y el
+ * MiniPlayer aparecía con el color viejo y lo cambiaba medio segundo después. Por eso la regla es
+ * por DIRECCIÓN y no por "¿está corriendo?".
  *
- * Devuelve la MISMA instancia mientras la retiene, que es lo que hace gratis el `MaterialTheme`
- * anidado que la consume: no invalida nada hasta el frame en que de verdad cambia. Contenedor plano
- * porque se lee y se escribe en la misma composición y ya recompone por lo que lee.
+ * Devuelve una instancia ESTABLE, que es lo que hace gratis proveerla por un local estático: lo que
+ * cambia son sus campos, y sólo cuando toca.
  *
- * @param preparingOrigin hay una fila PREPARÁNDOSE para abrir el player (`MusicAppState.pendingRowOrigin`):
- *   es el frame anterior a que la capa cambie de target, el seed ya cambió y el esquema global ya es el
- *   nuevo (el tema se congela también en ese frame). Cuenta como apertura en vuelo: si no, la paleta
- *   aterrizaría en la biblioteca a la vista un frame antes del morph, y ese repintado es justo lo que
- *   se quería fuera de la vista.
+ * @param preparingOrigin hay una fila PREPARÁNDOSE para abrir el player: es el frame anterior a que
+ *   la capa cambie de target y el seed ya cambió, así que cuenta como apertura en vuelo.
  */
 @Composable
-fun rememberUnderlayColorScheme(
+fun rememberUnderlayAppColors(
     layerTransition: Transition<PlayerLayerState>,
-    globalScheme: ColorScheme,
     preparingOrigin: Boolean
-): ColorScheme {
-    val holder = remember { UnderlaySchemeHolder(globalScheme) }
-    // Abriendo = target Expanded sin haber asentado. Cubre el frame en que arranca (el target cambia
-    // en la composición y el reloj recién la pone a correr en el frame siguiente: `currentState`
-    // todavía no es Expanded) y todo el vuelo (`isRunning`). Con target Collapsed/Hidden NUNCA se
-    // retiene, corra lo que corra — ver el KDoc.
+): AppColorScheme {
+    val source = LocalAppColors.current
+    val base = MaterialTheme.colorScheme
+    val holder = remember { AppColorScheme(source.toColorScheme(base)) }
+    // Última versión ya volcada. Contenedor PLANO y no snapshot state: es memoria de esta función,
+    // nadie depende de él, y como snapshot invalidaría en el mismo frame en que se escribe.
+    val applied = remember { IntArray(1) { source.version } }
+    // Leer `version` AQUÍ es la suscripción: `SideEffect` corre tras cada recomposición, pero si
+    // nadie recompone no corre nunca, y sin esta lectura un cambio de color no despertaría a esta
+    // función — la paleta de debajo se quedaría congelada para siempre.
+    val version = source.version
     val settled = layerTransition.currentState == layerTransition.targetState && !layerTransition.isRunning
     val opening = layerTransition.targetState == PlayerLayerState.Expanded && !settled
     val hold = preparingOrigin || opening
-    if (!hold && holder.scheme !== globalScheme) {
-        holder.scheme = globalScheme
-        JankProbe.mark { "underlay: paleta nueva → recompone NavHost" }
+    SideEffect {
+        // La comparación con `applied` no es cosmética: este efecto corre tras CADA recomposición de
+        // la pantalla, y sin ella se recorrerían los 48 roles por gusto en cada tick de posición.
+        if (!hold && applied[0] != version) {
+            applied[0] = version
+            holder.updateFrom(source.toColorScheme(base))
+            JankProbe.mark { "underlay: paleta nueva → repinta lo de debajo" }
+        }
     }
-    return holder.scheme
+    return holder
 }
-
-/** Ver [rememberUnderlayColorScheme]. */
-private class UnderlaySchemeHolder(var scheme: ColorScheme)

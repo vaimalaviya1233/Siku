@@ -14,7 +14,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.AnimationSpec
-import androidx.compose.animation.core.snap
 import androidx.compose.material3.ColorScheme
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
@@ -98,18 +97,6 @@ fun MusicPlayerTheme(
     // que acerca el acento al que System UI pinta en la notificación de media sin cambiar de estilo
     // de paleta — con Equilibrado, las superficies siguen siendo moderadas.
     vividAccent: Boolean = true,
-    // Fundido del esquema al cambiar el seed (canción). `false` lo SNAPEA, y existe por
-    // RENDIMIENTO, no por gusto: los colores animados pasan por `MaterialTheme`, cuyo
-    // `LocalColorScheme` es un composition local ESTÁTICO — cada frame del fundido recompone la
-    // app ENTERA sin skipping, durante ~350 ms. Con el reproductor cerrado eso es tolerable (no
-    // compite con nada); con el reproductor ABIERTO caía justo encima del slide de apertura o del
-    // reveal de cambio de canción y era la parte del tartamudeo que sobrevivió a arreglar las
-    // shapes. Ahí el cambio de acento ya lo coreografían los reveals cookie del NowPlaying (que
-    // congelan el acento viejo y barren el nuevo con una ventana por graphicsLayer, sin recomponer
-    // por frame), así que el fundido global era redundante además de caro. MainActivity pasa
-    // `!playerExpanded && sin fila en preparación` (el frame ANTERIOR a expandir desde una fila
-    // también cuenta: el seed ya cambió y un fundido arrancando ahí recompondría todo dos veces).
-    animateColors: Boolean = true,
     content: @Composable () -> Unit
 ) {
     // Post-proceso del esquema ya generado (palanca oficial de MaterialKolor). Se memoriza porque
@@ -127,8 +114,32 @@ fun MusicPlayerTheme(
         else { scheme: ColorScheme -> scheme.withVividPrimary(seedColor).withVividSecondary(seedColor) }
     }
 
-    val colorScheme = when {
-        seedColor != null -> rememberDynamicColorScheme(
+    // EL ESQUEMA BASE: el que recibe `MaterialTheme`, y que a propósito **NO depende de la
+    // carátula**. Su instancia sólo cambia si cambian los ajustes (claro/oscuro, color dinámico del
+    // fondo de pantalla), o sea casi nunca.
+    //
+    // Ésa es LA razón de ser de todo esto. `MaterialTheme` publica su valor por un CompositionLocal
+    // ESTÁTICO, así que cada instancia nueva de `ColorScheme` desactivaba el skipping en el árbol
+    // entero: 19 ms de recomposición + 9 ms de medida POR CANCIÓN, y no había forma de abaratarlos
+    // porque el trabajo no era de nadie en particular, era de todos. El color del álbum viaja ahora
+    // por [AppColors], que invalida sólo a quien lee el rol que cambió. Ver el KDoc de
+    // [AppColorScheme] para el mecanismo con las líneas de las fuentes.
+    //
+    // `remember` obligatorio: `dynamicDarkColorScheme` construye una instancia nueva en cada
+    // llamada, y sin memorizarla este esquema cambiaría de identidad en cada recomposición del
+    // tema — que es exactamente el problema que se está quitando, entrando por la otra puerta.
+    val context = LocalContext.current
+    val baseScheme = remember(darkTheme, dynamicColor, context) {
+        when {
+            dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
+                if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+            darkTheme -> DarkColorScheme
+            else -> LightColorScheme
+        }
+    }
+
+    // EL ESQUEMA TEÑIDO por la carátula. Va a [AppColors] y a ningún otro sitio.
+    val tintedScheme = if (seedColor != null) rememberDynamicColorScheme(
             seedColor = seedColor,
             isDark = darkTheme,
             isAmoled = false,
@@ -149,28 +160,27 @@ fun MusicPlayerTheme(
             // en 80 en oscuro: el spec habilita el color vivo, pero quien lo pide es el estilo.
             specVersion = ColorSpec.SpecVersion.SPEC_2025
         ).animatedScheme(
-            // Un solo camino, con o sin fundido: así los 31 `animateColorAsState` conservan su
-            // identidad en la composición y conmutar `animateColors` en caliente (abrir o cerrar
-            // el player) no reinicia ninguna animación en vuelo. Con `animate = false` el color
-            // final llega EN EL FRAME DEL TAP y no en el siguiente — ver el KDoc de la función.
-            spec = AppMotionScheme.slowEffectsSpec(),
-            animate = animateColors
-        )
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        darkTheme -> DarkColorScheme
-        else -> LightColorScheme
-    }
+        // SIEMPRE animado, también con el reproductor abierto. Hasta el 20 ago 2026 había un
+        // `animateColors` que lo snapeaba ahí, y no era una decisión de diseño sino el precio de
+        // que el fundido pasara por `MaterialTheme`: cada frame recomponía la app ENTERA. Ahora el
+        // color viaja por [AppColors] y un frame de fundido sólo invalida a quien lee el rol que
+        // se movió, así que el cruce de color puede estar encendido en todas partes — que es la
+        // gracia de que el acento salga de la carátula.
+        spec = AppMotionScheme.slowEffectsSpec()
+    ) else baseScheme
 
     val generation = remember(paletteStyle, darkTheme, vividAccent) {
         ThemeGeneration(paletteStyle, darkTheme, vividAccent)
     }
 
+    // El color del álbum llega a la UI propia por [AppColors] y NO por `MaterialTheme`: ése es el
+    // que recompone la app entera al cambiar, porque va por un CompositionLocal estático. El
+    // porqué completo, con las líneas de las fuentes que lo obligan, en el KDoc de
+    // [AppColorScheme].
     CompositionLocalProvider(LocalThemeGeneration provides generation) {
+        ProvideAppColors(tintedScheme) {
         MaterialTheme(
-            colorScheme = colorScheme,
+            colorScheme = baseScheme,
             // Shapes DEFAULT de M3 (extraSmall 4 / small 8 / medium 12 / large 16 / extraLarge 28 dp).
             // Antes había un override "expressive" (8/12/16/24/32) que agrandaba todas las esquinas.
             shapes = Shapes(),
@@ -184,6 +194,7 @@ fun MusicPlayerTheme(
             typography = rememberAppTypography(),
             content = content
         )
+        }
     }
 }
 
@@ -278,7 +289,16 @@ fun rememberAccentPreview(seedArgb: Int): Color {
 @Composable
 fun DetailContentTheme(seedArgb: Int?, content: @Composable () -> Unit) {
     val generation = LocalThemeGeneration.current
-    val globalScheme = MaterialTheme.colorScheme
+    // El esquema que se reinstala SIN seed sale de [AppColors] y NO de `MaterialTheme.colorScheme`:
+    // ése lleva el esquema BASE, que no depende de ninguna carátula, así que caer a él dejaría al
+    // detalle de un artista sin foto en gris dentro de una app teñida — y peor, PERDIENDO el color
+    // que ya tenía heredado de la pantalla anterior. `version` como clave: `ColorScheme` no tiene
+    // `equals`, así que sin ella el `remember` no acertaría nunca (ver [AppColorScheme.version]).
+    val appColors = LocalAppColors.current
+    val baseScheme = MaterialTheme.colorScheme
+    val globalScheme = remember(appColors, baseScheme, appColors.version) {
+        appColors.toColorScheme(baseScheme)
+    }
 
     // Misma guardia que el tema global: una imagen sin croma no debe inventarse un matiz. El
     // umbral vive en ArtworkRepository para que extracción y consumo no puedan discrepar.
@@ -319,7 +339,11 @@ fun DetailContentTheme(seedArgb: Int?, content: @Composable () -> Unit) {
     // (`MaterialTheme.shapes` / `.typography` / `.motionScheme`), así que el motion Expressive y la
     // tipografía de marca siguen siendo los mismos. `LocalThemeGeneration` tampoco se toca — no
     // cambia cómo se genera un esquema, solo desde qué seed.
-    MaterialTheme(colorScheme = scheme.animatedScheme(AppScreenColorSpec), content = content)
+    // Sólo [ProvideAppColors]: ya NO hay un `MaterialTheme` anidado aquí. El de la raíz lleva el
+    // esquema base —el que no depende de ninguna carátula— y no hay nada que reponer; lo que teñía
+    // la pantalla era este esquema, y ahora viaja por [AppColors] sin desactivar el skipping del
+    // subárbol. De paso desaparece el motivo del párrafo de arriba: no queda ninguna rama.
+    ProvideAppColors(scheme.animatedScheme(AppScreenColorSpec), content = content)
 }
 
 // --- Acento vivo (reencuadre tonal de `primary`) ---
@@ -467,37 +491,26 @@ private fun ColorScheme.withVividSecondary(seed: Color): ColorScheme {
 }
 
 /**
- * Anima la transición entre ColorSchemes (al cambiar de canción cambia el seed) para que
- * el cambio de acento global sea suave en toda la app, en lugar de un salto brusco.
+ * Anima la transición entre ColorSchemes (al cambiar de canción cambia el seed) para que el cambio
+ * de acento sea suave en toda la app en lugar de un salto brusco.
  *
- * OJO con el precio: `LocalColorScheme` de material3 es un composition local ESTÁTICO, así que
- * cada frame de este fundido recompone TODO lo que hay bajo el `MaterialTheme`, sin skipping.
- * Por eso existe `animateColors` en [MusicPlayerTheme]: con el reproductor abierto el fundido
- * se sustituye por el color final EN EL ACTO y la coreografía la ponen los reveals.
+ * Su resultado ya NO va a `MaterialTheme` sino a [ProvideAppColors], y eso cambia lo que cuesta:
+ * antes cada frame de este fundido recomponía el árbol ENTERO sin skipping —de ahí el parámetro
+ * `animateColors`, que lo apagaba con el reproductor abierto—, y ahora invalida sólo a quien lee el
+ * rol que se movió. Por eso el fundido está encendido siempre y `animateColors` se eliminó
+ * (20 ago 2026). Ver el KDoc de [AppColorScheme].
  *
- * ## Dos propiedades que NO se pueden romper, las dos medidas en las fuentes de material3
+ * ## La propiedad que NO se puede romper
  *
- * **1. Devuelve la MISMA instancia mientras ningún color cambie.** `ColorScheme` no tiene
- * `equals` y `MaterialTheme.Values.equals` compara el esquema por IDENTIDAD, así que para el local
- * estático "instancia nueva" = "tema nuevo" = recomponer la app entera, tengan los 48 colores el
- * valor que tengan. Esta función devolvía `copy(...)` —una instancia nueva— en CADA recomposición,
- * y `MusicPlayerTheme` recompone cada vez que se abre o se cierra el reproductor (cambia
- * `animateColors`), o sea que **abrir el player costaba una recomposición del árbol completo con
- * los colores IDÉNTICOS**, justo en el frame que arranca el container transform. Comparar contra la
- * última instancia emitida y devolverla si nada cambió es lo que convierte "solo el tema" en
- * "solo cuando el tema cambia de verdad".
+ * **Devuelve la MISMA instancia mientras ningún color cambie.** Sigue siendo load-bearing aunque el
+ * consumidor sea otro: [AppColorScheme.updateFrom] compara campo a campo, así que una instancia
+ * nueva con los mismos 48 colores no invalidaría a nadie —pero recorrer los 48 y construir el
+ * `copy` sí se paga, y se pagaría en CADA recomposición de `MusicPlayerTheme`. Comparar contra la
+ * última instancia emitida y devolverla si nada cambió es lo que convierte "cada vez que recompone
+ * el tema" en "sólo cuando el tema cambia de verdad".
  *
- * **2. Sin animar, el color final llega en el MISMO frame, no en el siguiente.** La versión anterior
- * usaba `snap()` como spec, y un snap NO es instantáneo: `animateColorAsState` encola el objetivo
- * en un canal, la corrutina lo recoge, `animateTo` pide un `withFrameNanos` para fijar el tiempo de
- * inicio y recién en ESE callback escribe el valor — o sea la recomposición del árbol caía un frame
- * DESPUÉS del tap, con la animación de apertura ya en marcha (los specs de Compose avanzan por
- * tiempo, así que un frame largo hace que el morph dé su primer paso ya avanzado: el tirón). Ahora
- * con `animate = false` se devuelve el objetivo directamente y la recomposición cae en el frame del
- * tap, ANTES de que la capa se expanda. Los `animateColorAsState` se siguen llamando aunque no se
- * lea su valor: así conservan su identidad en la composición y convergen solos al objetivo (con
- * `snap`), y al volver a activar el fundido arrancan desde el color que se está viendo, no desde
- * uno viejo.
+ * (Aquí hubo una segunda propiedad, sobre que `snap()` no es instantáneo y el color final llegaba un
+ * frame tarde. Se fue con `animate`: ya no hay camino sin animar.)
  */
 // OptIn: `slowEffectsSpec()` es API experimental del MotionScheme.
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
@@ -514,19 +527,14 @@ private fun ColorScheme.animatedScheme(
     // propósito: el morph es SPATIAL y tiene otra física por definición (rebota), así que la
     // coincidencia exacta no era sostenible sin clavar los dos números a mano. Con el token, el
     // color cierra algo antes que el morph.
-    spec: AnimationSpec<Color> = AppMotionScheme.slowEffectsSpec(),
-    /** `false` = el objetivo en el acto (ver la propiedad 2 del KDoc). */
-    animate: Boolean = true
+    spec: AnimationSpec<Color> = AppMotionScheme.slowEffectsSpec()
 ): ColorScheme {
     // Última instancia emitida (ver la propiedad 1). Contenedor plano y no `mutableStateOf`: es una
     // memoria de la propia función, no estado del que dependa nadie más.
     val last = remember { LastScheme() }
-    val effectiveSpec = if (animate) spec else snap()
     @Composable
-    fun anim(target: Color, label: String): Color {
-        val state = animateColorAsState(targetValue = target, animationSpec = effectiveSpec, label = label)
-        return if (animate) state.value else target
-    }
+    fun anim(target: Color, label: String): Color =
+        animateColorAsState(targetValue = target, animationSpec = spec, label = label).value
     val next = copy(
         primary = anim(primary, "primary"),
         onPrimary = anim(onPrimary, "onPrimary"),
@@ -570,7 +578,7 @@ private fun ColorScheme.animatedScheme(
             "secondary" to (p.secondary != next.secondary), "primaryContainer" to (p.primaryContainer != next.primaryContainer),
             "onSurface" to (p.onSurface != next.onSurface)
         ).filter { it.second }.joinToString(",") { it.first }.ifEmpty { "otro rol" }
-        "tema: ColorScheme nuevo (animate=$animate, cambió: $changed) → recompone su subárbol"
+        "tema: ColorScheme nuevo (cambió: $changed) → repinta lo que lea esos roles"
     }
     return next
 }

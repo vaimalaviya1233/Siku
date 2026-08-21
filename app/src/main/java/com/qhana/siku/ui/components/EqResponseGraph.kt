@@ -27,6 +27,7 @@ import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.qhana.siku.ui.theme.LocalAppColors
 import com.qhana.siku.player.audio.EqCurve
 import kotlin.math.ceil
 import kotlin.math.ln
@@ -82,7 +83,7 @@ fun EqResponseGraph(
     modifier: Modifier = Modifier,
     height: Dp = GraphHeight
 ) {
-    val colors = MaterialTheme.colorScheme
+    val colors = LocalAppColors.current
     val measurer = rememberTextMeasurer()
 
     // Color por estado, con la MISMA regla de umbrales que el indicador de headroom: si el gráfico

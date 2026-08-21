@@ -6,11 +6,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.material3.MaterialTheme.colorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import coil3.compose.AsyncImage
+import com.qhana.siku.ui.theme.AppColors
 
 /**
  * Collage ADAPTATIVO de hasta 4 carátulas DISTINTAS: 1 a sangre, 2 en mitades verticales, 3 con
@@ -72,6 +72,6 @@ private fun CollageTile(art: String, modifier: Modifier = Modifier) {
         contentScale = ContentScale.Crop,
         modifier = modifier
             .fillMaxHeight()
-            .background(colorScheme.surfaceContainerHighest)
+            .background(AppColors.surfaceContainerHighest)
     )
 }

@@ -16,6 +16,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.qhana.siku.R
 import com.qhana.siku.data.model.DuplicatePolicy
+import com.qhana.siku.ui.theme.appButtonColors
+import com.qhana.siku.ui.theme.appOutlinedButtonColors
+import com.qhana.siku.ui.theme.appTextButtonColors
 
 /**
  * Decisión de DUPLICADOS entre fuentes (spec dedup v23): el sync detectó [count] canciones
@@ -41,21 +44,25 @@ fun DuplicatePolicyDialog(
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Button(
+                    colors = appButtonColors(),
                     onClick = { onResolve(DuplicatePolicy.KEEP_BOTH) },
                     shapes = ButtonDefaults.shapes(),
                     modifier = Modifier.fillMaxWidth()
                 ) { Text(stringResource(R.string.duplicates_keep_both)) }
                 OutlinedButton(
+                    colors = appOutlinedButtonColors(),
                     onClick = { onResolve(DuplicatePolicy.PREFER_CLOUD) },
                     shapes = ButtonDefaults.shapes(),
                     modifier = Modifier.fillMaxWidth()
                 ) { Text(stringResource(R.string.duplicates_prefer_cloud)) }
                 OutlinedButton(
+                    colors = appOutlinedButtonColors(),
                     onClick = { onResolve(DuplicatePolicy.PREFER_LOCAL) },
                     shapes = ButtonDefaults.shapes(),
                     modifier = Modifier.fillMaxWidth()
                 ) { Text(stringResource(R.string.duplicates_prefer_local)) }
                 TextButton(
+                    colors = appTextButtonColors(),
                     onClick = onDismiss,
                     modifier = Modifier.fillMaxWidth()
                 ) { Text(stringResource(R.string.duplicates_later)) }

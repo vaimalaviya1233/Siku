@@ -14,7 +14,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuDefaults
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -29,6 +28,8 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.AppSurface
 import com.qhana.siku.ui.theme.appSpatialSpec
 
 /**
@@ -89,7 +90,7 @@ fun TonalDropdownButton(
     )
 
     Box(modifier = modifier) {
-        Surface(
+        AppSurface(
             onClick = { expanded = true },
             enabled = enabled,
             shape = RoundedCornerShape(cornerRadius),
@@ -98,8 +99,8 @@ fun TonalDropdownButton(
             // container que ellos, tres cosas con jerarquías distintas competían por la atención
             // en una pantalla cuyo protagonista es el gráfico. Un escalón de superficie basta para
             // que se lean como tocables sin gritar.
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-            contentColor = MaterialTheme.colorScheme.onSurface,
+            color = AppColors.surfaceContainerHigh,
+            contentColor = AppColors.onSurface,
             modifier = Modifier
                 .defaultMinSize(minHeight = DefaultMinHeight)
                 .onSizeChanged { anchorWidth = with(density) { it.width.toDp() } }
