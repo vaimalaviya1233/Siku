@@ -470,7 +470,12 @@ fun SongOverflowButton(
                         },
                         text = { Text(if (isFavorite) stringResource(R.string.common_remove_from_favorites) else stringResource(R.string.common_add_to_favorites)) },
                         shapes = MenuDefaults.itemShapes(shape = menuItemShapeAt(0, itemCount)),
-                        leadingIcon = { MenuItemIcon("favorite", fill = isFavorite) }
+                        // El glifo dice el VERBO, igual que la etiqueta de al lado: en un menú
+                        // la entrada es una acción, no un indicador de estado (ese es el corazón
+                        // de la fila, que sí se queda en "favorite" con su relleno).
+                        leadingIcon = {
+                            MenuItemIcon(if (isFavorite) "heart_minus" else "heart_plus")
+                        }
                     )
                 }
                 DropdownMenuItem(

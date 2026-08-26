@@ -89,12 +89,19 @@ private val LyricLineHeight = 34.sp
  *     (48→64) y eso hacía latir el alto de la fila entera al pausar.
  *  2. **El play mantiene la proporción 1,5:1** en pausa (96×64, como 120×80 allá): es lo que lo hace
  *     leerse como píldora y no como un óvalo.
- *  3. **Los laterales van a la talla VISUAL del play** (20 ago 2026, la misma decisión que en el
- *     NowPlaying, ver `CookieVisualRatio` allá): la cookie de 9 lados tiene `innerRadius = 0.8`,
- *     así que un círculo que PESE lo mismo mide 0,9 de sus bounds — 64 × 0,9 = 57,6 → **56** en la
- *     rejilla de 4, con el mismo glifo (28). En pausa se estrechan con la proporción de allá
- *     (narrow/uniform = 0,8): 56 × 0,8 = 44,8 → **44**. Antes eran un icon button `Small` (40 de
- *     alto, 40/32 de ancho, icono 24) y se leían como piezas de otro rango.
+ *  3. **Los laterales van a la talla VISUAL del play** (20 ago 2026): la cookie de 9 lados es una
+ *     estrella con `innerRadius = 0.8` (`MaterialShapes.cookie9()`, leído del jar de material3
+ *     1.5.0-alpha24 — no está expuesto como API) inscrita en sus bounds, así que sus lóbulos tocan
+ *     el borde pero el cuerpo mide 0,8, y el contorno se percibe en la media de los dos radios. Un
+ *     círculo que PESE lo mismo mide 0,9 de esos bounds — 64 × 0,9 = 57,6 → **56** en la rejilla de
+ *     4, con el mismo glifo (28). En pausa se estrechan con la proporción narrow/uniform (0,8):
+ *     56 × 0,8 = 44,8 → **44**. Antes eran un icon button `Small` (40 de alto, 40/32 de ancho,
+ *     icono 24) y se leían como piezas de otro rango.
+ *
+ *     **Esta escala vive SOLO aquí.** El NowPlaying la usó un día y el 21 ago volvió al icon button
+ *     Medium del spec: allá los laterales grandes le quitaban el protagonismo al play y alto a la
+ *     carátula, dos problemas que esta pantalla no tiene —sus controles flotan sobre el texto y no
+ *     compiten con ninguna portada—, así que aquí se queda.
  *
  * Del play, como en el NowPlaying, solo el ICONO sale de token; sus medidas son propias.
  */

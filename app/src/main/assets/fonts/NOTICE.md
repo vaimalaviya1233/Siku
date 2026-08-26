@@ -30,6 +30,13 @@ modified) may not be sold on its own.
 - **Apache License 2.0** — <https://www.apache.org/licenses/LICENSE-2.0>
 - Source: <https://github.com/google/material-design-icons>
 
+**Subset.** The bundled file is a subset of the upstream font, reduced to the icons this app
+actually draws (117 of 4174, 0.24 MB instead of 14.9 MB). Nothing else was altered: the outlines,
+the variable axes and the ligature names are the originals. The Apache License 2.0 permits
+modification and redistribution; this note is the record of the change. The unmodified font is
+kept in `tools/fonts/` and `tools/subset_icon_font.py` regenerates the subset from it.
+
 ---
 
-Neither Google nor the font authors endorse this project. The fonts are unmodified.
+Neither Google nor the font authors endorse this project. Apart from the Material Symbols subset
+described above, the fonts are unmodified.

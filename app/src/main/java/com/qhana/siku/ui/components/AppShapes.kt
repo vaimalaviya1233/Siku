@@ -60,15 +60,6 @@ private const val STRAIGHT_EDGE_FRACTION = 0.5f
 /** Los 6 lóbulos de la cookie, o los 6 lados del hexágono. */
 private const val HEXAGON_SIDES = 6
 
-/** Lados del heptágono. */
-private const val HEPTAGON_SIDES = 7
-
-/**
- * Radio de la circunferencia en la que se inscriben los polígonos regulares de este archivo: media
- * caja, o sea la forma tocando los bordes por sus vértices antes de `normalized()`.
- */
-private const val POLYGON_RADIUS = 0.5f
-
 /**
  * Hexágono de lados rectos y esquinas romas: la `Cookie6Sided` de M3 con los lóbulos aplanados (ver
  * [HEXAGON_FLATTEN]). Hereda de ella la orientación —**tapa plana** arriba y abajo, vértices a los
@@ -108,49 +99,10 @@ val HexagonShape: RoundedPolygon by lazy {
 }
 
 /**
- * Heptágono con VÉRTICE ARRIBA, esquinas romas con el mismo criterio que [HexagonShape]
- * ([STRAIGHT_EDGE_FRACTION]) y `normalized()` al final, como toda `MaterialShapes`.
- *
- * Siete lados es un número IMPAR, y eso es lo que lo distingue del hexágono más allá del conteo: no
- * hay lado paralelo al de enfrente ni eje de simetría horizontal, así que la forma no se lee como
- * una caja girada. Con el vértice arriba, el lado plano queda abajo — el peso visual se apoya en la
- * base y la punta ordena la fila.
- *
- * La orientación NO se hereda de la `Cookie7Sided` de M3 por casualidad: esa también acaba en
- * `rotateNeg90`, o sea vértice arriba.
- */
-val HeptagonShape: RoundedPolygon by lazy { regularPolygon(sides = HEPTAGON_SIDES, startDegrees = -90f) }
-
-/**
- * Polígono regular de [sides] lados inscrito en la circunferencia de radio [radius] alrededor del
- * centro (0.5, 0.5), con el primer vértice a [startDegrees] (−90° = arriba, porque en pantalla la y
- * crece hacia abajo) y las esquinas redondeadas según [STRAIGHT_EDGE_FRACTION].
- *
- * El radio es indiferente al resultado —`normalized()` reencuadra la forma y su redondeo por igual—
- * y solo fija las unidades en las que se expresa el arco.
- */
-private fun regularPolygon(
-    sides: Int,
-    startDegrees: Float,
-    radius: Float = POLYGON_RADIUS,
-): RoundedPolygon {
-    // Largo del lado de un polígono regular: la cuerda que abarca un vértice a otro.
-    val side = 2f * radius * sin(radians(180f / sides))
-    val vertices = FloatArray(sides * 2)
-    repeat(sides) { i -> putVertex(vertices, i * 2, startDegrees + i * 360f / sides, radius) }
-    return RoundedPolygon(
-        vertices = vertices,
-        rounding = cornerRounding(side, sides),
-        centerX = 0.5f,
-        centerY = 0.5f,
-    ).normalized()
-}
-
-/**
  * Redondeo que deja recta [STRAIGHT_EDGE_FRACTION] de un lado de largo [side] en un polígono regular
  * de [sides] lados. La tangente del arco es la mitad de lo que NO queda recto; el radio es esa
- * tangente por la tangente trigonométrica de MEDIO ángulo interior (120°/2 en el hexágono, 128.6°/2
- * en el heptágono), que es la relación entre ambos en una esquina.
+ * tangente por la tangente trigonométrica de MEDIO ángulo interior (120°/2 en el hexágono), que es
+ * la relación entre ambos en una esquina.
  */
 private fun cornerRounding(side: Float, sides: Int): CornerRounding {
     val tangent = side * (1f - STRAIGHT_EDGE_FRACTION) / 2f

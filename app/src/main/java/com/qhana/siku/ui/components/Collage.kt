@@ -13,6 +13,14 @@ import coil3.compose.AsyncImage
 import com.qhana.siku.ui.theme.AppColors
 
 /**
+ * Cuántas carátulas usa como MUCHO [AdaptiveCollage]. Vive aquí, junto al componente que define ese
+ * tope, para que quien prepara la lista no tenga que adivinarlo: pasarle más solo descarta trabajo
+ * ya hecho, y las dos fuentes que lo alimentan (el inicio y las favoritas) cortaban con un 4 escrito
+ * a mano cada una.
+ */
+const val COLLAGE_MAX_TILES = 4
+
+/**
  * Collage ADAPTATIVO de hasta 4 carátulas DISTINTAS: 1 a sangre, 2 en mitades verticales, 3 con
  * una grande + dos apiladas, 4 en mosaico 2×2.
  *

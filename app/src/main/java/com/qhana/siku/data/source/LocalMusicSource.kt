@@ -33,8 +33,12 @@ import javax.inject.Singleton
  * Fuente de música LOCAL, en dos modos EXCLUYENTES:
  *
  * - **Dispositivo**: todo lo que el sistema indexa como música (`MediaStore`, filtrado por
- *   `IS_MUSIC`, que es lo que deja fuera tonos, notificaciones, alarmas y grabaciones). Es el
- *   único modo que necesita permiso de lectura de audio.
+ *   `MUSIC_SELECTION`). Es el único modo que necesita permiso de lectura de audio, y el único con
+ *   **carpetas excluibles**: ese filtro descarta lo que el sistema MARCA como tono, notificación,
+ *   alarma o podcast, pero los archivos fuera de `Music/` suelen tener esos flags sin rellenar —y
+ *   se toleran nulos a propósito, o se perderían canciones—, así que audios de mensajería y
+ *   grabaciones entran igual. Cuáles sobran no lo puede saber un flag: lo dice el usuario, desde
+ *   Ajustes → Fuentes → Carpetas excluidas.
  * - **Carpetas**: una o varias carpetas elegidas vía SAF (`ACTION_OPEN_DOCUMENT_TREE`, permiso
  *   persistido), recorridas recursivamente. No necesita permiso: el árbol se autoriza al elegirlo.
  *
@@ -583,6 +587,8 @@ class LocalMusicSource @Inject constructor(
             return Listing(emptyList()) { false }
         }
 
+        val excluded = excludedDeviceFolders()
+
         cursor.use { rows ->
             // Los índices se resuelven UNA vez, no por fila: en una biblioteca de miles de
             // canciones, buscar la columna por nombre en cada vuelta es puro coste repetido.
@@ -618,6 +624,7 @@ class LocalMusicSource @Inject constructor(
                     rawVolumePathFromAbsolutePath(data)
                 }
                 val volumePath = normalizeRelativePath(rawPath)
+                if (isUnderAnyFolder(volumePath, excluded)) continue
                 val doubleSlashPath = normalizeKeepingRepeatedSeparators(rawPath)
 
                 out.add(
@@ -645,8 +652,13 @@ class LocalMusicSource @Inject constructor(
                 )
             }
         }
-        // Ámbito = todo: en este modo, lo que no está en el índice del sistema ya no está.
-        return Listing(out) { true }
+        // Ámbito = los volúmenes MONTADOS AHORA. En este modo "lo que no está en el índice del
+        // sistema ya no está" solo vale para el almacenamiento que de verdad se pudo mirar: con
+        // una SD desmontada MediaStore deja de devolver sus filas, y un ámbito de "todo" leería
+        // ese silencio como un borrado del usuario, llevándose la biblioteca de la tarjeta —con
+        // sus playlists e historial— por haber sacado la tarjeta un rato.
+        val mounted = mountedVolumeNames()
+        return Listing(out) { id -> volumeOfLocalId(id) in mounted }
     }
 
     // --- Rutas e ids --------------------------------------------------------------------------
@@ -716,6 +728,116 @@ class LocalMusicSource @Inject constructor(
         SourceType.LOCAL.buildId(volumeRelativePath(docId)) + "/"
     }.getOrNull()
 
+    /** Carpetas excluidas del modo dispositivo (ver [MusicPreferences.loadExcludedDeviceFolders]). */
+    fun excludedDeviceFolders(): Set<String> = musicPreferences.loadExcludedDeviceFolders()
+
+    /**
+     * ¿La ruta cuelga de alguna de las carpetas dadas? Recursivo por construcción, y con la barra
+     * en el prefijo a propósito: sin ella, excluir `primary/music` se llevaría también
+     * `primary/music_videos`, que es otra carpeta.
+     */
+    private fun isUnderAnyFolder(volumePath: String, folders: Set<String>): Boolean =
+        folders.any { volumePath.startsWith("$it/") }
+
+    /** El volumen de un id local (`local:primary/music/x.flac` → `primary`). */
+    private fun volumeOfLocalId(id: String): String =
+        SourceType.LOCAL.stableKeyOf(id).substringBefore('/')
+
+    /**
+     * Nombres de los volúmenes montados AHORA, en el mismo espacio de nombres que los ids
+     * (ver [canonicalVolume]). Es lo que acota la reconciliación del modo dispositivo.
+     *
+     * Antes de API 29 no hay catálogo de volúmenes, así que se derivan de los directorios que el
+     * sistema nos da en cada almacenamiento: la ruta de cada uno empieza por `/storage/<volumen>/`,
+     * que es exactamente de donde [rawVolumePathFromAbsolutePath] saca el nombre.
+     */
+    private fun mountedVolumeNames(): Set<String> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.getExternalVolumeNames(context).map { canonicalVolume(it) }.toSet()
+        } else {
+            ContextCompat.getExternalFilesDirs(context, null)
+                .filterNotNull()
+                .mapNotNull { dir ->
+                    rawVolumePathFromAbsolutePath(dir.absolutePath)
+                        .substringBefore('/')
+                        .lowercase(Locale.ROOT)
+                        .takeIf { it.isNotBlank() }
+                }
+                .toSet()
+        }
+
+    /**
+     * Las carpetas donde el sistema ve música, con cuántos archivos hay en cada una. Alimenta la
+     * pantalla de exclusiones.
+     *
+     * Sale de MediaStore y NO de la biblioteca ya indexada, y eso es load-bearing: una carpeta
+     * excluida no tiene ninguna canción en `songs`, así que leyendo de ahí desaparecería de la
+     * lista y no habría forma de volver a incluirla. El origen es la única fuente que sigue viendo
+     * lo que se está descartando.
+     *
+     * El conteo NO descuenta las exclusiones (cada fila cuenta en su carpeta): es el tamaño de lo
+     * que se gana o se pierde al marcarla, que es justo lo que hay que poder ver para decidir.
+     */
+    suspend fun deviceAudioFolders(): List<DeviceAudioFolder> = withContext(Dispatchers.IO) {
+        if (!hasAudioPermission()) return@withContext emptyList()
+
+        val useRelativePath = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        val projection = if (useRelativePath) {
+            arrayOf(
+                MediaStore.Audio.Media.DISPLAY_NAME,
+                MediaStore.Audio.Media.RELATIVE_PATH,
+                MediaStore.Audio.Media.VOLUME_NAME
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            arrayOf(MediaStore.Audio.Media.DISPLAY_NAME, MediaStore.Audio.Media.DATA)
+        }
+
+        val counts = HashMap<String, Int>()
+        val cursor = context.contentResolver.query(
+            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+            projection,
+            MUSIC_SELECTION,
+            null,
+            null
+        ) ?: return@withContext emptyList()
+
+        cursor.use { rows ->
+            val nameCol = rows.getColumnIndexOrThrow(MediaStore.Audio.Media.DISPLAY_NAME)
+            val relativeCol =
+                if (useRelativePath) rows.getColumnIndexOrThrow(MediaStore.Audio.Media.RELATIVE_PATH) else -1
+            val volumeCol =
+                if (useRelativePath) rows.getColumnIndexOrThrow(MediaStore.Audio.Media.VOLUME_NAME) else -1
+            @Suppress("DEPRECATION")
+            val dataCol =
+                if (useRelativePath) -1 else rows.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
+
+            while (rows.moveToNext()) {
+                val name = rows.getString(nameCol) ?: continue
+                if (!isAudioFile(name)) continue
+                val rawPath = if (useRelativePath) {
+                    val relative = rows.getString(relativeCol).orEmpty()
+                    val volume = rows.getString(volumeCol).orEmpty()
+                    "${canonicalVolume(volume)}/$relative/$name"
+                } else {
+                    val data = rows.getString(dataCol) ?: continue
+                    rawVolumePathFromAbsolutePath(data)
+                }
+                // La carpeta es la ruta del archivo sin su nombre, ya normalizada: el mismo
+                // espacio de nombres en el que se guardan las exclusiones.
+                val folder = normalizeRelativePath(rawPath).substringBeforeLast('/', "")
+                if (folder.isEmpty()) continue
+                counts[folder] = (counts[folder] ?: 0) + 1
+            }
+        }
+
+        counts.entries
+            .map { (path, count) -> DeviceAudioFolder(path = path, songCount = count) }
+            // Por tamaño: la carpeta que sobra suele ser una de las grandes (audios de mensajería,
+            // grabaciones), así que aparece arriba sin tener que buscarla.
+            .sortedWith(compareByDescending<DeviceAudioFolder> { it.songCount }.thenBy { it.path })
+    }
+
     private fun isAudioFile(name: String): Boolean {
         val n = name.lowercase(Locale.ROOT)
         return n.endsWith(".mp3") || n.endsWith(".m4a") || n.endsWith(".flac") ||
@@ -749,3 +871,15 @@ class LocalMusicSource @Inject constructor(
         private const val MEDIASTORE_DISC_MULTIPLIER = 1000
     }
 }
+
+/**
+ * Una carpeta del dispositivo donde el sistema ve música, con cuántos archivos tiene.
+ *
+ * [path] es la ruta relativa al volumen y normalizada (`primary/whatsapp/media/whatsapp audio`),
+ * o sea la MISMA forma en la que se persisten las exclusiones: la pantalla no traduce nada, solo
+ * marca y desmarca lo que ya es la clave.
+ */
+data class DeviceAudioFolder(
+    val path: String,
+    val songCount: Int
+)

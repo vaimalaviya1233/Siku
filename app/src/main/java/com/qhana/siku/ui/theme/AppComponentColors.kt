@@ -13,8 +13,10 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.FloatingToolbarDefaults
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.ListItemDefaults
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.MenuGroupShapes
+import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarData
@@ -70,8 +72,16 @@ import androidx.compose.ui.unit.dp
  * el color de quien esté más arriba, **sin fallar en compilación y sin que se note hasta verlo en
  * pantalla**. Por eso [AppSurface] lo aplica por defecto.
  *
- * Devuelve `Color.Unspecified` si el color no es ninguno de los roles, igual que M3: eso significa
- * "no sé, heredá", que es la respuesta correcta para un color arbitrario.
+ * **Ante un color que no es ninguno de los roles hereda el de fuera, y eso NO es un adorno.**
+ * Devolver `Color.Unspecified` —como estuvo hasta el 22 ago 2026, con el argumento de que
+ * significaba "no sé, heredá"— es precisamente lo que impide heredar: [AppSurface] entrega ese
+ * valor al `Surface`, que lo PROVEE en `LocalContentColor` pisando el de arriba, y un `Text` sin
+ * color resuelve `Unspecified` a NEGRO. El síntoma fue texto negro sobre fondo negro en los dos
+ * customizers de Ajustes (pestañas y barra del reproductor), que dibujan sus filas sobre
+ * `AppSurface(color = Color.Transparent)` — un color legítimo y no tabulado.
+ *
+ * M3 no tiene el fallo porque su `contentColorFor` remata con `takeOrElse { LocalContentColor }`
+ * (ColorScheme.kt:1137). Al portar el mapeo rol por rol se copió todo menos ese remate.
  */
 @Composable
 @ReadOnlyComposable
@@ -97,7 +107,9 @@ fun appContentColorFor(color: Color): Color {
         c.surfaceContainerLow -> c.onSurface
         c.surfaceContainerLowest -> c.onSurface
         c.surfaceDim -> c.onSurface
-        else -> Color.Unspecified
+        // Un color arbitrario (transparente, calculado, de fuera de la escala): se hereda el de
+        // quien contiene, que es lo que hace M3 y lo que `Color.Unspecified` NO hace. Ver el KDoc.
+        else -> LocalContentColor.current
     }
 }
 
@@ -307,6 +319,46 @@ fun appListItemColors() = ListItemDefaults.colors(
     supportingColor = AppColors.onSurfaceVariant
 )
 
+/**
+ * Fila de lista SEGMENTADA (`SegmentedListItem`), con sus TRES estados de color.
+ *
+ * Los tokens (`ListTokens`): contenedor `surface` —los grupos de Ajustes lo suben un escalón, de ahí
+ * el parámetro—, contenido `onSurface` con los apoyos en `onSurfaceVariant`; SELECCIONADO en
+ * `secondaryContainer` con TODO su contenido en `onSecondaryContainer`; y ARRASTRADO en
+ * `tertiaryContainer` (`ReorderListTokens`), que es como M3 marca la fila que se está moviendo.
+ *
+ * **Los estados eran la mitad que se olvidaba**: `segmentedColors(containerColor = …)` copia sobre el
+ * `defaultSegmentedListItemColors` del TEMA (`ListItemDefaults.kt:319`), así que la fila apagada
+ * salía teñida por la carátula y la ENCENDIDA azul del wallpaper — visible en cada interruptor
+ * activo de Ajustes. Los `disabled*` de CONTENIDO se heredan de M3 a propósito (son alfas tabuladas
+ * sobre `onSurface`: replicarlas sería meter números mágicos, y son neutras); el contenedor
+ * deshabilitado sí se fija, porque M3 lo resuelve a su token `surface` y no al que se le pasó.
+ */
+@Composable
+fun appSegmentedListItemColors(
+    containerColor: Color = AppColors.surface
+) = ListItemDefaults.segmentedColors(
+    containerColor = containerColor,
+    contentColor = AppColors.onSurface,
+    leadingContentColor = AppColors.onSurfaceVariant,
+    trailingContentColor = AppColors.onSurfaceVariant,
+    overlineContentColor = AppColors.onSurfaceVariant,
+    supportingContentColor = AppColors.onSurfaceVariant,
+    disabledContainerColor = containerColor,
+    selectedContainerColor = AppColors.secondaryContainer,
+    selectedContentColor = AppColors.onSecondaryContainer,
+    selectedLeadingContentColor = AppColors.onSecondaryContainer,
+    selectedTrailingContentColor = AppColors.onSecondaryContainer,
+    selectedOverlineContentColor = AppColors.onSecondaryContainer,
+    selectedSupportingContentColor = AppColors.onSecondaryContainer,
+    draggedContainerColor = AppColors.tertiaryContainer,
+    draggedContentColor = AppColors.onTertiaryContainer,
+    draggedLeadingContentColor = AppColors.onTertiaryContainer,
+    draggedTrailingContentColor = AppColors.onTertiaryContainer,
+    draggedOverlineContentColor = AppColors.onTertiaryContainer,
+    draggedSupportingContentColor = AppColors.onTertiaryContainer
+)
+
 /** Top app bar (`AppBarTokens`), incluido el color al que vira con el scroll. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -451,4 +503,74 @@ fun appTonalToggleButtonColors() = ToggleButtonDefaults.tonalToggleButtonColors(
     contentColor = AppColors.onSecondaryContainer,
     checkedContainerColor = AppColors.secondary,
     checkedContentColor = AppColors.onSecondary
+)
+
+/**
+ * Floating toolbar NEUTRO: el del selector de la biblioteca cuando vive abajo
+ * (`LibraryBottomToolbar`).
+ *
+ * **No es el vibrant** ([appVibrantFloatingToolbarColors], el del NowPlaying y la hoja de la cola):
+ * allí el toolbar es la pieza protagonista de una pantalla teñida, y aquí flota sobre la biblioteca
+ * a un palmo del MiniPlayer, que ya lleva `primaryContainer` — dos píldoras del mismo color
+ * apiladas se leen como una sola pieza partida por la mitad.
+ *
+ * **Pero tampoco es el token que M3 tabula para el standard**, que es `surfaceContainer`
+ * (`FloatingToolbarTokens.StandardContainerColor`): en esta app ése es el **fondo de página** (ver
+ * la horquilla de color en CLAUDE.md — el fondo es el nivel MEDIO de la escala, el contenido sube a
+ * `surface` y las barras bajan a `surfaceContainerHigh`), así que el toolbar quedaría del color
+ * exacto de lo que tiene detrás y solo lo separaría su sombra. Va al **techo de la escala neutra**,
+ * que es el mismo criterio —y por el mismo motivo— que ya obligó a subir los menús en
+ * `AppMenuPopup`: una pieza que puede caer sobre cualquier superficie tiene que estar por encima de
+ * todas, y las de la biblioteca van de `surface` a `surfaceContainerHigh`.
+ *
+ * El contenido de cada destino NO sale de aquí — lo pone [appLibraryToolbarItemColors], porque un
+ * destino inactivo va en `onSurfaceVariant` (el token de la navigation bar) y no en el `onSurface`
+ * del contenedor.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun appLibraryToolbarColors() = FloatingToolbarDefaults.standardFloatingToolbarColors(
+    toolbarContainerColor = AppColors.surfaceContainerHighest,
+    toolbarContentColor = AppColors.onSurface,
+    fabContainerColor = AppColors.primaryContainer,
+    fabContentColor = AppColors.onPrimaryContainer
+)
+
+/**
+ * Destino del toolbar de la biblioteca (`LibraryBottomToolbar`), montado sobre `ToggleButton`.
+ *
+ * **Los mismos cuatro colores que la píldora de `LibraryTabs` y que el rail**: activo
+ * `secondaryContainer`/`onSecondaryContainer`, inactivo `onSurfaceVariant` — el token de la
+ * navigation bar (`NavigationBarTokens.InactiveIconColor`) — sobre contenedor TRANSPARENTE, que es
+ * lo que deja ver el material del toolbar. Las tres presentaciones del selector son proyecciones
+ * del mismo `pagerState.currentPage` y no pueden divergir en color.
+ *
+ * **NO se usa `tonalToggleButtonColors`** aunque el nombre suene al caso: ése pinta el contenedor
+ * también en reposo (`secondaryContainer` apagado → `secondary` encendido), o sea seis píldoras
+ * tonales dentro de otra píldora tonal.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun appLibraryToolbarItemColors() = ToggleButtonDefaults.toggleButtonColors(
+    containerColor = Color.Transparent,
+    contentColor = AppColors.onSurfaceVariant,
+    checkedContainerColor = AppColors.secondaryContainer,
+    checkedContentColor = AppColors.onSecondaryContainer
+)
+
+/**
+ * Ítem del navigation rail de la biblioteca (horizontal).
+ *
+ * Vale el token de la etiqueta (`NavigationRailColorTokens.ItemActiveLabelText` = `secondary`)
+ * porque en el rail el indicador rodea solo el glifo y el texto queda debajo, sobre el contenedor de
+ * la barra. Los demás valores son los de la píldora de `LibraryTabs`: el rail y las dos filas son
+ * presentaciones de la misma navegación y no pueden divergir en color.
+ */
+@Composable
+fun appNavigationRailItemColors() = NavigationRailItemDefaults.colors(
+    selectedIconColor = AppColors.onSecondaryContainer,
+    selectedTextColor = AppColors.secondary,
+    indicatorColor = AppColors.secondaryContainer,
+    unselectedIconColor = AppColors.onSurfaceVariant,
+    unselectedTextColor = AppColors.onSurfaceVariant
 )

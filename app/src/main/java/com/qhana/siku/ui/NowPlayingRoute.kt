@@ -38,6 +38,7 @@ import com.qhana.siku.ui.components.EqualizerSheet
 import com.qhana.siku.ui.components.PLAYER_ART_SHARED_KEY
 import com.qhana.siku.ui.components.SheetOverlay
 import com.qhana.siku.ui.components.PLAYER_CONTAINER_SHARED_KEY
+import com.qhana.siku.ui.components.playerContainerSharedBounds
 import com.qhana.siku.ui.components.rowArtSharedKey
 import com.qhana.siku.ui.components.rowContainerSharedKey
 import com.qhana.siku.ui.screens.AmbientPlayerActivity
@@ -435,6 +436,26 @@ fun NowPlayingLayer(
         }
     }
 
+    // **La punta del container transform: la superficie que crece hasta ser el reproductor.**
+    //
+    // Vive AQUÍ, en la capa, y no dentro de `NowPlayingScreen`, que es donde estuvo hasta el 21 ago
+    // 2026. Esa pantalla solo se compone con algo que mostrar (ver [shownState]), o sea que la
+    // existencia de la punta dependía de que hubieran LLEGADO LOS DATOS: con la cola vacía la canción
+    // tarda en llegar y durante esos frames el morph no tenía destino al que emparejar; cuando
+    // aparecía, la punta nacía a mitad de vuelo. La capa está compuesta siempre, así que la superficie
+    // crece desde el primer frame aunque el contenido todavía no esté — que es justamente lo que hace
+    // un container transform. Toda la configuración del morph está en el helper.
+    //
+    // Va por FUERA del `graphicsLayer` de abajo (el shared axis Z) y por fuera del gesto de cierre,
+    // que vive dentro de la pantalla: el morph mide la pantalla en su sitio, no arrastrada por el dedo
+    // ni escalada por la otra animación. Las dos nunca están activas a la vez —con key manda el
+    // morph, sin key manda el eje Z— pero el orden importa igual para los bounds.
+    val containerSharedModifier = playerContainerSharedBounds(
+        key = containerSharedKey,
+        sharedTransitionScope = sharedTransitionScope,
+        animatedVisibilityScope = animatedVisibilityScope
+    )
+
     // El reproductor ya no muere al cerrarse, así que lo que había abierto DENTRO tampoco: sin esto,
     // volver a abrirlo lo mostraría con la hoja del ecualizador puesta, y el morph aterrizaría sobre
     // ella. Se limpia cuando el reproductor ya está guardado del todo (`!onScreen`) y no al empezar a
@@ -459,7 +480,12 @@ fun NowPlayingLayer(
     // [LocalPlayerOnScreen] envuelve TODO el reproductor —hoja del ecualizador incluida— porque lo que
     // publica es "este subárbol se ve", y eso vale para cualquier animación que cuelgue de él.
     CompositionLocalProvider(LocalPlayerOnScreen provides onScreen) {
-    Box(modifier = modifier.fillMaxSize().then(detachedModifier)) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .then(containerSharedModifier)
+            .then(detachedModifier)
+    ) {
         // Sin NADA que mostrar —ni canción ni un último estado retenido (ver [shownState])— una
         // superficie lisa, NO el esqueleto shimmer. Solo se llega aquí en reposo (reproductor guardado
         // y sin canción), donde no se coloca; mientras se cierra, manda el contenido retenido.
@@ -483,7 +509,9 @@ fun NowPlayingLayer(
                 sharedTransitionScope = sharedTransitionScope
                     .takeIf { artSharedKey != null || containerSharedKey != null },
                 artSharedKey = artSharedKey,
-                containerSharedKey = containerSharedKey,
+                // La punta del CONTENEDOR la declara esta capa (ver `containerSharedModifier`); la
+                // pantalla solo necesita saber si el morph manda sobre sus dos alfas.
+                morphActive = containerSharedKey != null,
                 animatedVisibilityScope = animatedVisibilityScope,
                 uiState = shownState,
                 playbackState = playbackState,

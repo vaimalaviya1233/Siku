@@ -136,13 +136,18 @@ fun onAccentContentColor(container: Color): Color {
 // ============== SUPERFICIE DERIVADA DEL FONDO REAL ==============
 
 /**
- * Separación tonal (HCT) entre una superficie y el fondo sobre el que se apoya. 8 = el recorrido
- * COMPLETO de la escala de contenedores de M3 en tema claro (`surface` 98 →
+ * Separación tonal (HCT) por DEFECTO entre una superficie y el fondo sobre el que se apoya. 8 = el
+ * recorrido COMPLETO de la escala de contenedores de M3 en tema claro (`surface` 98 →
  * `surfaceContainerHighest` 90): la mayor distancia que el spec sigue leyendo como "otra superficie"
  * sin llegar al salto de un botón de acción. Por debajo de ~4 (dos niveles) la capa se funde con el
  * fondo.
+ *
+ * Es el valor de las capas PEQUEÑAS que se apoyan en algo (la píldora del ⋮, el chip de origen), y
+ * por eso [tonalLayerContainer] lo recibe como parámetro: una superficie con otro trabajo —el
+ * resaltado de la fila que suena, que hay que encontrar de un vistazo scrolleando— necesita poder
+ * calibrar su escalón sin arrastrar a las otras dos.
  */
-private const val TONAL_LAYER_DELTA = 8.0
+const val TONAL_LAYER_DELTA = 8.0
 
 /** Centro de la escala de tono HCT: decide si la capa se aleja del fondo hacia abajo o hacia arriba. */
 private const val TONAL_LAYER_MID_TONE = 50.0
@@ -229,17 +234,37 @@ fun rememberTonalLayerColors(
     onRole: Color = AppColors.onSecondaryContainer,
     minContrast: Float = TONAL_LAYER_MIN_CONTRAST
 ): TonalLayerColors = remember(background, role, onRole, minContrast) {
-    val backgroundTone = Hct.fromInt(background.toArgb()).tone
-    val roleHct = Hct.fromInt(role.toArgb())
-    val tone = (
-        if (backgroundTone > TONAL_LAYER_MID_TONE) backgroundTone - TONAL_LAYER_DELTA
-        else backgroundTone + TONAL_LAYER_DELTA
-    ).coerceIn(HCT_TONE_MIN, HCT_TONE_MAX)
-    val container = Color(Hct.from(roleHct.hue, roleHct.chroma, tone).toInt())
+    val container = tonalLayerContainer(background, role)
     TonalLayerColors(
         container = container,
         content = ensureContrast(onRole, container, minContrast)
     )
+}
+
+/**
+ * Solo el CONTENEDOR de la regla de [rememberTonalLayerColors]: el hue y el croma de [role] llevados
+ * al tono que queda a [delta] puntos de [background], alejándose del extremo de la escala.
+ *
+ * Existe aparte porque hay capas que no necesitan el par completo —el resaltado de la fila que suena
+ * ya resuelve su contenido con `rememberActiveRowContentColor`—, y la regla tiene que estar escrita
+ * UNA sola vez: es lo único que garantiza que dos superficies derivadas del mismo fondo caigan en el
+ * mismo sitio. No es `@Composable` a propósito: los callers la envuelven en su propio `remember`.
+ *
+ * Lo ÚNICO que cada caller elige es [delta] —cuánto se separa—, porque eso no es la regla sino el
+ * trabajo de esa capa concreta. La DIRECCIÓN nunca se elige: la decide el tono medido del fondo.
+ */
+fun tonalLayerContainer(
+    background: Color,
+    role: Color,
+    delta: Double = TONAL_LAYER_DELTA
+): Color {
+    val backgroundTone = Hct.fromInt(background.toArgb()).tone
+    val roleHct = Hct.fromInt(role.toArgb())
+    val tone = (
+        if (backgroundTone > TONAL_LAYER_MID_TONE) backgroundTone - delta
+        else backgroundTone + delta
+    ).coerceIn(HCT_TONE_MIN, HCT_TONE_MAX)
+    return Color(Hct.from(roleHct.hue, roleHct.chroma, tone).toInt())
 }
 
 /**

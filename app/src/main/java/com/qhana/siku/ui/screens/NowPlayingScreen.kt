@@ -10,9 +10,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.res.stringResource
 import com.qhana.siku.R
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -43,11 +41,9 @@ import com.qhana.siku.ui.theme.AppColors
 import com.qhana.siku.ui.theme.appTextButtonColors
 import com.qhana.siku.ui.util.shareSong
 import com.qhana.siku.ui.state.NowPlayingUiState
-import com.qhana.siku.ui.theme.AppContainerBoundsTransform
 import com.qhana.siku.ui.theme.EXPRESSIVE_DEFAULT_EFFECTS_MS
 import com.qhana.siku.ui.theme.EXPRESSIVE_SLOW_EFFECTS_MS
 import com.qhana.siku.ui.theme.ExpressiveDefaultEffectsEasing
-import com.qhana.siku.ui.theme.appContainerContentEnter
 import com.qhana.siku.ui.theme.appContainerSurfaceExitSpec
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
@@ -79,13 +75,20 @@ internal object NowPlayingConfig {
     /**
      * Regiones funcionales: info+barra ↔ transporte ↔ toolbar. **Vale para portrait y landscape.**
      *
-     * El valor se calibró en device bajando desde 32: en esta columna todo lo que crece se lo quita
-     * a la CARÁTULA (es `weight(1f)` y cuadrada, o sea que 4dp aquí son 8 de lado por cada uno de
-     * los tres saltos), así que el número sale de mirar las dos cosas a la vez — que las regiones se
-     * lean separadas y que la portada no se encoja. De paso hace innecesaria la variante compacta
-     * que el landscape tenía aparte: los dos layouts usan ahora la misma escala entera.
+     * El valor se calibra en device y ha bajado dos veces (32 → 28 → **20 el 24 ago 2026**), porque
+     * en esta columna todo lo que crece se lo quita a la CARÁTULA: es `weight(1f)` y CUADRADA, así
+     * que 4dp aquí son 4 de lado por cada uno de los tres saltos. De paso hace innecesaria la
+     * variante compacta que el landscape tenía aparte: los dos layouts usan la misma escala entera.
+     *
+     * **El último recorte solo rinde por ir acompañado**, y conviene saberlo antes de tocar este
+     * número en cualquier dirección: la portada mide `min(ancho disponible, alto sobrante)`, y
+     * mientras el ancho fue el que mandaba —la keyline y un margen propio dejaban el techo en
+     * ~345dp— aflojar los saltos no la agrandaba ni un dp, solo repartía el sobrante como AIRE
+     * alrededor de ella (la caja la centra). Recortar aquí devuelve lado únicamente porque la
+     * portada pasó a sangrar la keyline el mismo día (ver `bleedHorizontally` en NowPlayingLayouts),
+     * lo que subió ese techo al ancho ENTERO de la pantalla y devolvió el mando al alto.
      */
-    val SectionGap = 28.dp
+    val SectionGap = 20.dp
 
     val GroupSpacing = 8.dp
     // Las esquinas del grupo YA NO viven aquí: las de prev/next salen de las formas del icon button
@@ -95,6 +98,25 @@ internal object NowPlayingConfig {
     // Hueco MÍNIMO garantizado entre el grupo de transporte y los toggles laterales
     // (aleatorio/repetir): el play se ensancha en pausa y sin este colchón se tocaban.
     val TransportSideGap = 12.dp
+
+    /**
+     * Margen lateral del contenido en PORTRAIT: la línea vertical con la que se alinean el título,
+     * la barra de progreso y el toolbar. En landscape es [LandscapeContentKeyline].
+     *
+     * Estaba escrito como un `16.dp` suelto en el layout, y por eso la barra superior no podía
+     * alinearse con él sin repetir el número.
+     */
+    val ContentKeyline = 16.dp
+
+    /** El mismo margen en LANDSCAPE, donde la columna es más estrecha y respira más. */
+    val LandscapeContentKeyline = 24.dp
+
+    /**
+     * Lado del área táctil de un icon button de la barra superior (ver `ExpressiveActionIcon`).
+     * De aquí sale la compensación óptica: el GLIFO va centrado dentro de este cuadrado, así que
+     * un botón pegado a la keyline deja su dibujo metido hacia adentro la mitad de lo que sobra.
+     */
+    val ActionIconTouchSize = 48.dp
 }
 
 @Immutable
@@ -190,15 +212,16 @@ fun NowPlayingScreen(
     /** Key del shared element de la carátula; null = sin morph (ver PlayerArtOrigin). */
     artSharedKey: Any? = null,
     /**
-     * Key del *container transform* de la superficie de la que CRECE esta pantalla; null = entra por
-     * su cuenta (fundido) en vez de crecer de ningún sitio.
+     * ¿Hay *container transform* en marcha, o sea una superficie de la que esta pantalla CRECE (la
+     * píldora o la fila tocada)? `false` = el reproductor entra y sale por su cuenta, con el shared
+     * axis Z que pinta la capa (`detachedAlpha`/`detachedScale` en `NowPlayingRoute`).
      *
-     * La superficie de origen la elige quien abre el player (ver `PlayerArtOrigin`): la píldora
-     * ([PLAYER_CONTAINER_SHARED_KEY]) o la fila tocada
-     * ([com.qhana.siku.ui.components.rowContainerSharedKey]). Aquí da igual cuál sea — la coreografía
-     * es la misma y esta pantalla solo necesita saber a qué key engancharse.
+     * **Es un booleano y no la key** desde el 21 ago 2026: la punta la declara la CAPA (ver el bloque
+     * CONTAINER TRANSFORM más abajo), así que aquí no hay a qué engancharse — lo único que esta
+     * pantalla necesita saber es quién manda sobre sus dos alfas ([morphInUse]). Cuál sea la
+     * superficie de origen no llega hasta aquí, ni hace falta: la coreografía es la misma.
      */
-    containerSharedKey: Any? = null,
+    morphActive: Boolean = false,
     animatedVisibilityScope: AnimatedVisibilityScope? = null,
     /**
      * Una superficie opaca a pantalla completa tapa el reproductor AHORA MISMO. Hoy solo la hoja del
@@ -378,100 +401,25 @@ fun NowPlayingScreen(
         dismissState.reset()
     }
 
-    // CONTAINER TRANSFORM: la superficie de origen y esta pantalla son LA MISMA cambiando de tamaño
-    // (ver [PLAYER_CONTAINER_SHARED_KEY]). Envuelve la pantalla ENTERA —fondo y contenido—, porque en
-    // este patrón lo que se ve encoger y crecer es el contenedor CON lo que lleva dentro.
+    // CONTAINER TRANSFORM: la superficie de origen y esta pantalla son LA MISMA cambiando de tamaño.
     //
-    // El origen es la PÍLDORA o la FILA tocada según cómo se abriera el player, y esa diferencia no
-    // llega hasta aquí: las dos puntas comparten `key`, bounds spec y alineación. (La sombra de la
-    // píldora no participa: se dibuja en su sitio bajo el overlay y solo se funde — ver `pillShadow`
-    // en MiniPlayer.kt.)
+    // **La punta ya no se declara aquí** (21 ago 2026): vive en la CAPA
+    // (`NowPlayingLayer` → [com.qhana.siku.ui.components.playerContainerSharedBounds]), porque esta
+    // pantalla solo se compone cuando hay algo que mostrar y una punta de shared element no puede
+    // depender de datos asíncronos — abriendo con la cola vacía no había destino al que emparejar
+    // durante los primeros frames y la punta nacía a mitad de vuelo. Toda la configuración del morph
+    // (el `ContentScale` asimétrico, el recorte, la escala de z, por qué `exit` es `None`) está
+    // documentada allí.
     //
-    // ## El CONTENT SCALE **no es el mismo en las dos puntas, y no puede serlo** (17 ago 2026)
-    //
-    // La regla verdadera es una sola: **el contenido de cada punta se dibuja a su tamaño NATURAL
-    // durante todo el morph, y lo que revela u oculta es el RECORTE del contenedor.** Lo que cambia es
-    // qué `ContentScale` consigue eso a cada lado, porque `scaleToBounds` mapea el contenido dentro
-    // del rect animado y los dos contenidos tienen tamaños opuestos:
-    //
-    //  - **Origen** (fila o píldora, contenido CHICO) → `Fit`. El menor de los ratios lo deja en 1
-    //    mientras el rect es el suyo y no lo agranda cuando el rect crece a pantalla completa. Con
-    //    `Crop` ahí el contenido de la barra se ampliaba 34× — el "14 Occasions gigante" del 16 ago.
-    //  - **Destino** (este player, contenido de PANTALLA COMPLETA) → `FillWidth`. El ratio de ANCHO
-    //    vale ~0.96 desde el primer frame (fila y píldora ocupan casi todo el ancho), así que el
-    //    contenido nace ya a tamaño natural y el rect lo va destapando. El sobrante vertical lo
-    //    recorta `clipInOverlayDuringTransition`, que es de dónde sale la lectura de *contenedor que
-    //    crece*.
-    //
-    // **`Fit` en ESTA punta era el bug que el usuario reportó el 17 ago** ("todo el NowPlaying sale
-    // desde el fondo y no es un container transform"): el menor de los dos ratios es el de ALTO
-    // (~0.03), así que el reproductor entero se dibujaba al 3 % —una maqueta en miniatura con sus
-    // controles y su barra de progreso diminutos— y hacía zoom hasta la pantalla. Eso no es un
-    // container transform: es un objeto acercándose desde lejos. En la referencia de Material el
-    // contenido de destino aparece SIEMPRE a su tamaño final y lo único que se mueve es el borde del
-    // contenedor.
-    //
-    // Hasta hoy este bloque afirmaba que las dos puntas debían configurarse IGUAL, y de ahí salía
-    // `Fit` aquí. Esa regla generalizaba de más un fallo real —el del 16 ago, donde la asimetría fue
-    // un descuido y no una decisión— y es lo que mantuvo la miniatura durante un mes.
-    //
-    // `RemeasureToBounds` sigue DESCARTADO: re-mide el layout cada frame y la carátula, único
-    // `weight(1f)` de la columna, absorbía toda la holgura — cero durante los primeros dos tercios del
-    // recorrido y luego disparada (la "doble animación" del 16 ago). `scaleToBounds` no re-mide nada.
-    //
-    // `Alignment.Center` y no `TopCenter`: el contenido se ancla al CENTRO del rect. Abriendo desde
-    // una fila eso es casi un no-movimiento (el centro de la fila ya está cerca del centro de la
-    // pantalla), que es exactamente la quietud que se busca; anclarlo arriba lo haría subir media
-    // pantalla por debajo del recorte.
-    //
-    // La PORTADA es la excepción y no viaja escalada con esto: tiene su propio shared element
-    // ([PLAYER_ART_SHARED_KEY]) y se eleva al overlay, así que se dibuja UNA sola vez, en sus propios
-    // bounds interpolados. Es lo que la deja hacer un viaje limpio de la píldora al centro.
-    //
-    // Va ANTES del `graphicsLayer` del gesto de cierre —o sea, más afuera—: el morph mide la pantalla
-    // en su sitio, no arrastrada por el dedo.
-    val containerSharedModifier =
-        if (sharedTransitionScope != null && animatedVisibilityScope != null && containerSharedKey != null) {
-            with(sharedTransitionScope) {
-                // El que SALE se dibuja ENCIMA y se disuelve sobre el que ENTRA, sólido debajo (ver el
-                // mismo patrón en MiniPlayer): así abrir y cerrar se ven IGUAL. Al cerrar, el player es
-                // el saliente → va encima y se ve disolverse; al abrir es el entrante → sólido debajo.
-                val exiting = animatedVisibilityScope.transition.targetState != EnterExitState.Visible
-                Modifier.sharedBounds(
-                    sharedContentState = rememberSharedContentState(key = containerSharedKey),
-                    animatedVisibilityScope = animatedVisibilityScope,
-                    boundsTransform = AppContainerBoundsTransform,
-                    // **Ni enter ni exit aquí, y no es que no haya fundido: lo aplica [surfaceFactor]
-                    // unas líneas más abajo.** La visibilidad de esta punta la gobierna quien la
-                    // compone (el reproductor es persistente, ver `PlayerOverlay`), y en ese modo el
-                    // estado de reposo es `PostExit`: con un `exit` con fade el alfa de reposo sería 0
-                    // y la vuelta `PostExit → Visible` la animaría la librería con su spring por
-                    // defecto —no hay parámetro para eso—, o sea el reproductor CRECIENDO translúcido,
-                    // que es exactamente lo que este patrón no hace. Ver [appContainerSurfaceExitSpec].
-                    enter = appContainerContentEnter(),
-                    exit = ExitTransition.None,
-                    // FillWidth y NO Fit — ver el bloque de arriba: `Fit` dibujaba este árbol al 3 %
-                    // y lo hacía crecer, que es un zoom y no un container transform.
-                    resizeMode = SharedTransitionScope.ResizeMode.scaleToBounds(
-                        ContentScale.FillWidth,
-                        Alignment.Center
-                    ),
-                    zIndexInOverlay =
-                        if (exiting) CONTAINER_SURFACE_OVERLAY_Z_EXITING
-                        else CONTAINER_SURFACE_OVERLAY_Z_ENTERING,
-                    // A pantalla completa la forma de la píldora sería un óvalo, así que se recorta con
-                    // la esquina `extraLarge`; al encoger converge con la barra. Es el TOKEN del tema y
-                    // no su valor (28dp escrito a mano): la otra forma del MiniPlayer sale de ese mismo
-                    // token, así que copiar el número dejaba las dos puntas del morph libres de divergir.
-                    clipInOverlayDuringTransition = OverlayClip(MaterialTheme.shapes.extraLarge)
-                )
-            }
-        } else Modifier
+    // Lo que SÍ sigue aquí son los dos alfas, porque son del CONTENIDO de esta pantalla y no de la
+    // superficie que viaja: [surfaceFactor] (fundido de salida) y [contentFactor] (fundido de
+    // entrada), gobernados por [morphInUse].
 
     // Fundido de SALIDA de la superficie ENTERA (fondo incluido) al CERRAR: el player se disuelve
     // encima de la píldora que llega, mientras encoge con ella. Es el mismo fundido que hasta ahora
     // ponía el `exit` del `sharedBounds` —por eso comparte spec, [appContainerSurfaceExitSpec]—,
-    // traído aquí porque la punta ya no puede usar `exit` (ver el comentario del `sharedBounds`).
+    // traído aquí porque la punta no puede usar `exit`: su visibilidad la gestiona quien la compone y
+    // el estado de reposo es `PostExit` (ver `playerContainerSharedBounds`, en la capa).
     //
     // **Solo se APLICA cerrando, y eso hay que decirlo en el sitio del dibujo, no solo en el spec.**
     // Abriendo, la superficie tiene que estar SÓLIDA desde el primer frame o crecer se leería como un
@@ -487,8 +435,8 @@ fun NowPlayingScreen(
     // `State` y lectura diferida por el mismo motivo que [contentFactor]; se multiplica con el alfa
     // del gesto de cierre en UN solo `graphicsLayer` para no apilar dos capas offscreen.
     // **Se declara con `animatedVisibilityScope != null` y NADA MÁS** (21 ago 2026). Antes la
-    // condición llevaba también `containerSharedKey != null` (y `sharedTransitionScope`, que la
-    // ruta anula justo cuando no hay key), y eso es un LAZO: `containerSharedKey` sale de `onScreen`,
+    // condición llevaba también la key del contenedor (y `sharedTransitionScope`, que la
+    // ruta anula justo cuando no hay key), y eso es un LAZO: esa key sale de `onScreen`,
     // que sale del `currentState` de esta misma `Transition`. Una animación cuya existencia depende
     // del estado de su propia transición puede impedir que ésta adopte nunca su destino, y entonces
     // la capa queda VARADA —colocada, así que se traga los toques, y con su hija en `PostExit`, así
@@ -496,7 +444,7 @@ fun NowPlayingScreen(
     // "se colgaba" respondiendo a hojas invisibles y "atrás" la cerraba. Ver la sección Motion de
     // CLAUDE.md. `animatedVisibilityScope` SÍ puede condicionar: es un parámetro, no estado animado.
     //
-    // Lo que sí depende de la key es si se APLICA, y eso se decide en el `graphicsLayer` por lectura
+    // Lo que sí depende del morph es si se APLICA, y eso se decide en el `graphicsLayer` por lectura
     // diferida ([morphInUse]), que es una decisión de dibujo y no cambia el árbol.
     val surfaceFactor: State<Float>? =
         animatedVisibilityScope?.transition?.animateFloat(
@@ -553,11 +501,9 @@ fun NowPlayingScreen(
         ) { if (it == EnterExitState.Visible) 1f else 0f }
 
     // Si hay CONTAINER TRANSFORM en marcha, o sea si estos dos factores mandan. Lectura diferida (ver
-    // [surfaceFactor]): la key puede aparecer y desaparecer con el estado de la capa, y eso no debe
+    // [surfaceFactor]): el morph puede empezar y terminar con el estado de la capa, y eso no debe
     // reconstruir modifiers ni recomponer la pantalla.
-    val morphInUse = rememberUpdatedState(
-        containerSharedKey != null && sharedTransitionScope != null && animatedVisibilityScope != null
-    )
+    val morphInUse = rememberUpdatedState(morphActive && animatedVisibilityScope != null)
 
     // ¿Hay una hoja a pantalla completa TAPANDO el reproductor ahora mismo? (Las de esta pantalla o
     // la del ecualizador, que llega por parámetro.) Mientras la hay, el reproductor no se ve, y eso
@@ -574,10 +520,10 @@ fun NowPlayingScreen(
     // La condición lleva además el morph: **mientras la capa del reproductor transiciona se coloca
     // igual, tapado o no**. Es un blindaje, no un caso que se dé hoy —con una hoja encima no hay
     // forma de colapsar el reproductor: el "atrás" lo intercepta la hoja y el resto de salidas quedan
-    // debajo de ella—, pero si alguna vez la hubiera, la punta del `sharedBounds` que envuelve a este
-    // mismo Box entraría en el morph sin haberse colocado nunca, y una punta sin bounds no empareja:
-    // el reproductor aparecería quieto en su sitio en vez de encoger (el "never got placed" del
-    // 30 jul). Que valga la pena por una línea es justo lo que lo hace un blindaje y no una defensa.
+    // debajo de ella—, y desde el 21 ago la punta del morph ya no cuelga de este gate (subió a la
+    // capa, ver el bloque CONTAINER TRANSFORM de arriba), así que ya no puede quedarse sin bounds por
+    // esta vía. Se conserva por lo otro que sigue siendo cierto: durante el morph esta pantalla es lo
+    // que se ve crecer o encoger, así que tiene que estar COLOCADA aunque algo la tape.
     val morphTransition = animatedVisibilityScope?.transition
     val placementGate = remember(coveredState, morphTransition) {
         Modifier.layout { measurable, constraints ->
@@ -602,7 +548,6 @@ fun NowPlayingScreen(
         modifier = modifier
             .fillMaxSize()
             .then(placementGate)
-            .then(containerSharedModifier)
             // Se traslada y atenúa TODO el reproductor —fondo incluido— con el dedo. Mover solo
             // el contenido dejaría el degradado quieto detrás y se vería el hueco por abajo.
             .graphicsLayer {

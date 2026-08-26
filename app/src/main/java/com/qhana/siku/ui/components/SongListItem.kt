@@ -38,19 +38,47 @@ import com.qhana.siku.ui.theme.AppContainerBoundsTransform
 private const val ROW_ACTION_GLYPH_MIN_CONTRAST = 4.5f
 
 /**
- * Fondo EFECTIVO de una fila de canción: `primaryContainer` (contenedor de acento SÓLIDO, sin
- * opacidad) cuando la fila SUENA, el contenedor base en las demás. Es el color que hay REALMENTE
- * debajo del contenido de la fila, y por tanto contra el que se miden las superficies que se apoyan
- * encima ([rememberRowActionColors]).
+ * Separación tonal (HCT) del resaltado de la fila que suena respecto al fondo de las demás filas.
  *
- * El resaltado del ítem activo es el MISMO en toda la app —biblioteca, detalles y cola—:
- * `primaryContainer` con contenido en `onPrimaryContainer`. Antes cada superficie lo resolvía
- * distinto (esta con `secondary` al 12%, la lista y la cola con un blend del acento del álbum), y el
- * blend quedaba casi invisible en un álbum monocromo. La jerarquía va por ROL, no por opacidad.
+ * **Es SUYA y no la de [TONAL_LAYER_DELTA]**, aunque hoy valgan lo mismo: aquél es el escalón de una
+ * capa pequeña apoyada sobre algo (la píldora del ⋮, el chip de origen) y calibrar el resaltado no
+ * debe moverlas. Los dos trabajos son distintos: la píldora solo tiene que leerse como control de
+ * ESTA fila —el ojo ya está encima—, mientras que la fila activa hay que ENCONTRARLA de un vistazo
+ * scrolleando una lista de miles.
+ *
+ * Arranca en 8 porque es lo que M3 usa para su propia selección de lista (`secondaryContainer` T90
+ * sobre `surface` T98) y porque el escalón anterior —el rol `primaryContainer` a pelo— resultó ser
+ * de ~35 puntos, o sea un bloque tan pesado como el MiniPlayer. Subirlo aquí es la palanca si en
+ * device se queda corto, y ya no arrastra a nadie más.
+ */
+private const val ROW_ACTIVE_TONE_DELTA = 8.0
+
+/**
+ * Fondo EFECTIVO de una fila de canción: el contenedor base en las normales y, en la que SUENA, un
+ * ESCALÓN de superficie teñido con el acento del álbum. Es el color que hay REALMENTE debajo del
+ * contenido de la fila, y por tanto contra el que se miden las superficies que se apoyan encima
+ * ([rememberRowActionColors]) y el propio contenido ([rememberActiveRowContentColor]).
+ *
+ * El resaltado es el MISMO en toda la app —biblioteca, detalles y cola—. Antes cada superficie lo
+ * resolvía distinto (esta con `secondary` al 12%, la lista y la cola con un blend del acento), y el
+ * blend quedaba casi invisible en un álbum monocromo; unificarlo en `primaryContainer` arregló eso
+ * pero dejó el TAMAÑO del salto en manos de la paleta: ese rol no es un nivel de superficie, así que
+ * con el spec 2025 y un estilo vívido cae a tono medio y la fila se leía como un bloque tan pesado
+ * como el MiniPlayer —contra el resto de la lista, que desde la horquilla de superficies vive en
+ * `surface`—. Ahora se deriva con [tonalLayerContainer] del fondo REAL de la fila: mismo hue y mismo
+ * croma que `primaryContainer`, pero el tono a [ROW_ACTIVE_TONE_DELTA] del fondo. El resaltado pasa
+ * a ser exactamente lo que es —"esta fila está un nivel por encima"—, se ve por COLOR y no por peso,
+ * y la separación sale idéntica en cualquier estilo de paleta y en los dos temas.
  */
 @Composable
-fun songRowBackground(base: Color, isPlaying: Boolean): Color =
-    if (isPlaying) AppColors.primaryContainer else base
+fun songRowBackground(base: Color, isPlaying: Boolean): Color {
+    val role = AppColors.primaryContainer
+    // Envuelto aquí porque [tonalLayerContainer] hace conversiones HCT y esto se llama por FILA en
+    // cada recomposición del scroll; con `isPlaying` en la clave, las filas normales ni la ejecutan.
+    return remember(base, isPlaying, role) {
+        if (isPlaying) tonalLayerContainer(base, role, ROW_ACTIVE_TONE_DELTA) else base
+    }
+}
 
 /**
  * Contraste mínimo del contenido de la fila ACTIVA sobre su relleno de acento. 4.5:1 = AA de TEXTO,
@@ -107,6 +135,29 @@ typealias RowActionColors = TonalLayerColors
 fun rememberRowActionColors(rowBackground: Color): RowActionColors =
     rememberTonalLayerColors(rowBackground, minContrast = ROW_ACTION_GLYPH_MIN_CONTRAST)
 
+
+/**
+ * Color de un ACENTO puesto sobre una fila (hoy: el corazón de Favoritos), derivado del fondo REAL
+ * de esa fila y no del rol a pelo.
+ *
+ * `primary` a secas funciona mientras la fila esté en `surface` —claro sobre oscuro— y se
+ * desvanece justo donde más se mira: la fila que SUENA se rellena de `primaryContainer`, o sea del
+ * mismo matiz y casi el mismo tono, y el corazón se perdía dentro (visto en device el 22 ago 2026,
+ * con el título y el ⋮ de esa misma fila ya adaptados y él no). Es el mismo principio que sostiene
+ * [rememberActiveRowContentColor] y [rememberRowActionColors]: en una fila que cambia de fondo,
+ * ningún contenido puede fijar su color por rol.
+ *
+ * Umbral de TEXTO (4.5:1) y no el 3:1 que le tocaría a un icono: es la acción principal de la fila
+ * y tiene que leerse tan bien como su título. Conserva el matiz del acento y es no-op cuando el par
+ * ya cumple, así que en las filas normales no cambia nada.
+ */
+@Composable
+fun rememberRowAccentColor(rowBackground: Color): Color {
+    val primary = AppColors.primary
+    return remember(primary, rowBackground) {
+        ensureContrast(primary, rowBackground, ACTIVE_ROW_CONTENT_MIN_CONTRAST)
+    }
+}
 // ============== SONG STATUS ICON ==============
 
 /**
@@ -401,16 +452,21 @@ fun SongItem(
     // el container es transparente salvo el activo.
     //
     // Resaltado del ítem en reproducción, UNIFICADO en toda la app (biblioteca, detalles, cola):
-    // contenedor `primaryContainer` con contenido en `onPrimaryContainer`, sólido y sin opacidad.
+    // el escalón de superficie teñido de [songRowBackground], con el contenido derivado de él.
     // Dos rutas para el mismo resultado:
     //  · `showActiveBackground = true` (detalles): lo pinta ESTE `ListItem` y deriva su `on-` solo.
     //  · `showActiveBackground = false` + `activeContentColor` (lista, cola): el contenedor EXTERNO
     //    rellena la fila y le pasa el color de contenido; aquí solo se aplica al texto/icono.
     val paintsOwnActive = isPlaying && showActiveBackground
+    // El relleno sale del MISMO [songRowBackground] que usa el contenedor externo, con la misma base
+    // (`surface`: el color del `AppSurface` que envuelve la fila en los cuatro detalles). Aquí estaba
+    // escrito el rol a pelo, o sea una segunda definición del resaltado — invisible mientras fue un
+    // rol fijo, y una fila y una píldora derivadas de bases distintas en cuanto pasó a derivarse.
+    val ownActiveBackground = songRowBackground(AppColors.surface, paintsOwnActive)
     // Mismo contraste garantizado que cuando el relleno lo pinta un contenedor externo: el color de
     // la fila activa sale de una sola definición, la pinte quien la pinte.
     val ownActiveContent = rememberActiveRowContentColor(
-        rowBackground = AppColors.primaryContainer,
+        rowBackground = ownActiveBackground,
         isPlaying = paintsOwnActive
     )
     val effectiveActiveContent = when {
@@ -419,7 +475,7 @@ fun SongItem(
     }
     val useActiveContent = isPlaying && effectiveActiveContent.isSpecified
     val listColors = ListItemDefaults.colors(
-        containerColor = if (paintsOwnActive) AppColors.primaryContainer else Color.Transparent,
+        containerColor = if (paintsOwnActive) ownActiveBackground else Color.Transparent,
         headlineColor = if (useActiveContent) effectiveActiveContent else AppColors.onSurface,
         supportingColor = if (useActiveContent) effectiveActiveContent else AppColors.onSurfaceVariant
     )

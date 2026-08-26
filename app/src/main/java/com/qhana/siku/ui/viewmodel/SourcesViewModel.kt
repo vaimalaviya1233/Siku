@@ -5,14 +5,17 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.qhana.siku.R
 import com.qhana.siku.data.preferences.MusicPreferences
+import com.qhana.siku.data.source.DeviceAudioFolder
 import com.qhana.siku.data.source.LocalMusicSource
 import com.qhana.siku.data.source.MusicSourceRegistry
 import com.qhana.siku.data.util.SnackbarManager
 import com.qhana.siku.worker.DownloadScheduler
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -202,6 +205,59 @@ class SourcesViewModel @Inject constructor(
                 else -> snackbarManager.show(context.getString(R.string.local_device_scan_disabled))
             }
         }
+    }
+
+    // --- Carpetas excluidas del escaneo del dispositivo ---------------------------------------
+
+    /**
+     * Carpetas excluidas, como rutas relativas al volumen (ver
+     * [MusicPreferences.loadExcludedDeviceFolders]). Del DataStore y no de un estado local, por el
+     * mismo motivo que [localFolderUris].
+     */
+    val excludedDeviceFolders: StateFlow<Set<String>> = musicPreferences.excludedDeviceFoldersFlow
+        .stateIn(viewModelScope, SharingStarted.Eagerly, localMusicSource.excludedDeviceFolders())
+
+    /** Carpetas con música que ve el sistema. `null` mientras se consultan (la lista tarda). */
+    private val _deviceAudioFolders = MutableStateFlow<List<DeviceAudioFolder>?>(null)
+    val deviceAudioFolders: StateFlow<List<DeviceAudioFolder>?> = _deviceAudioFolders.asStateFlow()
+
+    /**
+     * ¿Hay exclusiones cambiadas sin reescanear? El re-escaneo NO se lanza por cada toque: marcar
+     * cinco carpetas encadenaría cinco escaneos completos de los que solo el último dice la verdad.
+     * Se acumula y se aplica al salir de la pantalla (ver [flushExcludedFolderChanges]), que es la
+     * señal de "terminé de configurar" — esperar por señal y no por intervalo (convención 13).
+     */
+    private var excludedFoldersDirty = false
+
+    /** Relee las carpetas del dispositivo. La pantalla la llama al abrirse. */
+    fun refreshDeviceAudioFolders() {
+        viewModelScope.launch {
+            _deviceAudioFolders.value = localMusicSource.deviceAudioFolders()
+        }
+    }
+
+    /** Marca o desmarca una carpeta. Se guarda en el acto; el re-escaneo espera a salir. */
+    fun setDeviceFolderExcluded(path: String, excluded: Boolean) {
+        val current = musicPreferences.loadExcludedDeviceFolders()
+        val updated = if (excluded) current + path else current - path
+        if (updated == current) return
+        musicPreferences.saveExcludedDeviceFolders(updated)
+        excludedFoldersDirty = true
+    }
+
+    /**
+     * Aplica los cambios de exclusiones re-escaneando. Sin cambios no hace nada.
+     *
+     * `force = false` basta: el discover local no es incremental (siempre lista todo) y su
+     * reconciliación corre igual, así que las canciones de una carpeta recién excluida se retiran
+     * en esta misma pasada. Con `force = true` se limpiaría además el delta token de OneDrive, que
+     * no tiene nada que ver con esto y costaría un escaneo completo de la nube.
+     */
+    fun flushExcludedFolderChanges() {
+        if (!excludedFoldersDirty) return
+        excludedFoldersDirty = false
+        downloadScheduler.scheduleScan(force = false, requiresNetwork = false)
+        snackbarManager.show(context.getString(R.string.excluded_folders_applied))
     }
 
     /**

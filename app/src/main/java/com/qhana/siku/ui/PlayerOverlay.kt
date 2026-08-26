@@ -8,6 +8,8 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.EnterExitState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.ExperimentalTransitionApi
 import androidx.compose.animation.core.Transition
 import androidx.compose.animation.core.createChildTransition
@@ -21,8 +23,15 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -36,8 +45,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.qhana.siku.R
@@ -49,13 +61,20 @@ import com.qhana.siku.ui.components.CallerManagedVisibilityScope
 import com.qhana.siku.ui.components.ComponentConfig
 import com.qhana.siku.ui.components.MiniPlayer
 import com.qhana.siku.ui.components.SaveLyricsDialog
-import com.qhana.siku.ui.components.miniPlayerExpandDrag
+import com.qhana.siku.ui.components.PlayerGestureConfig
+import com.qhana.siku.ui.components.miniPlayerVerticalDrag
+import com.qhana.siku.ui.components.rememberPlayerDismissState
 import com.qhana.siku.ui.navigation.Screen
 import com.qhana.siku.ui.theme.appFadeEnter
 import com.qhana.siku.ui.theme.appFadeExit
 import com.qhana.siku.ui.theme.appTextButtonColors
+import android.content.res.Configuration
+import com.qhana.siku.ui.screens.LibraryBottomBarPillLift
+import com.qhana.siku.ui.screens.LibraryRailWidth
+import com.qhana.siku.ui.theme.appSpatialSpec
 import com.qhana.siku.ui.viewmodel.LibraryViewModel
 import com.qhana.siku.ui.viewmodel.PlaybackViewModel
+import kotlin.math.roundToInt
 
 /**
  * Capa flotante sobre el NavHost: el **`AnimatedContent` píldora ↔ reproductor** más las
@@ -128,6 +147,7 @@ fun BoxScope.PlayerOverlay(
     val nowPlayingUiState by playbackViewModel.nowPlayingUiState.collectAsStateWithLifecycle()
     val playerGestures by playbackViewModel.playerGestures.collectAsStateWithLifecycle()
     val miniPlayerRoundedRect by playbackViewModel.miniPlayerRoundedRect.collectAsStateWithLifecycle()
+    val miniPlayerRoundPlayButton by playbackViewModel.miniPlayerRoundPlayButton.collectAsStateWithLifecycle()
     val lyricsSaveState by playbackViewModel.lyricsSaveState.collectAsStateWithLifecycle()
     // Vista de UN campo, no el `uiState` entero: esta capa es persistente y con la raíz recomponía
     // en cada tecla de la búsqueda de la biblioteca. Ver el bloque de vistas en `LibraryViewModel`.
@@ -139,6 +159,46 @@ fun BoxScope.PlayerOverlay(
     val onFavoritesRoute = currentRoute == Screen.Favorites.route
     // Rutas de lista donde aplica la hoja de "añadir canciones" (botón en el detalle).
     val onAddSongsRoute = onPlaylistDetailRoute || onFavoritesRoute
+
+    // --- CROMO DE LA BIBLIOTECA: la píldora se aparta de la barra de pestañas o del rail ---
+    //
+    // La condición NO se calcula aquí: sale de `libraryChrome`, la misma función que consume
+    // `LibraryScreen` para decidir qué dibuja. Dos copias serían dos verdades, y con la píldora
+    // en una capa hermana del NavHost el desacuerdo se vería (flotando sobre la barra, o debajo).
+    val libraryBottomTabs by playbackViewModel.libraryBottomTabs.collectAsStateWithLifecycle()
+    val chrome = libraryChrome(
+        route = currentRoute,
+        bottomTabs = libraryBottomTabs,
+        landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    )
+    val chromeRailInset = if (chrome == LibraryChrome.Rail) LibraryRailWidth else 0.dp
+    val chromeLiftTarget = if (chrome == LibraryChrome.BottomBar) LibraryBottomBarPillLift else 0.dp
+    // `Animatable` y no `animateDpAsState` por el caso raro pero visible: si se abre el
+    // reproductor y desde ahí se navega a un detalle, el objetivo cambia con la píldora oculta y
+    // la animación correría a ciegas para verse ya empezada al volver. Con la píldora fuera de
+    // pantalla se salta al valor final.
+    val chromeLift = remember { Animatable(chromeLiftTarget, Dp.VectorConverter) }
+    val chromeLiftSpec = appSpatialSpec<Dp>()
+    val pillOnScreen = layerTransition.currentState == PlayerLayerState.Collapsed
+    LaunchedEffect(chromeLiftTarget, pillOnScreen) {
+        if (pillOnScreen) chromeLift.animateTo(chromeLiftTarget, chromeLiftSpec)
+        else chromeLift.snapTo(chromeLiftTarget)
+    }
+    // **`Modifier.layout`, NO `graphicsLayer { translationY }`.** La píldora es una punta de shared
+    // element (`PLAYER_CONTAINER_SHARED_KEY`) y sus bounds se calculan con las coordenadas de
+    // LOOKAHEAD, pasada en la que los layers de dibujo no se aplican: con `graphicsLayer` el morph
+    // arrancaría desde donde la píldora NO está y saltaría estos 56dp en el primer frame. Un
+    // `LayoutModifierNode` sí corre en las dos pasadas. El valor se lee DENTRO del bloque de
+    // colocación, así que cada frame invalida placement y nada más — ni recomposición ni medida.
+    val chromeShift = remember(chromeLift) {
+        Modifier.layout { measurable, constraints ->
+            val placeable = measurable.measure(constraints)
+            val density = this
+            layout(placeable.width, placeable.height) {
+                placeable.place(0, with(density) { -chromeLift.value.roundToPx() })
+            }
+        }
+    }
 
 
     // Si la ruta deja de ser un detalle de lista (back, navegación), la hoja muere con ella.
@@ -277,12 +337,47 @@ fun BoxScope.PlayerOverlay(
                     nowPlayingUiState.song?.takeIf { it.id == current.id } ?: current
                 }
                 if (song != null) {
+                    // Arrastrar la píldora hacia ABAJO detiene la reproducción (con deshacer, ver
+                    // `stopPlayback`). La distancia de salida es lo que le falta a la barra para
+                    // salir de la pantalla —su alto, más lo que flota sobre el borde— y no un
+                    // número: sin ese tramo la píldora se esfumaría a mitad del gesto, porque parar
+                    // anula `currentSong` y su rama se descompone en el acto.
+                    val miniDismiss = rememberPlayerDismissState(
+                        threshold = PlayerGestureConfig.MiniDismissThreshold,
+                        exitDistance = ComponentConfig.MiniPlayerHeight +
+                            ComponentConfig.FloatingBarBottomMargin +
+                            WindowInsets.systemBars.asPaddingValues().calculateBottomPadding()
+                    ) { playbackViewModel.stopPlayback() }
+                    // Traslación por LAYOUT y no por `graphicsLayer`, exactamente por lo mismo que
+                    // [chromeShift] unos bloques más arriba: la píldora es punta de shared element y
+                    // sus bounds salen de la pasada de LOOKAHEAD, donde los layers de dibujo no se
+                    // aplican. Así, arrastrarla hacia abajo y abrir el reproductor desde ahí arranca
+                    // el morph DONDE SE VE la barra, y no donde estaría en reposo. El valor se lee
+                    // dentro del bloque de colocación: cada frame del arrastre invalida placement y
+                    // nada más.
+                    val miniDismissShift = remember(miniDismiss) {
+                        Modifier.layout { measurable, constraints ->
+                            val placeable = measurable.measure(constraints)
+                            layout(placeable.width, placeable.height) {
+                                placeable.place(0, miniDismiss.offsetY.roundToInt())
+                            }
+                        }
+                    }
                     Column(
                         horizontalAlignment = Alignment.End,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .fillMaxWidth()
-                            .navigationBarsPadding()
+                            // Barras del sistema Y perforación: en horizontal las dos caen en un
+                            // COSTADO, que es justo por donde la píldora llega al borde. Sin esto
+                            // el mini se metía bajo el notch al girar el teléfono.
+                            .windowInsetsPadding(
+                                WindowInsets.systemBars
+                                    .union(WindowInsets.displayCutout)
+                                    .only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom)
+                            )
+                            .padding(start = chromeRailInset)
+                            .then(chromeShift)
                             .padding(top = 10.dp, bottom = ComponentConfig.FloatingBarBottomMargin)
                     ) {
                         MiniPlayer(
@@ -290,6 +385,7 @@ fun BoxScope.PlayerOverlay(
                             isPlaying = playbackState == PlaybackState.PLAYING,
                             isBuffering = playbackState == PlaybackState.BUFFERING,
                             roundedRect = miniPlayerRoundedRect,
+                            roundPlayButton = miniPlayerRoundPlayButton,
                             onPlayPause = { playbackViewModel.playPause() },
                             onNextClick = { playbackViewModel.next() },
                             // La carátula ya está en pantalla y viaja al player (container transform).
@@ -306,8 +402,18 @@ fun BoxScope.PlayerOverlay(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = ComponentConfig.FloatingBarSideMargin)
-                                // Deslizar hacia arriba abre el reproductor (gesto inverso al de cerrar).
-                                .miniPlayerExpandDrag(playerGestures) {
+                                // La barra ENTERA sigue al dedo mientras baja —sombra incluida, por
+                                // eso el gesto va acá afuera y no dentro del mini— y se atenúa con
+                                // el mismo criterio que el reproductor al cerrarse. En reposo la
+                                // alpha es 1 exacta, así que esta capa no pide buffer offscreen.
+                                .then(miniDismissShift)
+                                .graphicsLayer {
+                                    alpha = 1f - (1f - PlayerGestureConfig.DismissMinAlpha) *
+                                        miniDismiss.progress
+                                }
+                                // Arriba abre el reproductor, abajo lo para (gestos inversos a los
+                                // del NowPlaying, en un solo detector: ver `miniPlayerVerticalDrag`).
+                                .miniPlayerVerticalDrag(playerGestures, miniDismiss) {
                                     appState.openPlayer(PlayerArtOrigin.PILL)
                                 }
                         )

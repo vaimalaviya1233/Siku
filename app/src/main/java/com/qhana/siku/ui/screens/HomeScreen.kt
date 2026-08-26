@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.lazy.LazyColumn
@@ -37,7 +36,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -50,10 +48,12 @@ import com.qhana.siku.R
 import com.qhana.siku.data.local.AlbumSummary
 import com.qhana.siku.data.model.Song
 import com.qhana.siku.ui.components.AdaptiveCollage
+import com.qhana.siku.ui.components.COLLAGE_MAX_TILES
 import com.qhana.siku.ui.components.SongRowContainer
 import com.qhana.siku.ui.components.entityImageSharedBounds
 import com.qhana.siku.ui.components.MaterialSymbol
 import com.qhana.siku.ui.components.onContainerColor
+import com.qhana.siku.ui.components.QuickActionChip
 import com.qhana.siku.ui.components.vividAccentColor
 import com.qhana.siku.ui.theme.AppColors
 import com.qhana.siku.ui.viewmodel.HomeArtistPick
@@ -114,6 +114,8 @@ fun HomeScreen(
     recentlyAdded: List<Song>,
     topAlbums: List<AlbumSummary>,
     recentContexts: List<PlaybackContext>,
+    /** Carátulas para el collage de la tarjeta de Favoritos (ver [ContextCarousel]). */
+    favoriteCovers: List<String>,
     // Carátulas del collage de los contextos de género, por nombre en minúsculas: un género no
     // tiene carátula propia (ver LibraryViewModel.recentGenreArts).
     genreArts: Map<String, List<String>>,
@@ -167,7 +169,7 @@ fun HomeScreen(
         (topAlbums.mapNotNull { it.albumArtUri } +
             recentlyAdded.mapNotNull { it.albumArtUri?.toString() })
             .distinct()
-            .take(4)
+            .take(COLLAGE_MAX_TILES)
     }
 
     LazyColumn(
@@ -205,6 +207,7 @@ fun HomeScreen(
                     title = stringResource(R.string.home_section_continue),
                     contexts = recentContexts,
                     collageCovers = collageCovers,
+                    favoriteCovers = favoriteCovers,
                     genreArts = genreArts,
                     onResumeContext = onResumeContext
                 )
@@ -368,59 +371,6 @@ private fun HomeQuickActions(
     }
 }
 
-/**
- * Tope de caracteres del label de un chip que fija Material. Las etiquetas FIJAS de esta fila lo
- * cumplen escritas; el que no puede garantizarlo es el chip de GÉNERO, cuyo texto es el tag crudo
- * del archivo ("Progressive Metal/Fusion") y no lo elige nadie de este lado.
- */
-private const val CHIP_LABEL_MAX_CHARS = 20
-
-/**
- * Ancho medio de un glifo en fracción del tamaño de fuente. Aproximación (la Google Sans Flex no
- * es monoespaciada), suficiente porque lo que se busca es el punto donde CORTAR, no medir el texto.
- */
-private const val CHIP_LABEL_AVG_CHAR_EM = 0.5f
-
-/** Chip de una acción rápida: `AssistChip` real de M3 con relleno tonal y sin borde. */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun QuickActionChip(
-    icon: String,
-    label: String,
-    enabled: Boolean = true,
-    fill: Boolean = false,
-    onClick: () -> Unit
-) {
-    // El tope se calcula en ANCHO y a partir del tamaño de fuente VIVO, no como un dp fijo: así
-    // sube con la escala tipográfica del sistema y el chip sigue mostrando los mismos ~20
-    // caracteres en vez de recortar antes. Recortar el String sería peor —el corte debe caer donde
-    // la fuente diga, y la elipsis es cosa del layout.
-    val maxLabelWidth = with(LocalDensity.current) {
-        (MaterialTheme.typography.labelLarge.fontSize * CHIP_LABEL_MAX_CHARS * CHIP_LABEL_AVG_CHAR_EM).toDp()
-    }
-    androidx.compose.material3.AssistChip(
-        onClick = onClick,
-        enabled = enabled,
-        label = {
-            Text(
-                label,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.widthIn(max = maxLabelWidth)
-            )
-        },
-        // Sin color explícito: el icono hereda el leadingIconContentColor del chip (y se
-        // atenúa solo cuando está deshabilitado).
-        leadingIcon = { MaterialSymbol(icon, size = 18.sp, fill = fill) },
-        colors = androidx.compose.material3.AssistChipDefaults.assistChipColors(
-            containerColor = AppColors.secondaryContainer,
-            labelColor = AppColors.onSecondaryContainer,
-            leadingIconContentColor = AppColors.onSecondaryContainer
-        ),
-        border = null
-    )
-}
-
 @Composable
 private fun SectionHeader(title: String) {
     Text(
@@ -516,6 +466,7 @@ private fun ContextCarousel(
     title: String,
     contexts: List<PlaybackContext>,
     collageCovers: List<String>,
+    favoriteCovers: List<String>,
     genreArts: Map<String, List<String>>,
     onResumeContext: (PlaybackContext) -> Unit
 ) {
@@ -541,6 +492,10 @@ private fun ContextCarousel(
             val collage = when {
                 ctx is PlaybackContext.LibraryShuffle || ctx is PlaybackContext.LibraryAll -> collageCovers
                 ctx is PlaybackContext.Genre -> genreArts[ctx.name.lowercase()]
+                // Favoritos era el ÚNICO contexto que se quedaba en el glifo de relleno sobre gris,
+                // porque no tiene carátula propia y no entraba en ninguna de las dos ramas de
+                // arriba: en un carrusel de portadas, la tarjeta se leía como un hueco.
+                ctx is PlaybackContext.Favorites -> favoriteCovers
                 else -> null
             }
             HomeCarouselCard(
@@ -550,6 +505,12 @@ private fun ContextCarousel(
                 badgeIcon = ctx.typeIcon(),
                 placeholderIcon = ctx.typeIcon(),
                 collage = collage,
+                // Solo Favoritos: con el collage puesto, su tarjeta sería indistinguible de la de
+                // una lista cualquiera, y el corazón es el símbolo que ya la identifica en toda la
+                // app (la píldora del reproductor, el chip de acciones, la fila de Listas). Los
+                // otros dos contextos con collage se nombran solos —"Aleatorio", "Toda la
+                // biblioteca"— y no arrastran un símbolo propio que reponer.
+                emblemIcon = "favorite".takeIf { ctx is PlaybackContext.Favorites },
                 onClick = { onResumeContext(ctx) },
                 labelAlpha = labelAlpha(),
                 modifier = Modifier.maskClip(HomeCardShape)
@@ -725,6 +686,16 @@ private fun CarouselItemScope.labelAlpha(): () -> Float = {
 }
 
 /**
+ * Velo bajo el emblema. Suficiente para que un glifo blanco se lea sobre una portada clara, y no
+ * tanto como para que el collage deje de reconocerse: la tarjeta tiene que seguir enseñando de qué
+ * está hecha la lista.
+ */
+private const val EmblemScrimAlpha = 0.45f
+
+/** El emblema es la marca de la tarjeta, así que va por encima del glifo de relleno (44sp). */
+private val EmblemGlyphSize = 52.sp
+
+/**
  * Tarjeta de carrusel del inicio: carátula a sangre con degradado inferior y etiqueta superpuesta.
  * [modifier] llega con el recorte del carrusel ([maskClip]); [artModifier] es para el shared element
  * de la carátula (álbumes). Opcionalmente pinta un [badgeIcon] (esquina sup-der, distintivo de tipo)
@@ -744,6 +715,12 @@ private fun HomeCarouselCard(
     // Collage de carátulas (contextos sin carátula propia: aleatorio / toda la biblioteca).
     // Con al menos una URI reemplaza a [art]/[placeholderIcon]; se adapta a cuántas haya.
     collage: List<String>? = null,
+    /**
+     * Glifo de identidad sobre la imagen, para una tarjeta cuya portada NO dice de qué es. Se pinta
+     * relleno y sobre un velo, y solo cuando hay algo debajo: con el placeholder ya se está
+     * dibujando ese mismo símbolo en grande, y encimarle otro sería el mismo icono dos veces.
+     */
+    emblemIcon: String? = null,
     // Alfa de la etiqueta (título/subtítulo + degradado). Se lee en fase de dibujo para que en el
     // multi-browse solo el ítem GRANDE (el foco) muestre su label y los que asoman lo oculten.
     labelAlpha: () -> Float = { 1f }
@@ -782,6 +759,23 @@ private fun HomeCarouselCard(
                 Box(modifier = artModifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     MaterialSymbol(placeholderIcon, size = 44.sp, color = AppColors.onSurfaceVariant)
                 }
+            }
+        }
+
+        // Emblema: velo + glifo RELLENO. El velo no es decoración — un corazón blanco sobre un
+        // collage de portadas claras desaparece, y es el mismo motivo por el que existe el
+        // degradado de la etiqueta de abajo. Va con el alfa del label para que en el multi-browse
+        // los ítems que solo asoman enseñen su portada limpia, igual que hacen con el título.
+        val emblem = emblemIcon
+        if (emblem != null && !collage.isNullOrEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { alpha = labelAlpha() }
+                    .background(Color.Black.copy(alpha = EmblemScrimAlpha)),
+                contentAlignment = Alignment.Center
+            ) {
+                MaterialSymbol(emblem, fill = true, size = EmblemGlyphSize, color = Color.White)
             }
         }
 

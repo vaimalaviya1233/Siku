@@ -416,6 +416,28 @@ class MusicPreferences(context: Context) {
     }
 
     /**
+     * Carpetas EXCLUIDAS del escaneo del dispositivo, como rutas relativas al volumen y
+     * normalizadas igual que el id de una canción local, pero sin el prefijo `local:` y sin barra
+     * final (`primary/whatsapp/media/whatsapp audio`).
+     *
+     * Solo aplica al modo dispositivo: en el modo carpetas la inclusión ya es explícita, así que
+     * una lista de exclusiones sería un segundo mecanismo para lo mismo.
+     *
+     * La exclusión es RECURSIVA (una carpeta se lleva sus subcarpetas), que es lo que se espera al
+     * excluir `Android/media`: lo que molesta no es esa carpeta sino todo lo que cuelga de ella.
+     */
+    fun loadExcludedDeviceFolders(): Set<String> = cache[KEY_LOCAL_EXCLUDED_FOLDERS] ?: emptySet()
+
+    /** Reactivo, por el mismo motivo que [localFolderUrisFlow]: se edita desde su propia pantalla. */
+    val excludedDeviceFoldersFlow: Flow<Set<String>> =
+        prefFlow { it[KEY_LOCAL_EXCLUDED_FOLDERS] ?: emptySet() }
+
+    /** Fija el conjunto completo (marcar y desmarcar son operaciones de la capa de arriba). */
+    fun saveExcludedDeviceFolders(folders: Set<String>) = update {
+        it[KEY_LOCAL_EXCLUDED_FOLDERS] = folders
+    }
+
+    /**
      * Borra la sesión de REPRODUCCIÓN (cola, índice, posición, aleatorio).
      *
      * NO toca el delta token, aunque lo hizo hasta la auditoría del 30 jul 2026: ese token es
@@ -1081,6 +1103,46 @@ class MusicPreferences(context: Context) {
         prefFlow { it[KEY_MINI_PLAYER_ROUNDED_RECT] ?: false }
 
     /**
+     * Forma del botón de play del MiniPlayer: `true` = círculo, `false` = squircle (el default).
+     * Son las DOS formas que M3 tabula para un botón de icono (`ContainerShapeRound` /
+     * `ContainerShapeSquare`), así que el ajuste elige entre dos valores del spec y no entre dos
+     * geometrías inventadas. El radio concreto del squircle lo fija `MiniPlayer`.
+     *
+     * Reactivo por el mismo motivo que [miniPlayerRoundedRectFlow]: lo escribe Ajustes
+     * (`LibraryViewModel`) y lo lee la capa del reproductor (`PlaybackViewModel`).
+     */
+    fun saveMiniPlayerRoundPlayButton(enabled: Boolean) = update {
+        it[KEY_MINI_PLAYER_ROUND_PLAY] = enabled
+    }
+
+    fun loadMiniPlayerRoundPlayButton(): Boolean =
+        cache[KEY_MINI_PLAYER_ROUND_PLAY] ?: DEFAULT_MINI_PLAYER_ROUND_PLAY
+
+    val miniPlayerRoundPlayButtonFlow: Flow<Boolean> =
+        prefFlow { it[KEY_MINI_PLAYER_ROUND_PLAY] ?: DEFAULT_MINI_PLAYER_ROUND_PLAY }
+
+    /**
+     * Pestañas de la biblioteca ABAJO, en una navigation bar, en vez de en la fila bajo la
+     * búsqueda. Default `false`: el modo de siempre no le cambia a nadie que ya tenga la app.
+     *
+     * Solo gobierna la orientación VERTICAL. Girado hay rail SIEMPRE, con esto encendido o no —
+     * ver `libraryChrome` en `MusicAppState`.
+     *
+     * Reactivo por el mismo motivo que [miniPlayerRoundedRectFlow]: lo escribe Ajustes
+     * (`LibraryViewModel`) y lo lee también la capa del reproductor (`PlaybackViewModel`), para
+     * saber cuánto tiene que apartarse la píldora. Son instancias distintas.
+     */
+    fun saveLibraryBottomTabs(enabled: Boolean) = update {
+        it[KEY_LIBRARY_BOTTOM_TABS] = enabled
+    }
+
+    fun loadLibraryBottomTabs(): Boolean =
+        cache[KEY_LIBRARY_BOTTOM_TABS] ?: DEFAULT_LIBRARY_BOTTOM_TABS
+
+    val libraryBottomTabsFlow: Flow<Boolean> =
+        prefFlow { it[KEY_LIBRARY_BOTTOM_TABS] ?: DEFAULT_LIBRARY_BOTTOM_TABS }
+
+    /**
      * Chip de formato del NowPlaying EXTENDIDO (`FLAC · 16 bit · 44.1 kHz`) en vez de solo el
      * contenedor. Se escribe desde dos sitios —el switch de Ajustes → Apariencia y el tap sobre
      * el propio chip—, de ahí que sea reactivo: son instancias de ViewModel distintas.
@@ -1262,6 +1324,18 @@ class MusicPreferences(context: Context) {
          */
         const val DEFAULT_PROGRESS_HANDLE = true
         private val KEY_MINI_PLAYER_ROUNDED_RECT = booleanPreferencesKey("mini_player_rounded_rect")
+        private val KEY_MINI_PLAYER_ROUND_PLAY = booleanPreferencesKey("mini_player_round_play")
+
+        /**
+         * El play del mini nace SQUIRCLE: es lo que separa por forma la acción principal del
+         * "siguiente", que es redondo — con los dos redondos la jerarquía queda solo en la talla y
+         * el color.
+         */
+        private const val DEFAULT_MINI_PLAYER_ROUND_PLAY = false
+        private val KEY_LIBRARY_BOTTOM_TABS = booleanPreferencesKey("library_bottom_tabs")
+
+        /** Las pestañas siguen ARRIBA salvo que se pida lo contrario: es la app que ya está publicada. */
+        private const val DEFAULT_LIBRARY_BOTTOM_TABS = false
         private val KEY_PLAYER_GESTURES = booleanPreferencesKey("player_gestures")
 
         /** Los gestos vienen ENCENDIDOS: es el comportamiento que espera cualquiera. */
@@ -1291,6 +1365,7 @@ class MusicPreferences(context: Context) {
         /** Carpetas guardadas al activar el escaneo del dispositivo, para restaurarlas al apagarlo. */
         private val KEY_LOCAL_FOLDER_URIS_STASH = stringSetPreferencesKey("local_folder_uris_stash")
         private val KEY_SCAN_WHOLE_DEVICE = booleanPreferencesKey("scan_whole_device")
+        private val KEY_LOCAL_EXCLUDED_FOLDERS = stringSetPreferencesKey("local_excluded_folders")
         private val KEY_MANUAL_COLOR_IDS = stringSetPreferencesKey("manual_color_song_ids")
         private val KEY_ONEDRIVE_FOLDER = stringPreferencesKey("onedrive_folder_path")
         private val KEY_LYRICS_SAVE_MODE = stringPreferencesKey("lyrics_save_mode")

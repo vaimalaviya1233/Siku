@@ -39,6 +39,7 @@ import com.qhana.siku.ui.theme.AppColors
 import com.qhana.siku.ui.theme.AppSurface
 import com.qhana.siku.ui.theme.appButtonColors
 import com.qhana.siku.ui.theme.appFilledTonalIconButtonColors
+import com.qhana.siku.ui.theme.appTopAppBarColors
 import com.qhana.siku.ui.viewmodel.StorageUsage
 import com.qhana.siku.ui.viewmodel.SyncViewModel
 import java.text.SimpleDateFormat
@@ -83,13 +84,17 @@ fun DownloadManagerScreen(
         containerColor = AppColors.background,
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
-            // Sin subtitle: el progreso de la cola vive en la tarjeta de resumen (con su barra y
-            // el consumo frente al tope). Repetirlo en la barra era el mismo dato dos veces.
-            // La variante FLEXIBLE es la de M3 Expressive (la clásica `TopAppBar` es la anterior):
-            // aporta el slot `subtitle` —aquí sin usar, por lo de arriba— y la alineación
-            // configurable del título, y su alto sale de `TopAppBarDefaults` en vez de ser fijo.
-            MediumFlexibleTopAppBar(
+            // Barra de UNA fila. La `Medium` que había es de dos y su fila alta existe para dar
+            // aire a un título largo o a un subtítulo: aquí el título es una palabra y el subtitle
+            // está descartado a propósito (el progreso de la cola vive en la tarjeta de resumen,
+            // con su barra y el consumo frente al tope; repetirlo arriba era el mismo dato dos
+            // veces). Sin nada que poner en esa fila, solo comía alto en una pantalla que es una
+            // lista. Sigue siendo la de M3 Expressive —`SingleRowTopAppBar` por dentro, con el alto
+            // del token y no fijo—; lo que cambia es el número de filas.
+            TopAppBar(
                 title = { Text(stringResource(R.string.download_title)) },
+                // Ver `SettingsScaffold`: una app bar sin `colors` se los pide al tema BASE.
+                colors = appTopAppBarColors(),
                 navigationIcon = {
                     IconButton(onClick = onBackClick) {
                         MaterialSymbol("arrow_back")

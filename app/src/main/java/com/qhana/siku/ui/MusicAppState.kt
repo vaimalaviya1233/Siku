@@ -340,6 +340,15 @@ fun ProvideAppSharedTransitionScope(
  * Con el provider incondicional la estructura no se mueve: lo único que cambia es el VALOR del local,
  * que es justo lo que la nota de arriba prometía.
  *
+ * ## CUÁNDO cambia `visible` importa tanto como el valor
+ *
+ * Los lectores del local son las filas que declaran puntas, o sea decenas en pantalla, y al cruzar
+ * de pestaña cambian de estado DOS páginas. Si `visible` cambia a mitad del cruce, esa
+ * re-declaración cae dentro del `measureAndLayout` del frame que el pager ya estaba pagando: 29 ms
+ * de frame medidos el 24 ago 2026, 23,6 de ellos en la medida. Por eso el callsite de `LibraryScreen`
+ * lo deriva de **`settledPage`** y no de `currentPage` — el trabajo es el mismo, pero en un frame
+ * ocioso. Un gate nuevo sobre un pager se cablea igual.
+ *
  * @param visible si este subárbol es el que el usuario está viendo. Con `false` no declara nada.
  */
 @OptIn(ExperimentalSharedTransitionApi::class)
@@ -629,8 +638,8 @@ class MusicAppState(
      * o sea solo se funde) para no competir con la transición del NavHost por el overlay del
      * `SharedTransitionScope` —el bug de shared elements huérfanos que motivó el refactor del 11 ago—,
      * y anota a qué entrada del back stack volver para RE-ABRIR el player. Al regresar (back),
-     * [reopenPlayerIfReturningFrom] lo expande de nuevo: "atrás" del detalle devuelve al reproductor,
-     * no a la biblioteca (era el bug del 7 ago).
+     * [reopenPlayerIfReturningFrom] lo expande de nuevo CON EL MISMO fundido: "atrás" del detalle
+     * devuelve al reproductor, no a la biblioteca (era el bug del 7 ago).
      */
     private fun navigateFromPlayer(route: String) {
         reopenPlayerAtEntryId = navController.currentBackStackEntry?.id
@@ -644,12 +653,20 @@ class MusicAppState(
      * abierto. Lo llama el observador de ruta de [com.qhana.siku.ui.MusicPlayerScreen] en cada cambio
      * de destino. Se compara por **id** de entrada (no por ruta): un detalle de artista puede navegar
      * a otro detalle de artista —misma ruta— y el id sobrevive a la rotación.
+     *
+     * **Vuelve con [PlayerArtOrigin.NONE], o sea fundido y NO container transform**, que es la misma
+     * transición con la que se fue ([navigateFromPlayer]). Este viaje es de IDA Y VUELTA y no una
+     * apertura: el player no se cerró, se apartó para dejar ver un detalle suyo, así que volver es
+     * DESTAPARLO. Reabrir con `PILL` lo reconstruía desde una píldora que el usuario nunca tocó y
+     * ponía el morph a competir con el pop del `NavHost` por el overlay del `SharedTransitionScope`
+     * — exactamente lo que la ida ya evitaba haciéndose fundido. La asimetría venía de tratar el
+     * regreso como "abrir el reproductor" en vez de como el otro tramo del mismo viaje.
      */
     fun reopenPlayerIfReturningFrom(entry: NavBackStackEntry?) {
         val target = reopenPlayerAtEntryId ?: return
         if (entry?.id == target) {
             reopenPlayerAtEntryId = null
-            openPlayer(PlayerArtOrigin.PILL)   // reabre desde la píldora → container transform
+            openPlayer(PlayerArtOrigin.NONE)
         }
     }
 
@@ -698,6 +715,28 @@ fun isPillRoute(route: String?): Boolean = when (route) {
 }
 
 /**
+ * Chrome de navegación que añade la BIBLIOTECA, y que la capa del reproductor tiene que esquivar.
+ *
+ * Es una función PURA de (ruta, preferencia, orientación) por el mismo motivo que [isPillRoute]:
+ * si fuera un estado escrito por `LibraryScreen` y leído por `PlayerOverlay` habría DOS escritores
+ * del mismo valor (convención 14) y, peor, la píldora llegaría un frame tarde a cada navegación —
+ * justo el frame en el que se ve el salto.
+ *
+ * El rail va en horizontal SIEMPRE, con el modo de pestañas abajo encendido o no: girado, lo
+ * escaso es el alto y una fila más bajo la búsqueda nunca fue lo correcto. La barra inferior, en
+ * cambio, es opcional. Y ninguno de los dos existe fuera de la biblioteca: son vistas de ella, no
+ * destinos globales de la app, así que un detalle usa la pantalla entera.
+ */
+enum class LibraryChrome { None, BottomBar, Rail }
+
+fun libraryChrome(route: String?, bottomTabs: Boolean, landscape: Boolean): LibraryChrome = when {
+    route != Screen.Library.route -> LibraryChrome.None
+    landscape -> LibraryChrome.Rail
+    bottomTabs -> LibraryChrome.BottomBar
+    else -> LibraryChrome.None
+}
+
+/**
  * De qué superficie sale (o a cuál vuelve) el reproductor en el morph EN VUELO — o en el último, si
  * está asentado. Es lo que consumen las DOS puntas: las filas de lista (para saber cuál se oculta y
  * cede sus bounds) y la capa del player (para elegir con qué keys declara sus shared elements).
@@ -729,8 +768,9 @@ data class PlayerMorphOrigin(val kind: PlayerArtOrigin, val songId: String?) {
  *
  * ## Cuándo se toma la petición
  *
- * Solo con la transición PARADA (`!isRunning`), que incluye el frame en que ARRANCA (`updateTarget`
- * cambia `targetState` en la composición y `startTimeNanos` recién se fija en el frame siguiente):
+ * Con la transición PARADA (`!isRunning`), que incluye el frame en que ARRANCA (`updateTarget`
+ * cambia `targetState` en la composición y `startTimeNanos` recién se fija en el frame siguiente)
+ * **o con el origen vigente en `NONE`** (ver más abajo, "el congelado protege puntas, no frames"):
  *  - **Arrancando una apertura** → la petición de `MusicAppState` (origen + fila anotada en el tap).
  *    Es lo que hace que la fila oculta y la key del player sean la misma desde el primer frame, sin
  *    depender de en qué frame llegue la emisión de un colector.
@@ -751,6 +791,34 @@ data class PlayerMorphOrigin(val kind: PlayerArtOrigin, val songId: String?) {
  *    un morph espurio desde esa fila hasta la pantalla completa (esa fila recibiría el papel de origen,
  *    declararía su punta y Compose la emparejaría con la del player en el acto).
  *
+ * ## El congelado protege PUNTAS, no frames (21 ago 2026)
+ *
+ * `!isRunning` a secas protegía de más, y esa protección de más costaba el morph Y dejaba la capa
+ * VARADA. Lo que el gate evita es cambiar la IDENTIDAD de un shared element **con match activo**;
+ * cuando el origen vigente es `NONE` no hay ninguna punta declarada —ni la capa
+ * (`containerSharedKey == null`) ni ninguna fila (`rowOrigin` es null salvo con `ROW` o con una fila
+ * en preparación)—, así que no hay nada que varar y la petición se puede atender aunque la
+ * transición corra. Con `PILL` o `ROW` en vuelo el congelado sigue intacto, que es donde protege.
+ *
+ * El caso que lo obligó: **tocar una fila mientras la píldora está en una transición
+ * `Hidden↔Collapsed`** — sin cola (la primera canción de la sesión: `announceSelection` hace aparecer
+ * la píldora en el mismo frame del tap) o volviendo de Ajustes y tocando dentro del fundido de 500 ms.
+ * La petición `ROW` se descartaba, la apertura perdía el container transform… y al cerrar, con la
+ * transición ya parada, se volvía a leer `playerArtOrigin` —que seguía valiendo `ROW`— y el cierre
+ * ESTRENABA un morph cuyas dos puntas nacían en el frame que lo arranca, con el player haciendo de
+ * origen sin bounds previos para esa key. Resultado: el bounds no emparejaba, la capa no adoptaba
+ * nunca `Collapsed`, `PlayerOverlay` la seguía COLOCANDO —o sea tragándose los toques— y
+ * `surfaceFactor` la había dejado a alpha 0. Síntoma: "volví de la canción pero el reproductor sigue
+ * respondiendo, invisible".
+ *
+ * ## Un cierre no ESTRENA un morph que la apertura no tuvo
+ *
+ * De ahí la segunda regla, que es la que hace ese varado IMPOSIBLE aunque algo vuelva a fallar arriba:
+ * si el reproductor se abrió sin superficie, el cierre tampoco se la inventa. Las dos puntas nacen
+ * juntas o no nace ninguna. No toca ningún caso legítimo: un chip abre y cierra en `NONE` (ya era
+ * así), `navigateFromPlayer` sigue forzando el fundido, y una apertura desde fila sigue pudiendo
+ * aterrizar en otra fila o en la píldora si el usuario cambió de tema dentro del reproductor.
+ *
  * Contenedor plano y no `mutableStateOf`: se lee y se escribe en la misma composición, y ya recompone
  * por lo que lee (`isRunning`, `currentState`, `targetState` son estado de snapshot).
  */
@@ -761,10 +829,16 @@ fun rememberPlayerMorphOrigin(
     currentSongId: String?
 ): PlayerMorphOrigin {
     val holder = remember { MorphOriginHolder() }
-    if (!layerTransition.isRunning) {
+    // Sin superficie vigente no hay ninguna punta declarada, así que no hay identidad que proteger y
+    // la petición se atiende aunque la transición corra. Ver "el congelado protege PUNTAS" en el KDoc.
+    val noSurfaceInFlight = holder.value.kind == PlayerArtOrigin.NONE
+    if (!layerTransition.isRunning || noSurfaceInFlight) {
         val toExpanded = layerTransition.targetState == PlayerLayerState.Expanded
         val fromExpanded = layerTransition.currentState == PlayerLayerState.Expanded
         val requestedKind = appState.playerArtOrigin
+        // Con qué superficie está ABIERTO el reproductor ahora mismo: el holder conserva el origen de
+        // la apertura mientras dure. Es lo que consulta la rama de cierre para no estrenar un morph.
+        val openedWith = holder.value.kind
         holder.value = when {
             // Abriendo con lo que se pidió. **`NONE` se queda en `NONE` aunque la píldora esté en
             // pantalla** (decisión del usuario, 20 ago 2026): un chip del inicio no es la píldora, así
@@ -773,6 +847,12 @@ fun rememberPlayerMorphOrigin(
             // anima `NONE` es `detachedFactor` (NowPlayingScreen).
             toExpanded && !fromExpanded ->
                 PlayerMorphOrigin(requestedKind, appState.playerOriginSongId)
+            // Un cierre no ESTRENA un morph: si el reproductor se abrió sin superficie, la salida
+            // también es sin superficie. Va ANTES de todo lo demás de la rama de cierre porque no es
+            // un caso particular suyo sino su precondición — ver el KDoc. Sin esto, una petición que
+            // el congelado no pudo atender al abrir reaparece al cerrar y hace nacer las dos puntas
+            // en el frame que arranca el cierre, que es exactamente el varado que esto arregla.
+            fromExpanded && !toExpanded && openedWith == PlayerArtOrigin.NONE -> PlayerMorphOrigin.None
             fromExpanded && !toExpanded -> {
                 // Cerrando hacia una FILA, la fila tiene que estar EN PANTALLA: si el usuario cambió de
                 // tema dentro del reproductor y la fila del actual no está colocada, no hay punta que
@@ -794,6 +874,19 @@ fun rememberPlayerMorphOrigin(
         JankProbe.note {
             "morphOrigin → ${holder.value.kind}/${holder.value.songId?.takeLast(8)} " +
                 "(pedido=$requestedKind, ${layerTransition.currentState}→${layerTransition.targetState})"
+        }
+    } else if (JankProbe.isEnabled) {
+        // La DISCREPANCIA entre lo que se pidió y lo que está vigente es el dato con el que se
+        // reconoce este fallo, y hasta el 21 ago no aparecía en ningún log: la petición decía `ROW`,
+        // el origen congelado decía `NONE` y el síntoma (una capa varada) no parece de animación.
+        // Va detrás de `isEnabled` por la convención 9d y también para no suscribir esta función a
+        // `playerArtOrigin` con la sonda apagada.
+        val requested = appState.playerArtOrigin
+        if (requested != holder.value.kind) {
+            JankProbe.note {
+                "morphOrigin CONGELADO: petición=$requested vigente=${holder.value.kind} " +
+                    "(${layerTransition.currentState}→${layerTransition.targetState}) — el cierre NO estrenará morph"
+            }
         }
     }
     return holder.value

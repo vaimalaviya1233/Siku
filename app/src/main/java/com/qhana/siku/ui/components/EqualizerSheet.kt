@@ -353,7 +353,15 @@ fun EqualizerSheet(
                         modifier = Modifier.padding(end = TopBarActionEndInset)
                     )
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
+                // Contenedor transparente (la hoja pone el fondo) pero el CONTENIDO explícito: los
+                // roles que no se pasan salen del tema BASE, no de la carátula.
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = Color.Transparent,
+                    scrolledContainerColor = Color.Transparent,
+                    titleContentColor = AppColors.onSurface,
+                    navigationIconContentColor = AppColors.onSurface,
+                    actionIconContentColor = AppColors.onSurfaceVariant
+                )
             )
         }
     ) { innerPadding ->
@@ -1516,8 +1524,13 @@ private fun BoostSlider(
             onValueChangeFinished = onValueChangeFinished,
             valueRange = 0f..EqualizerAudioProcessor.MAX_BOOST_DB,
             enabled = enabled,
+            // El aviso solo repinta pulgar y pista ACTIVA: se parte de [appSliderColors] y se
+            // copian esos dos. Construir un `SliderDefaults.colors()` nuevo con solo ese par dejaba
+            // la pista inactiva y los ticks resolviéndose contra `MaterialTheme.colorScheme`
+            // (`SliderTokens.InactiveTrackColor` = `secondaryContainer`), que es el esquema BASE:
+            // la mitad apagada de la banda saltaba al color del wallpaper en cuanto saturaba.
             colors = if (warnColor != null) {
-                SliderDefaults.colors(
+                appSliderColors().copy(
                     thumbColor = warnColor,
                     activeTrackColor = warnColor
                 )

@@ -13,6 +13,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -26,6 +27,7 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
@@ -46,8 +48,10 @@ import com.qhana.siku.data.model.PlayerToolbarAction
 import com.qhana.siku.data.model.PlayerToolbarConfig
 import com.qhana.siku.data.model.ReplayGainMode
 import com.qhana.siku.data.model.ToolbarActionState
+import com.qhana.siku.data.source.DeviceAudioFolder
 import com.qhana.siku.ui.components.AppMenuPopup
 import com.qhana.siku.ui.components.DISABLED_CONTENT_ALPHA
+import com.qhana.siku.ui.components.groupedListItemShapes
 import com.qhana.siku.ui.components.ComponentConfig
 import com.qhana.siku.ui.components.ConnectedChoiceGroup
 import com.qhana.siku.ui.components.EqPresets
@@ -68,7 +72,9 @@ import com.qhana.siku.ui.theme.AppSurface
 import com.qhana.siku.ui.theme.appButtonColors
 import com.qhana.siku.ui.theme.appOutlinedButtonColors
 import com.qhana.siku.ui.theme.appRadioButtonColors
+import com.qhana.siku.ui.theme.appSegmentedListItemColors
 import com.qhana.siku.ui.theme.appSliderColors
+import com.qhana.siku.ui.theme.appTopAppBarColors
 import com.qhana.siku.ui.theme.appSwitchColors
 import com.qhana.siku.ui.theme.appTextButtonColors
 import com.qhana.siku.ui.viewmodel.BackupViewModel
@@ -137,7 +143,8 @@ private object SettingsTokens {
  * continuo — esquinas pronunciadas arriba del primero y abajo del último, pequeñas en los del
  * medio — separados por [SettingsTokens.GroupGap].
  *
- * El reparto de esquinas lo hace `ListItemDefaults.segmentedShapes`, o sea la librería, y lo que
+ * El reparto de esquinas lo hace `groupedListItemShapes` (la librería, con el caso de UNA fila
+ * corregido), y lo que
  * viaja a cada ítem es un `ListItemShapes` ENTERO y no un `Shape` suelto: ahí van también la forma
  * al presionar y la de seleccionado, que son las que dan el morph de las listas Expressive. Con un
  * único `Shape` no había dónde ponerlas y estas filas eran lo último de Ajustes que no acusaba el
@@ -149,8 +156,32 @@ private object SettingsTokens {
 @Composable
 private fun SettingsGroup(items: List<@Composable (ListItemShapes) -> Unit>) {
     items.forEachIndexed { index, item ->
-        item(ListItemDefaults.segmentedShapes(index = index, count = items.size))
+        item(groupedListItemShapes(index = index, count = items.size))
         if (index < items.lastIndex) Spacer(modifier = Modifier.height(SettingsTokens.GroupGap))
+    }
+}
+
+/**
+ * Título + descripción de una fila de Ajustes, EN EL MISMO SLOT `content`.
+ *
+ * Parece un detalle de composición y no lo es: mientras la descripción viajaba en
+ * `supportingContent`, `ListItem` clasificaba la fila como **three-line** en cuanto ese texto
+ * ocupaba dos líneas (`ListItemType`, con `isSupportingMultiline`), y en ese tipo el spec coloca
+ * leading y trailing en `topPadding` en vez de centrarlos (`ListItem.kt:1181` y `:1209`). El
+ * resultado era el chevron pegado a la altura del título, con media fila vacía debajo — y encima
+ * INCONSISTENTE, porque las filas cuya descripción sí cabía en una línea (Estilo de color) sí lo
+ * centraban. Con los dos textos en `content` la fila es one-line, el alto lo sigue dando el
+ * contenido, y M3 centra el icono y el chevron sin que haya que alinear nada a mano.
+ */
+@Composable
+private fun SettingsTileText(title: String, description: String) {
+    Column {
+        Text(text = title, style = MaterialTheme.typography.bodyLarge)
+        Text(
+            text = description,
+            style = MaterialTheme.typography.bodySmall,
+            color = AppColors.onSurfaceVariant
+        )
     }
 }
 
@@ -182,24 +213,16 @@ private fun SettingsSwitchTile(
         checked = checked,
         onCheckedChange = onCheckedChange,
         shapes = shapes,
-        colors = ListItemDefaults.segmentedColors(
-            // El token del componente es `surface`; estas listas se apilan SOBRE `surface`, así que
-            // la fila tiene que subir un escalón tonal o desaparece contra el fondo. Mismo criterio
-            // (y mismo valor) que `GroupedListRow`.
-            containerColor = AppColors.surfaceContainerHigh
-        ),
+        // El token del componente es `surface`; estas listas se apilan SOBRE `surface`, así que la
+        // fila tiene que subir un escalón tonal o desaparece contra el fondo. Mismo criterio (y mismo
+        // valor) que `GroupedListRow`. Por el helper y no por `segmentedColors` a pelo: los estados
+        // SELECCIONADO y ARRASTRADO también tienen que venir de la carátula.
+        colors = appSegmentedListItemColors(AppColors.surfaceContainerHigh),
         leadingContent = { MaterialSymbol(icon, size = 24.sp) },
-        supportingContent = {
-            Text(
-                text = description,
-                style = MaterialTheme.typography.bodySmall,
-                color = AppColors.onSurfaceVariant
-            )
-        },
         // Display-only: quien maneja el gesto es la fila. Con su propio `onCheckedChange` el tap se
         // atendería dos veces.
         trailingContent = { Switch(colors = appSwitchColors(), checked = checked, onCheckedChange = null) },
-        content = { Text(text = title, style = MaterialTheme.typography.bodyLarge) },
+        content = { SettingsTileText(title, description) },
         modifier = Modifier.fillMaxWidth()
     )
 }
@@ -310,10 +333,8 @@ fun SettingsScreen(
             // orgánica va en el slot leading, que es donde le corresponde.
             SegmentedListItem(
                 onClick = { onNavigate(category.route) },
-                shapes = ListItemDefaults.segmentedShapes(index = index, count = categories.size),
-                colors = ListItemDefaults.segmentedColors(
-                    containerColor = AppColors.surfaceContainerHigh
-                ),
+                shapes = groupedListItemShapes(index = index, count = categories.size),
+                colors = appSegmentedListItemColors(AppColors.surfaceContainerHigh),
                 leadingContent = {
                     val (badgeContainer, badgeContent) = rememberBadgeColors(category.seed)
                     AppSurface(
@@ -399,6 +420,7 @@ fun SettingsSourcesScreen(
     authLoading: Boolean,
     onConnectOneDrive: (android.app.Activity) -> Unit,
     onDisconnectOneDrive: () -> Unit,
+    onNavigate: (String) -> Unit,
     sourcesViewModel: SourcesViewModel
 ) {
     val context = LocalContext.current
@@ -445,6 +467,29 @@ fun SettingsSourcesScreen(
             // Sin carpetas a las que volver ni nube, apagarlo dejaría la biblioteca vacía.
             canDisable = canDisableDeviceScan
         )
+
+        // Solo con el escaneo del dispositivo activo: en modo carpetas la inclusión ya es
+        // explícita, así que una lista de exclusiones al lado no significaría nada.
+        if (scanWholeDevice) {
+            Spacer(modifier = Modifier.height(12.dp))
+            val excludedCount by sourcesViewModel.excludedDeviceFolders.collectAsStateWithLifecycle()
+            SettingsActionRow(
+                icon = "folder_off",
+                title = stringResource(R.string.settings_excluded_folders),
+                description = if (excludedCount.isEmpty()) {
+                    stringResource(R.string.settings_excluded_folders_desc)
+                } else {
+                    pluralStringResource(
+                        R.plurals.settings_excluded_folders_count,
+                        excludedCount.size,
+                        excludedCount.size
+                    )
+                },
+                enabled = true,
+                navigates = true,
+                onClick = { onNavigate(Screen.SettingsExcludedFolders.route) }
+            )
+        }
 
         // Explica por qué el botón "Desactivar" está en gris: no dejar al usuario sin biblioteca.
         if (scanWholeDevice && !canDisableDeviceScan) {
@@ -842,6 +887,141 @@ private fun PresetVisibilityRow(
 }
 
 /**
+ * Carpetas que el escaneo del dispositivo debe IGNORAR.
+ *
+ * Existe porque el modo dispositivo indexa todo lo que el sistema marca como música, y ahí caen
+ * cosas que nadie considera su biblioteca: audios de mensajería, grabaciones de voz, pistas de
+ * juegos. El filtro por flags de MediaStore (`IS_MUSIC` y compañía) no las distingue —los archivos
+ * fuera de `Music/` suelen tener todos esos flags sin rellenar—, así que la única forma honesta de
+ * separarlas es que lo diga quien las tiene.
+ *
+ * **La lista sale del ORIGEN (MediaStore) y no de la biblioteca ya indexada**: una carpeta excluida
+ * no deja ninguna canción en `songs`, así que leyéndola de ahí desaparecería de esta pantalla y no
+ * habría manera de volver a incluirla.
+ *
+ * Solo aplica al modo dispositivo. Con carpetas elegidas a mano la inclusión ya es explícita, y una
+ * lista de exclusiones al lado sería un segundo mecanismo para decir lo mismo.
+ */
+@Composable
+fun SettingsExcludedFoldersScreen(
+    onBackClick: () -> Unit,
+    sourcesViewModel: SourcesViewModel
+) {
+    val folders by sourcesViewModel.deviceAudioFolders.collectAsStateWithLifecycle()
+    val excluded by sourcesViewModel.excludedDeviceFolders.collectAsStateWithLifecycle()
+
+    // La lista se consulta al abrir: puede haber cambiado desde la última vez (música copiada,
+    // una carpeta nueva) y es una consulta puntual, no algo que merezca una suscripción viva.
+    LaunchedEffect(Unit) { sourcesViewModel.refreshDeviceAudioFolders() }
+
+    // El re-escaneo se aplica AL SALIR, no en cada toque: marcar cinco carpetas encadenaría cinco
+    // escaneos de los que solo el último dice la verdad.
+    DisposableEffect(Unit) {
+        onDispose { sourcesViewModel.flushExcludedFolderChanges() }
+    }
+
+    SettingsScaffold(
+        title = stringResource(R.string.settings_excluded_folders),
+        onBackClick = onBackClick
+    ) {
+        AppSurface(
+            shape = RoundedCornerShape(SettingsTokens.BlockCorner),
+            color = AppColors.surfaceContainerHigh
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = stringResource(R.string.settings_excluded_folders_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AppColors.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
+
+                val known = folders
+                when {
+                    known == null -> Text(
+                        text = stringResource(R.string.settings_excluded_folders_loading),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = AppColors.onSurfaceVariant
+                    )
+
+                    known.isEmpty() -> Text(
+                        text = stringResource(R.string.settings_excluded_folders_empty),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = AppColors.onSurfaceVariant
+                    )
+
+                    else -> known.forEach { folder ->
+                        ExcludedFolderRow(
+                            folder = folder,
+                            included = excluded.none { folder.path == it || folder.path.startsWith("$it/") },
+                            // Solo se puede conmutar la carpeta EXACTA que está en la lista: una
+                            // que quedó fuera porque su padre está excluido se muestra apagada y
+                            // bloqueada, porque encenderla no haría nada mientras el padre siga
+                            // excluido, y mentir con un switch que no manda es peor que no ofrecerlo.
+                            locked = folder.path !in excluded &&
+                                excluded.any { folder.path.startsWith("$it/") },
+                            onIncludedChange = { include ->
+                                sourcesViewModel.setDeviceFolderExcluded(folder.path, !include)
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Una carpeta con su interruptor. El switch dice INCLUIDA (encendido = se escanea), no excluida:
+ * el estado positivo del control tiene que ser el estado positivo de la cosa, o cada lectura pide
+ * una doble negación.
+ */
+@Composable
+private fun ExcludedFolderRow(
+    folder: DeviceAudioFolder,
+    included: Boolean,
+    locked: Boolean,
+    onIncludedChange: (Boolean) -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                // El último segmento es el nombre de la carpeta, que es como el usuario la conoce.
+                text = folder.path.substringAfterLast('/'),
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (included) AppColors.onSurface else AppColors.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                // La ruta entera desambigua dos carpetas con el mismo nombre, y el conteo dice
+                // cuánto se gana o se pierde al conmutarla.
+                text = stringResource(
+                    R.string.settings_excluded_folder_detail,
+                    folder.path,
+                    folder.songCount
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = AppColors.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Switch(
+            colors = appSwitchColors(),
+            checked = included,
+            enabled = !locked,
+            onCheckedChange = onIncludedChange
+        )
+    }
+}
+
+/**
  * Gestos: cómo se maneja el reproductor con el dedo. Categoría propia — vivía dentro de
  * Reproducción, cuyo encabezado es "Volumen (ReplayGain)", y ahí no tenía nada que ver con lo
  * que la rodeaba ni había forma de encontrarlo.
@@ -1023,7 +1203,7 @@ private fun PlayerToolbarAction.iconName(): String = when (this) {
     PlayerToolbarAction.QUEUE -> "queue_music"
     PlayerToolbarAction.KEEP_SCREEN_ON -> "visibility"
     PlayerToolbarAction.EQUALIZER -> "graphic_eq"
-    PlayerToolbarAction.SLEEP_TIMER -> "bedtime"
+    PlayerToolbarAction.SLEEP_TIMER -> "snooze"
     PlayerToolbarAction.ADD_TO_PLAYLIST -> "playlist_add"
     PlayerToolbarAction.DOWNLOAD -> "download"
     PlayerToolbarAction.SHARE -> "share"
@@ -1212,6 +1392,7 @@ fun SettingsAppearanceScreen(
     val isRegenerating = uiState.isRegeneratingColors
     val nowPlayingSolidBackground = uiState.nowPlayingSolidBackground
     val miniPlayerRoundedRect = uiState.miniPlayerRoundedRect
+    val miniPlayerRoundPlayButton = uiState.miniPlayerRoundPlayButton
     val nowPlayingDetailedFormat = uiState.nowPlayingDetailedFormat
 
     // Regenerar es DESTRUCTIVO e irreversible: además de vaciar los colores extraídos —que los
@@ -1256,9 +1437,10 @@ fun SettingsAppearanceScreen(
 
         Spacer(modifier = Modifier.height(SettingsTokens.SectionGap))
 
-        // Los tres conmutadores del NowPlaying van JUNTOS en un grupo. Antes estaban sueltos y
-        // separados entre sí por el estilo de paleta, así que tres ajustes del mismo sitio se
-        // leían como tres cosas sin relación.
+        // Los conmutadores de forma y presentación del reproductor van JUNTOS en un grupo. Antes
+        // estaban sueltos y separados entre sí por el estilo de paleta, así que ajustes del mismo
+        // sitio se leían como cosas sin relación. Los dos del MiniPlayer van seguidos: primero el
+        // contenedor, después el botón de play.
         SettingsGroup(
             listOf<@Composable (ListItemShapes) -> Unit>(
                 // Fondo del reproductor: color sólido tonal vs degradado según la carátula.
@@ -1283,6 +1465,19 @@ fun SettingsAppearanceScreen(
                         checked = miniPlayerRoundedRect,
                         shapes = shapes,
                         onCheckedChange = { viewModel.setMiniPlayerRoundedRect(it) }
+                    )
+                },
+                // Forma del botón de play del mini: círculo o squircle, las dos que M3 tabula para
+                // esa talla. Va pegado al ajuste de la barra porque los dos son la forma de la
+                // misma pieza, de fuera hacia adentro.
+                { shapes ->
+                    SettingsSwitchTile(
+                        icon = "play_circle",
+                        title = stringResource(R.string.settings_mini_player_round_play),
+                        description = stringResource(R.string.settings_mini_player_round_play_desc),
+                        checked = miniPlayerRoundPlayButton,
+                        shapes = shapes,
+                        onCheckedChange = { viewModel.setMiniPlayerRoundPlayButton(it) }
                     )
                 },
                 // Chip de formato: solo el contenedor (FLAC) o la ficha técnica
@@ -1477,11 +1672,30 @@ fun SettingsTabsScreen(
     viewModel: LibraryViewModel
 ) {
     val tabs by viewModel.libraryTabs.collectAsStateWithLifecycle()
+    val bottomTabs by viewModel.libraryBottomTabs.collectAsStateWithLifecycle()
 
     SettingsScaffold(
         title = stringResource(R.string.settings_tabs_header),
         onBackClick = onBackClick
     ) {
+        // DÓNDE se dibujan las pestañas, antes de CUÁLES hay: es la decisión que enmarca a la
+        // otra, y esta pantalla es el único sitio de Ajustes donde el usuario ya está pensando
+        // en pestañas. En horizontal el ajuste no manda — allí van al lado siempre.
+        SettingsGroup(
+            listOf<@Composable (ListItemShapes) -> Unit>(
+                { shapes ->
+                    SettingsSwitchTile(
+                        icon = "bottom_navigation",
+                        title = stringResource(R.string.settings_bottom_tabs),
+                        description = stringResource(R.string.settings_bottom_tabs_desc),
+                        checked = bottomTabs,
+                        shapes = shapes,
+                        onCheckedChange = { viewModel.setLibraryBottomTabs(it) }
+                    )
+                }
+            )
+        )
+        Spacer(Modifier.height(SettingsTokens.SectionGap))
         AppSurface(
             shape = RoundedCornerShape(SettingsTokens.BlockCorner),
             color = AppColors.surfaceContainerHigh
@@ -1837,6 +2051,10 @@ private fun SettingsScaffold(
                         MaterialSymbol("arrow_back")
                     }
                 },
+                // EXPLÍCITOS: sin ellos la barra resuelve sus colores contra `MaterialTheme` —el
+                // esquema BASE— y la banda superior de TODA la pantalla se quedaba con el tinte del
+                // wallpaper mientras el contenido llevaba el de la carátula.
+                colors = appTopAppBarColors(),
                 scrollBehavior = scrollBehavior
             )
         }
@@ -1958,19 +2176,10 @@ private fun SettingsActionRow(
         onClick = onClick,
         enabled = enabled,
         shapes = shapes,
-        colors = ListItemDefaults.segmentedColors(
-            containerColor = AppColors.surfaceContainerHigh
-        ),
+        colors = appSegmentedListItemColors(AppColors.surfaceContainerHigh),
         leadingContent = leading,
-        supportingContent = {
-            Text(
-                text = description,
-                style = MaterialTheme.typography.bodySmall,
-                color = AppColors.onSurfaceVariant
-            )
-        },
         trailingContent = trailing,
-        content = { Text(text = title, style = MaterialTheme.typography.bodyLarge) },
+        content = { SettingsTileText(title, description) },
         modifier = Modifier.fillMaxWidth()
     )
 }

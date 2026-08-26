@@ -2,6 +2,7 @@ package com.qhana.siku.ui.viewmodel
 
 import android.content.Context
 import android.util.Log
+import androidx.annotation.StringRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.work.WorkInfo
@@ -182,6 +183,19 @@ class PlaybackViewModel @Inject constructor(
     val miniPlayerRoundedRect: StateFlow<Boolean> =
         musicPreferences.miniPlayerRoundedRectFlow
             .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadMiniPlayerRoundedRect())
+
+    /** Forma del botón de play del MiniPlayer: círculo vs squircle (mismo motivo de observación). */
+    val miniPlayerRoundPlayButton: StateFlow<Boolean> =
+        musicPreferences.miniPlayerRoundPlayButtonFlow
+            .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadMiniPlayerRoundPlayButton())
+
+    /**
+     * Pestañas de la biblioteca abajo. Aquí no se usa para dibujar nada: lo lee la CAPA del
+     * reproductor para saber cuánto tiene que apartarse la píldora sobre la barra.
+     */
+    val libraryBottomTabs: StateFlow<Boolean> =
+        musicPreferences.libraryBottomTabsFlow
+            .stateIn(viewModelScope, SharingStarted.Eagerly, musicPreferences.loadLibraryBottomTabs())
 
     /**
      * Ficha técnica en el chip de formato. Se observa del DataStore (no un MutableStateFlow local)
@@ -1318,6 +1332,60 @@ class PlaybackViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Reproduce la lista de la pestaña **Todas tal como se ve**: su orden visible y sus chips de
+     * origen. Es lo que hay detrás de la botonera de esa pestaña.
+     *
+     * Existe aparte de [playAllFromLibrary]/[shuffleAllFromLibrary] porque significa otra cosa, y la
+     * diferencia es justo el sitio desde el que se pulsa: desde el inicio no hay ninguna lista en
+     * pantalla, así que "toda la biblioteca" es literal; desde la pestaña, el botón está bajo el
+     * chip de orden y los de origen, y reproducir algo distinto de lo que esos chips dejaron a la
+     * vista sería mentir. Con "Sin descargar" puesto, ese play no puede arrancar por una canción
+     * descargada.
+     *
+     * El snapshot es el MISMO que arma la cola al tocar una fila de esa lista, así que "reproducir
+     * todo" y "tocar la primera" dan la misma cola. Registra los mismos contextos que las dos de
+     * arriba —es la biblioteca, un lugar—, al revés que [shuffleBySource], que va por un estado del
+     * dispositivo.
+     */
+    fun playLibraryList(
+        sortOrder: SortOrder,
+        sourceFilters: Set<SongSourceFilter>,
+        shuffled: Boolean
+    ) {
+        resetRetryBudget()
+        musicPreferences.recordContext(
+            if (shuffled) PlaybackContext.LibraryShuffle else PlaybackContext.LibraryAll
+        )
+        // El snapshot hay que traerlo antes de decidir, así que las dos ramas empiezan igual; lo que
+        // cambia es a quién se le entrega. La de ORDEN va por [playSongs] —el mismo camino que un
+        // toque en una fila, con su `announceSelection` y su cancelación— y la de AZAR por
+        // `playShuffled`, que es quien sabe barajar sin que la primera canción dependa del orden.
+        viewModelScope.launch {
+            val songs = repository.getSongsSnapshot("", sortOrder, sourceFilters)
+            if (songs.isEmpty()) return@launch
+            if (!shuffled) {
+                playSongs(songs, 0)
+                return@launch
+            }
+            // `cancelAndJoin` DENTRO del job nuevo, como los otros puntos de entrada: ver el
+            // comentario de [shuffleAllFromLibrary].
+            val oldJob = playJob
+            playJob = launch {
+                oldJob?.cancelAndJoin()
+                when (val result = playbackUseCase.playShuffled(songs)) {
+                    is MusicPlaybackUseCase.PlayResult.Success -> {
+                        if (!result.song.path.startsWith("file://") && result.song.remoteId != null) {
+                            startAutoDownload(result.song, forcePriority = result.willStream)
+                        }
+                    }
+                    is MusicPlaybackUseCase.PlayResult.Error -> showPlaybackError(result.messageRes)
+                    else -> {}
+                }
+            }
+        }
+    }
+
     fun shuffleAllFromLibrary() {
         resetRetryBudget()
         musicPreferences.recordContext(PlaybackContext.LibraryShuffle)
@@ -1792,7 +1860,20 @@ class PlaybackViewModel @Inject constructor(
      * memoria justo antes de parar, así que la cola vuelve al segundo exacto y respetando si
      * estaba sonando o en pausa.
      */
-    fun clearQueue() {
+    fun clearQueue() = stopWithUndo(R.string.queue_cleared)
+
+    /**
+     * Para la reproducción y descarta la barra. Es la MISMA operación que [clearQueue] —en esta app
+     * parar es quedarse sin cola— y por eso comparte el deshacer; lo único que cambia es cómo se
+     * nombra, porque quien desliza la píldora hacia abajo no vació una cola: descartó el
+     * reproductor.
+     *
+     * El deshacer pesa MÁS acá que en la hoja de la cola, no menos: a "vaciar la cola" se llega a
+     * propósito, atravesando dos pantallas, mientras que un gesto se dispara sin querer.
+     */
+    fun stopPlayback() = stopWithUndo(R.string.playback_stopped)
+
+    private fun stopWithUndo(@StringRes message: Int) {
         val songs = musicController.playlist.value
         if (songs.isEmpty()) return
         val index = musicController.currentIndex.value
@@ -1802,7 +1883,7 @@ class PlaybackViewModel @Inject constructor(
         musicController.stop()
 
         snackbarManager.show(
-            message = context.getString(R.string.queue_cleared),
+            message = context.getString(message),
             actionLabel = context.getString(R.string.common_undo),
             onAction = {
                 musicController.setPlaylistAndPlay(

@@ -45,6 +45,14 @@ android {
         arg("room.schemaLocation", "$projectDir/schemas")
     }
 
+    // Los esquemas exportados por Room son la ENTRADA de MusicDatabaseMigrationTest: el helper
+    // abre la BD en una versión vieja leyendo su JSON de los assets del APK de test.
+    sourceSets {
+        getByName("androidTest") {
+            assets.srcDirs("$projectDir/schemas")
+        }
+    }
+
     signingConfigs {
         create("release") {
             if (keystoreProps.isNotEmpty()) {
@@ -210,6 +218,7 @@ dependencies {
     testImplementation("io.mockk:mockk:1.14.7")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
     testImplementation("app.cash.turbine:turbine:1.2.1")
+    androidTestImplementation("androidx.room:room-testing:2.8.4")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
     androidTestImplementation(platform("androidx.compose:compose-bom:2026.06.00"))
@@ -283,6 +292,68 @@ val verifyBaselineProfile = tasks.register("verifyBaselineProfile") {
     }
 }
 
+/**
+ * La fuente de iconos que se EMPAQUETA es un subset: 117 glifos de los 4174 que trae Material
+ * Symbols (0,24 MB contra 14,9). La completa vive en `tools/fonts/` y no entra en el APK.
+ *
+ * El modo de fallo de esto es el peor que hay: un icono que no esté en el subset no falla en
+ * compilación ni en ejecución — se dibuja el NOMBRE del icono como texto, o un tofu, y solo se ve
+ * abriendo esa pantalla. Por eso el build cruza en cada release lo que el código pide contra lo
+ * que el manifiesto declara. Al añadir un icono nuevo hay que regenerar:
+ *
+ *     python tools/subset_icon_font.py
+ *
+ * Escape de emergencia: -PskipIconFontCheck
+ */
+val iconSubsetManifest = rootProject.layout.projectDirectory.file("tools/icon_subset_manifest.txt")
+val skipIconFontCheck = providers.gradleProperty("skipIconFontCheck").isPresent
+
+val verifyIconFontSubset = tasks.register("verifyIconFontSubset") {
+    group = "verification"
+    description = "Comprueba que todo icono usado en el código está en el subset de la fuente empaquetada."
+
+    val manifestFile = iconSubsetManifest.asFile
+    val sourceDir = layout.projectDirectory.dir("src/main/java").asFile
+    val skip = skipIconFontCheck
+
+    inputs.file(manifestFile).withPropertyName("iconManifest").optional()
+    inputs.dir(sourceDir).withPropertyName("kotlinSources")
+
+    doLast {
+        if (skip) return@doLast
+
+        check(manifestFile.exists()) {
+            "No está $manifestFile. Generarlo con `python tools/subset_icon_font.py`. " +
+                "Para saltarse esta comprobación: -PskipIconFontCheck"
+        }
+
+        val bundled = manifestFile.readLines().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+
+        // Solo los usos EXPLÍCITOS de icono, no todo literal: aquí se busca el fallo real (pedir un
+        // icono que no está empaquetado), mientras que el script genera con un barrido amplio a
+        // propósito. Que el generador incluya de más es barato; que la verificación avise de más
+        // sería ruido que enseña a ignorarla.
+        val iconCall = Regex("(?:MaterialSymbol|MenuItemIcon)\\(\\s*(?:icon\\s*=\\s*)?\"([a-z0-9_]{2,40})\"")
+        val namedIcon = Regex("\\bicon\\s*=\\s*\"([a-z0-9_]{2,40})\"")
+
+        val requested = sortedSetOf<String>()
+        sourceDir.walkTopDown().filter { it.isFile && it.extension == "kt" }.forEach { file ->
+            val text = file.readText()
+            iconCall.findAll(text).forEach { requested.add(it.groupValues[1]) }
+            namedIcon.findAll(text).forEach { requested.add(it.groupValues[1]) }
+        }
+
+        val missing = requested - bundled
+        check(missing.isEmpty()) {
+            "Estos iconos se usan en el código pero NO están en la fuente empaquetada: " +
+                "${missing.joinToString(", ")}. Se dibujarían como texto o como tofu, sin fallar en " +
+                "ejecución. Regenerar con `python tools/subset_icon_font.py` y commitear la fuente y el " +
+                "manifiesto. Para saltarse esta comprobación: -PskipIconFontCheck"
+        }
+    }
+}
+
 tasks.matching { it.name == "assembleRelease" || it.name == "bundleRelease" }.configureEach {
     dependsOn(verifyBaselineProfile)
+    dependsOn(verifyIconFontSubset)
 }

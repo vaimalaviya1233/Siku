@@ -23,6 +23,7 @@ import com.qhana.siku.data.repository.IMusicRepository
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.qhana.siku.player.MusicController
+import com.qhana.siku.ui.components.COLLAGE_MAX_TILES
 import com.qhana.siku.ui.state.LibraryUiState
 import com.qhana.siku.data.coordinator.IncompleteReason
 import com.qhana.siku.worker.DownloadScheduler
@@ -175,6 +176,15 @@ class LibraryViewModel @Inject constructor(
         .distinctUntilChanged()
         .stateIn(viewModelScope, WhileUiSubscribed, emptySet())
 
+    /**
+     * Modo "pestañas abajo". Vista de UN campo por el mismo motivo que las de arriba: lo lee la
+     * pantalla de Ajustes → Pestañas, que no tiene nada que hacer con el resto del `uiState`.
+     */
+    val libraryBottomTabs: StateFlow<Boolean> = _uiState
+        .map { it.playbackSettings.libraryBottomTabs }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, WhileUiSubscribed, false)
+
     /** Listas del usuario. Ver el bloque de arriba. */
     val playlists: StateFlow<List<Playlist>> = _uiState
         .map { it.data.playlists }
@@ -184,6 +194,23 @@ class LibraryViewModel @Inject constructor(
     /** Canciones favoritas resueltas (lista pesada). Ver el bloque de arriba. */
     val favoriteSongs: StateFlow<List<Song>> = _uiState
         .map { it.data.favoriteSongs }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, WhileUiSubscribed, emptyList())
+
+    /**
+     * Hasta cuatro carátulas distintas de las favoritas, para el collage de su tarjeta en el
+     * inicio. Deriva de [favoriteSongs], que ya está materializada, así que no cuesta una consulta
+     * nueva; y se corta aquí y no en la pantalla para no llevar la lista entera —que puede ser de
+     * miles— a un componente que usa cuatro imágenes.
+     */
+    val favoriteCovers: StateFlow<List<String>> = favoriteSongs
+        .map { songs ->
+            songs.asSequence()
+                .mapNotNull { it.albumArtUriString }
+                .distinct()
+                .take(COLLAGE_MAX_TILES)
+                .toList()
+        }
         .distinctUntilChanged()
         .stateIn(viewModelScope, WhileUiSubscribed, emptyList())
 
@@ -539,6 +566,8 @@ class LibraryViewModel @Inject constructor(
                     nowPlayingProgressThickness = musicPreferences.loadNowPlayingProgressThickness(),
                     nowPlayingProgressHandle = musicPreferences.loadNowPlayingProgressHandle(),
                     miniPlayerRoundedRect = musicPreferences.loadMiniPlayerRoundedRect(),
+                    miniPlayerRoundPlayButton = musicPreferences.loadMiniPlayerRoundPlayButton(),
+                    libraryBottomTabs = musicPreferences.loadLibraryBottomTabs(),
                     playerGestures = musicPreferences.loadPlayerGestures(),
                     themePaletteStyle = musicPreferences.loadThemePaletteStyle(),
                     useSystemEq = musicPreferences.loadUseSystemEq()
@@ -959,6 +988,28 @@ class LibraryViewModel @Inject constructor(
     fun setLibraryTabs(list: List<com.qhana.siku.data.model.LibraryTabState>) =
         musicPreferences.saveLibraryTabsConfig(list)
 
+    /**
+     * Chips de "reproducir la biblioteca" en la pestaña **Todas**: se ven SOLO cuando la pestaña
+     * **Inicio** no está, porque son el repuesto de sus acciones rápidas y no una segunda copia.
+     *
+     * Con Inicio oculta, esas dos acciones —aleatorio y en orden sobre toda la biblioteca— no
+     * existían en ningún otro sitio de la app, y `LibraryTabsConfig.MIN_VISIBLE = 1` permite
+     * quedarse sin ella. Las demás del inicio sí tienen otra puerta: Favoritos es una lista (con su
+     * botonera) y los géneros tienen pestaña propia.
+     *
+     * La regla vive AQUÍ y no en la pantalla por lo mismo que [hasSourceSplit]: es una decisión
+     * sobre cuándo existe un control, y escrita en el sitio de uso nada impediría que otra
+     * superficie la interpretara distinto.
+     */
+    val showLibraryPlayChips: StateFlow<Boolean> = libraryTabs
+        .map { tabs ->
+            tabs.none { it.tab == com.qhana.siku.data.model.LibraryTabId.HOME && it.visible }
+        }
+        .distinctUntilChanged()
+        // `false` de arranque: se asume que Inicio está (es el default de la app), así que los chips
+        // no pueden asomar un frame en la configuración normal.
+        .stateIn(viewModelScope, WhileUiSubscribed, false)
+
     // --- Toolbar del NowPlaying ---
     val toolbarConfig: StateFlow<List<com.qhana.siku.data.model.ToolbarActionState>> =
         musicPreferences.toolbarConfigFlow
@@ -1038,6 +1089,21 @@ class LibraryViewModel @Inject constructor(
     fun setMiniPlayerRoundedRect(enabled: Boolean) {
         _uiState.update { it.copy(playbackSettings = it.playbackSettings.copy(miniPlayerRoundedRect = enabled)) }
         musicPreferences.saveMiniPlayerRoundedRect(enabled)
+    }
+
+    /** Forma del botón de play del MiniPlayer: círculo (true) o squircle (false, el default). */
+    fun setMiniPlayerRoundPlayButton(enabled: Boolean) {
+        _uiState.update { it.copy(playbackSettings = it.playbackSettings.copy(miniPlayerRoundPlayButton = enabled)) }
+        musicPreferences.saveMiniPlayerRoundPlayButton(enabled)
+    }
+
+    /**
+     * Pestañas de la biblioteca abajo, en una navigation bar. Solo aplica en VERTICAL: girado hay
+     * rail siempre, encendido o no (ver `libraryChrome`).
+     */
+    fun setLibraryBottomTabs(enabled: Boolean) {
+        _uiState.update { it.copy(playbackSettings = it.playbackSettings.copy(libraryBottomTabs = enabled)) }
+        musicPreferences.saveLibraryBottomTabs(enabled)
     }
 
     /**

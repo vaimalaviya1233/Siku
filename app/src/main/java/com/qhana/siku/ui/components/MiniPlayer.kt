@@ -17,7 +17,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -569,6 +568,8 @@ fun MiniPlayer(
     isBuffering: Boolean = false,
     /** Ajustes → Apariencia: rectángulo redondeado en vez de la píldora del diseño original. */
     roundedRect: Boolean = false,
+    /** Ajustes → Apariencia: botón de play redondo en vez de squircle. */
+    roundPlayButton: Boolean = false,
     /**
      * Posición y duración como FLOWS, igual que el NowPlaying: la posición cambia cada segundo y
      * pasarla como valor recompondría el mini —y con él la carátula y el marquee— en cada tick.
@@ -806,6 +807,7 @@ fun MiniPlayer(
                     isBuffering,
                     position,
                     duration,
+                    roundPlayButton,
                     artTravelsToPlayer,
                     sharedTransitionScope,
                     animatedVisibilityScope
@@ -829,6 +831,8 @@ private fun MiniPlayerContent(
     /** Posición/duración para el anillo de progreso; se leen dentro del dibujo (repaint, no recompose). */
     position: State<Long>,
     duration: State<Long>,
+    /** Ver el KDoc del parámetro homónimo en [MiniPlayer]. */
+    roundPlayButton: Boolean,
     /** Ver el KDoc del parámetro homónimo en [MiniPlayer]. */
     artTravelsToPlayer: Boolean,
     sharedTransitionScope: SharedTransitionScope? = null,
@@ -998,12 +1002,37 @@ private fun MiniPlayerContent(
         // mínimo táctil de 48dp. Sigue disponible en el NowPlaying, la notificación, Android
         // Auto y Wear — que es donde lo ponen YT Music, Spotify y Apple Music.
         //
-        // Botón Play/Pause — círculo resaltado (primary).
-        MiniRoundButton(
+        // Botón Play/Pause — SQUIRCLE o CÍRCULO según [roundPlayButton] (Ajustes → Apariencia). Las
+        // dos son formas TABULADAS del catálogo de icon buttons (`ContainerShapeSquare` /
+        // `ContainerShapeRound`), así que el ajuste elige entre dos valores del spec y no entre dos
+        // geometrías inventadas. Y las dos son `CornerBasedShape`, que es lo que hace que el morph
+        // al pulsar lo interpole M3 solo (`IconButtonShapes.isCornerBasedShape`) — de ahí que aquí
+        // no haya ni `Shape` propio ni animación a mano, al revés que con la píldora inclinada de
+        // `MaterialShapes.Pill` que ocupó este sitio hasta el 24 ago 2026.
+        //
+        // **El squircle es el de la talla MEDIUM (`CornerLarge`, 16dp) y no el de la Small
+        // (`CornerMedium`, 12dp)**, y ese valor está CERRADO en device (24 ago 2026): se probaron
+        // los tres escalones del spec por arriba y por abajo y 12 se veía demasiado cuadrado
+        // mientras que 20 (`LargeIncreased`) se veía demasiado redondo. NO volver a moverlo sin
+        // mirarlo en device. El techo de este botón es geométrico y está a un paso: mide 48 y
+        // `RoundedCornerShape` recorta cada esquina a la mitad del lado, así que **un radio de 24
+        // YA ES el círculo** y las dos opciones del ajuste quedarían iguales.
+        // Pedirle la forma a la talla de al lado es la MISMA desviación que este botón ya tiene en
+        // su TAMAÑO —48 tampoco es talla tabulada, es su mínimo táctil—, así que sigue siendo un
+        // valor del spec y no un radio a ojo.
+        MiniTransportButton(
             onClick = onPlayPause,
             containerColor = playContainer,
             contentColor = playContent,
-            desc = playPauseDesc
+            desc = playPauseDesc,
+            size = ComponentConfig.MiniPlayerPlayButtonSize,
+            shape = if (roundPlayButton) IconButtonDefaults.smallRoundShape
+            else IconButtonDefaults.mediumSquareShape,
+            // La misma forma pulsada en los dos casos, y es la de la talla del BOTÓN (Small,
+            // `CornerSmall`): sigue siendo distinta de la de reposo en los dos modos —que es la
+            // condición para que el morph exista, pasar la de reposo lo anula en silencio— y con el
+            // squircle a 16 el recorrido 16→8 se lee aún mejor que el 12→8 del primer intento.
+            pressedShape = IconButtonDefaults.smallPressedShape
         ) {
             AnimatedContent(
                 targetState = isBuffering,
@@ -1015,7 +1044,8 @@ private fun MiniPlayerContent(
                     // LoadingIndicator expressive (morfea entre MaterialShapes), igual que
                     // el buffering del NowPlaying/Lyrics.
                     LoadingIndicator(
-                        modifier = Modifier.size(24.dp),
+                        // Del tamaño del GLIFO al que sustituye, no del contenedor.
+                        modifier = Modifier.size(ComponentConfig.MiniPlayerPlayIndicatorSize),
                         color = playContent
                     )
                 } else {
@@ -1027,9 +1057,19 @@ private fun MiniPlayerContent(
                         label = "playPauseAnimation"
                     ) { playing: Boolean ->
                         if (playing)
-                            MaterialSymbol("pause", color = playContent, size = 24.sp, fill = true)
+                            MaterialSymbol(
+                                "pause",
+                                color = playContent,
+                                size = ComponentConfig.MiniPlayerButtonIconSize,
+                                fill = true
+                            )
                         else
-                            MaterialSymbol("play_arrow", color = playContent, size = 24.sp, fill = true)
+                            MaterialSymbol(
+                                "play_arrow",
+                                color = playContent,
+                                size = ComponentConfig.MiniPlayerButtonIconSize,
+                                fill = true
+                            )
                     }
                 }
             }
@@ -1037,51 +1077,89 @@ private fun MiniPlayerContent(
 
         Spacer(modifier = Modifier.width(ComponentConfig.FloatingBarItemGap))
 
-        // Botón Siguiente — mismo círculo, en tonal: el par se lee como transporte y el color
-        // (`primary` contra un tonal derivado del fondo) marca cuál es la acción principal.
-        MiniRoundButton(
+        // Botón Siguiente — un escalón POR DEBAJO del play (XSmall contra Small): el par se lee
+        // como transporte y la TALLA dice cuál es la acción principal, no solo el color. Con los dos
+        // en 48 la jerarquía la sostenía el color él solo, y son acciones de rango distinto.
+        MiniTransportButton(
             onClick = onNextClick,
             containerColor = sideContainer,
             contentColor = sideContent,
-            desc = nextDesc
+            desc = nextDesc,
+            size = ComponentConfig.MiniPlayerNextButtonSize,
+            // Redondo: es la acción secundaria, y la forma es el segundo eje que la separa del play
+            // (el primero es la talla). Su par también sale de la talla Small, que es la SUYA.
+            shape = IconButtonDefaults.smallRoundShape,
+            pressedShape = IconButtonDefaults.smallPressedShape
         ) {
             // Icono skip RELLENO (variante fill del símbolo, no el outline).
-            MaterialSymbol("skip_next", color = sideContent, size = 24.sp, fill = true)
+            MaterialSymbol(
+                "skip_next",
+                color = sideContent,
+                size = ComponentConfig.MiniPlayerButtonIconSize,
+                fill = true
+            )
         }
     }
 }
 
 /**
- * Botón REDONDO del MiniPlayer (círculo de [ComponentConfig.MiniPlayerButtonSize]):
- * `FilledIconButton` REAL de M3 Expressive. El color del contenedor puede venir animado (play/pause
- * con el acento del álbum). Trae ripple/state-layer, touch target y semántica del componente.
+ * Botón de transporte del MiniPlayer: `FilledIconButton` REAL de M3 Expressive, con el diámetro y la
+ * forma que le pase el caller ([ComponentConfig.MiniPlayerPlayButtonSize] o
+ * [ComponentConfig.MiniPlayerNextButtonSize]). El siguiente es SIEMPRE círculo y el play es
+ * squircle o círculo según el ajuste de Apariencia: son las dos formas que M3 Expressive tabula
+ * para un botón de icono (`ContainerShapeSquare` / `ContainerShapeRound`), así que ninguna de
+ * las dos opciones inventa geometría — el squircle toma el radio de la talla Medium por el motivo
+ * que explica el caller. Con el play en squircle la acción principal se distingue de
+ * la secundaria por FORMA además de por talla y color; con los dos redondos esa jerarquía queda en
+ * la talla y el color, que es lo que el ajuste deja elegir. Una forma geométrica estática no
+ * contradice el descarte de la COOKIE (ver el KDoc de [ComponentConfig.MiniPlayerPlayButtonSize]):
+ * aquélla se descartó por MOTION —una forma orgánica quieta al lado de la del NowPlaying, que gira,
+ * prometía un movimiento que la píldora persistente no puede permitirse—, y ni el squircle ni el
+ * círculo prometen nada. El color del contenedor puede venir animado (play/pausa con el acento
+ * del álbum). Trae ripple/state-layer y semántica del componente.
  *
- * **La forma PRESIONADA es la del componente, no la de reposo.** Hasta el 30 jul se pasaba
+ * **El touch target lo repone ESTE composable, no el componente.** `FilledIconButton` entrega su
+ * modifier al `Surface` sin pasar por `minimumInteractiveComponentSize` (ver `SurfaceIconButton` en
+ * las fuentes de material3 1.5.0-alpha24), así que con contenedores por debajo de 48 el objetivo del
+ * dedo encogería con el dibujo. `minimumInteractiveComponentSize()` va ANTES del `size`: expande el
+ * área de entrada sin tocar lo que se pinta.
+ *
+ * **La forma PRESIONADA nunca puede ser la de reposo.** Hasta el 30 jul se pasaba
  * `pressedShape = CircleShape`, o sea la MISMA que en reposo: con las dos formas iguales no hay nada
  * que interpolar y el shape-morph de M3 Expressive quedaba anulado en silencio — el botón se
  * limitaba al ripple. Se notaba al lado del transporte del NowPlaying, cuyos botones sí se deforman
- * bajo el dedo, que es exactamente lo que reportó el usuario. Dejando que el default decida, el
- * círculo se achata al presionar y vuelve al soltar, igual que el resto de la app.
+ * bajo el dedo, que es exactamente lo que reportó el usuario.
+ *
+ * Desde el 21 ago la pasa el CALLER en vez de heredarse del default. Hoy los dos piden
+ * `smallPressedShape` (`CornerSmall`) y el default daría lo mismo
+ * (`IconButtonDefaults.shapes()` sale de `SmallIconButtonTokens`), pero
+ * heredarla solo funciona mientras los dos botones estén en esa talla: el spec tabula
+ * `CornerMedium` para un Medium, y en la pasada en que el play midió 56 el default lo achataba como
+ * si fuera de 40. Explícita, el tamaño y su forma al pulsar se mueven juntos.
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun MiniRoundButton(
+private fun MiniTransportButton(
     onClick: () -> Unit,
     containerColor: Color,
     contentColor: Color,
     desc: String,
+    size: Dp,
+    shape: Shape,
+    pressedShape: Shape,
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit
 ) {
     FilledIconButton(
         onClick = onClick,
-        shapes = IconButtonDefaults.shapes(shape = CircleShape),
+        shapes = IconButtonDefaults.shapes(shape = shape, pressedShape = pressedShape),
         colors = IconButtonDefaults.filledIconButtonColors(
             containerColor = containerColor,
             contentColor = contentColor
         ),
         modifier = modifier
-            .size(ComponentConfig.MiniPlayerButtonSize)
+            .minimumInteractiveComponentSize()
+            .size(size)
             .semantics { contentDescription = desc }
     ) {
         content()

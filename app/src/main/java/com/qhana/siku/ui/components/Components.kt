@@ -15,6 +15,7 @@ import com.qhana.siku.ui.theme.ExpressiveDefaultEffectsEasing
 import com.qhana.siku.ui.theme.ExpressiveFastEffectsEasing
 import java.util.concurrent.TimeUnit
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import coil3.size.Scale
@@ -82,8 +83,65 @@ internal object ComponentConfig {
     val MiniPlayerRingGap = 10.dp
     // Carátula: el anillo menos su banda (trazo + separación) a cada lado.
     val MiniPlayerArtSize = MiniPlayerRingSize - (MiniPlayerRingStroke + MiniPlayerRingGap) * 2
-    // Diámetro/lado de los controles de transporte. 48dp = mínimo táctil recomendado.
-    val MiniPlayerButtonSize = 48.dp
+    /**
+     * Diámetro de los controles de transporte: el play **56** y el siguiente un icon button `Small`
+     * (**40**). Estuvieron los dos en 48 hasta el 21 ago 2026, lo que los dejaba en el mismo rango
+     * visual pese a no ser la misma acción — la jerarquía la sostenía el COLOR él solo.
+     *
+     * **Los dos pares del spec se probaron el 21 ago y los DESCARTÓ el ojo en device**:
+     *  - `Small`/`XSmall` (40/32): un contenedor de 32 se falla al pulsar aunque su área táctil sean
+     *    48 —el dedo apunta a lo que VE— y el play a 40 perdía presencia contra el anillo de la
+     *    carátula, que mide 64.
+     *  - `Medium`/`Small` (56/40): el play dominaba la barra. En 80dp de alto, un círculo de 56 deja
+     *    12 arriba y abajo y pesa más que la propia portada con su anillo, que es lo que la píldora
+     *    tiene que enseñar.
+     *
+     * Por eso el play se queda en **48, que no es una talla tabulada** y aun así no es un número
+     * arbitrario: es su propio mínimo táctil, o sea el botón dibujado exactamente sobre el área que
+     * responde al dedo. El spec da el punto de partida; el que decide es el device.
+     *
+     * **También se probó y se revirtió darle al play una COOKIE de 4 lados** (que se relajaba a
+     * círculo bajo el dedo). Se descartó por MOTION y no por forma: el play del NowPlaying ya se
+     * mueve —su cookie gira mientras suena— y este no puede hacerlo, porque la píldora es
+     * persistente y un giro continuo sería un frame por vsync durante horas (ver la sección Motion);
+     * una forma orgánica que se queda quieta al lado de la que sí se mueve no aporta, solo promete
+     * algo que no cumple. **De ahí que el play midiera 56 un rato**: no era una talla elegida, era
+     * la compensación de que una cookie pesa **0,799 de su caja** (la media entre el radio de su
+     * punta y el de su valle, el mismo criterio del `CookieVisualRatio` que hubo en el NowPlaying),
+     * así que a 48 se veía pequeña. Sin la cookie esa compensación sobra y el 56 vuelve a ser el
+     * círculo que dominaba.
+     *
+     * **El área TÁCTIL es 48 y hay que reponerla a mano** cuando el contenedor queda por debajo:
+     * `FilledIconButton` pasa su modifier directo al `Surface` (ver `SurfaceIconButton` en las
+     * fuentes de material3 1.5.0-alpha24) y **NO aplica `minimumInteractiveComponentSize`**, así que
+     * un `.size(40.dp)` a secas encogería el objetivo real del dedo. Lo repone [MiniTransportButton].
+     * En la píldora se toca en movimiento y sin mirar, que es el mismo criterio de 48 que justificó
+     * quitar el botón "anterior".
+     *
+     * **Ojo con el hueco que eso añade**: `minimumInteractiveComponentSize` agranda el NODO, no solo
+     * la zona sensible, así que un botón dibujado a N < 48 aporta `(48 − N) / 2` de aire a cada lado
+     * ADEMÁS del [FloatingBarItemGap]. Aquí solo se expande el siguiente (4dp por lado), de modo
+     * que entre los dos círculos quedan 8dp. Con el par 40/32 eran 16 y se
+     * leían como dos botones sueltos en vez de un transporte.
+     */
+    val MiniPlayerPlayButtonSize = 48.dp
+
+    val MiniPlayerNextButtonSize = 40.dp
+
+    /**
+     * Glifo de los dos: `MediumIconButtonTokens.IconSize` y `SmallIconButtonTokens.IconSize` valen
+     * lo MISMO (24) — entre esas dos tallas el spec cambia el contenedor y el aire interior, no el
+     * dibujo. Es una sola constante y no dos porque son el mismo número por definición, no por
+     * casualidad.
+     */
+    val MiniPlayerButtonIconSize = 24.sp
+
+    /**
+     * El indicador de buffering ocupa el sitio DEL GLIFO del play, así que va a su medida. En dp y
+     * no en sp porque no es tipografía: un spinner no debe crecer con el ajuste de tamaño de texto
+     * del sistema, o se saldría de su contenedor de 40.
+     */
+    val MiniPlayerPlayIndicatorSize = 24.dp
     // Aire A AMBOS LADOS del bloque de texto (carátula→texto y texto→transporte): el gap
     // leading→texto de los ítems de lista, para que el mini se lea como una fila más de la
     // biblioteca y no como otro componente. Se usa también a la derecha para que el título no
@@ -103,6 +161,12 @@ internal object ComponentConfig {
     // alto real de la barra: si el MiniPlayer crece y esto no, la capa flotante se come el
     // último ítem de cada lista.
     val FloatingBarListInset = FloatingBarBottomMargin + MiniPlayerHeight + 16.dp
+    // Con la barra de pestañas puesta el mini deja de apoyarse en la navbar del SISTEMA y pasa a
+    // apoyarse en ELLA — pero su margen no cambia: **el mini flota a `FloatingBarBottomMargin` de
+    // lo que tenga debajo, sea el borde de la pantalla o una barra**. Por eso aquí no hay una
+    // segunda constante: hubo una de 8dp durante una hora del 22 ago 2026 y en device se veía
+    // pegado, que es lo que pasa cuando una pieza flotante se separa de su suelo menos de lo que se
+    // separaba del borde. Lo que sube la píldora es entonces el alto exacto de la barra.
 
     val SearchBarHeight = 56.dp
 

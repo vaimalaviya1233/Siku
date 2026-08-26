@@ -22,6 +22,9 @@ sealed class Screen(val route: String) {
     // Sub-pantallas de Ajustes (estilo Ajustes de Android: hub de categorías + una pantalla
     // por categoría).
     data object SettingsSources : Screen("settings/sources")
+    // Cuelga de Fuentes y no del hub: es configuración DEL escaneo del dispositivo, no una
+    // categoría propia, y solo tiene sentido con ese modo activo.
+    data object SettingsExcludedFolders : Screen("settings/excluded_folders")
     data object SettingsBackup : Screen("settings/backup")
     data object SettingsPlayback : Screen("settings/playback")
     data object SettingsDownloads : Screen("settings/downloads")

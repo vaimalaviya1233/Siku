@@ -74,9 +74,16 @@ import com.qhana.siku.ui.theme.appEffectsSpec
 import com.qhana.siku.ui.theme.appFastEffectsSpec
 import com.qhana.siku.ui.theme.appBannerEnter
 import com.qhana.siku.ui.theme.appBannerExit
+import android.content.res.Configuration
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.Dp
+import com.qhana.siku.ui.LibraryChrome
+import com.qhana.siku.ui.libraryChrome
+import com.qhana.siku.ui.navigation.Screen
 
 @Immutable
-private data class TabInfo(
+internal data class TabInfo(
     val tab: LibraryTabId,
     val titleRes: Int,
     val iconName: String
@@ -219,6 +226,7 @@ fun LibraryScreen(
     val topAlbums by browseViewModel.topAlbums.collectAsStateWithLifecycle()
     val recentContexts by libraryViewModel.recentContexts.collectAsStateWithLifecycle()
     val recentGenreArts by libraryViewModel.recentGenreArts.collectAsStateWithLifecycle()
+    val favoriteCovers by libraryViewModel.favoriteCovers.collectAsStateWithLifecycle()
     val homeStats by libraryViewModel.homeStats.collectAsStateWithLifecycle()
     val homeArtistPick by libraryViewModel.homeArtistPick.collectAsStateWithLifecycle()
     val homeRediscover by libraryViewModel.homeRediscover.collectAsStateWithLifecycle()
@@ -276,6 +284,45 @@ fun LibraryScreen(
         if (pagerState.currentPage >= tabs.size) pagerState.scrollToPage(tabs.lastIndex)
     }
 
+    // --- CROMO DE NAVEGACIÓN: dónde se dibuja el selector de pestañas ---
+    // Las tres presentaciones (fila arriba, barra abajo, rail al lado) son proyecciones del MISMO
+    // `pagerState.currentPage`; esto solo decide cuál se pinta. La regla vive en `libraryChrome` y
+    // no aquí porque la CAPA del reproductor tiene que leer exactamente la misma para saber cuánto
+    // apartarse: dos copias de esta condición serían dos verdades, y la píldora acabaría flotando
+    // por encima o por debajo de la barra según qué composición ganara el frame.
+    //
+    // `LocalConfiguration` y no `BoxWithConstraints`, por el mismo motivo que en `NowPlayingScreen`
+    // (allí está el KDoc largo) y por uno más: es un CompositionLocal, o sea el MISMO valor en el
+    // mismo frame para los dos lectores, cosa que unos constraints medidos en otro subárbol no
+    // puede garantizar.
+    val isLandscape =
+        LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val chrome = libraryChrome(
+        route = Screen.Library.route,
+        bottomTabs = uiState.libraryBottomTabs,
+        landscape = isLandscape
+    )
+
+    // El COSTADO: en vertical no existe y en horizontal es donde cae todo lo que estorba — la
+    // perforación de pantalla y, con navegación de tres botones, la barra del sistema.
+    // `safeDrawing` y no `displayCutout` a secas (el precedente del NowPlaying) porque allá el
+    // Scaffold ya aporta las barras en su `innerPadding` y aquí sus insets están a CERO: no llega
+    // nada, hay que pedir las dos cosas. En vertical valen 0 y no cambia un píxel.
+    val layoutDirection = LocalLayoutDirection.current
+    val sideInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal).asPaddingValues()
+    val safeEndInset = sideInsets.calculateEndPadding(layoutDirection)
+    // El rail no es una barra del Scaffold (ése solo tiene slots arriba y abajo) sino una columna
+    // que se descuenta a mano: el contenido, la cabecera y el banner se apartan con este inset y
+    // el rail se dibuja en el hueco. Así el pager NO cambia de tamaño ni se re-mide, y ninguna de
+    // las seis pantallas se entera — dos de ellas reconstruyen su `PaddingValues` y perderían un
+    // `start` puesto ahí.
+    //
+    // Se le suma el inset de ESE lado porque el rail se pinta hasta el borde y aparta su contenido
+    // él solo (`windowInsets` del componente): lo que ocupa es su ancho MÁS la perforación.
+    val startInset = sideInsets.calculateStartPadding(layoutDirection)
+    val railInset =
+        if (chrome == LibraryChrome.Rail) LibraryRailWidth + startInset else startInset
+
     // --- SCROLL & APPBAR ---
     // TopBar SIEMPRE visible (pinned): se quitó el enterAlways que la ocultaba al deslizar
     // en "Todas" (y con él la lógica de auto-mostrar al parar el scroll).
@@ -321,9 +368,19 @@ fun LibraryScreen(
     // en tono Y croma a la vez, "no combinan". El diagnóstico que ordenó todo salió de medir los
     // píxeles de una captura: los tres colores tenían el MISMO hue y la misma calidez (R−G = 10-11),
     // o sea que el problema nunca fue de armonía sino de PESO y de DIRECCIÓN.
-    val headerColor = AppColors.surfaceContainerHigh
+    // Color de las BARRAS de navegación (la fila de pestañas, la de abajo y el rail): el peldaño
+    // que la horquilla les reserva.
+    val chromeColor = AppColors.surfaceContainerHigh
+    // **La cabecera solo lleva ese color mientras SEA una barra de navegación.** Con el selector
+    // abajo o al lado se queda con la búsqueda y nada más, así que deja de ser una barra y se funde
+    // con el fondo de página: una banda tonal a todo el ancho para sostener una píldora pesaría sin
+    // decir nada. La píldora de búsqueda no pierde separación — sigue en `surface`, un peldaño por
+    // encima del fondo, que es justo lo que hace el Dialer con sus tarjetas.
+    val headerColor =
+        if (chrome == LibraryChrome.None) chromeColor else AppColors.surfaceContainer
     // Contenedor de la píldora de búsqueda: `surface` (98), el lado del CONTENIDO — 6 puntos por
-    // encima de su bloque (92). Es lo que hace el Dialer, donde la search bar lleva exactamente el
+    // encima de su bloque cuando la cabecera es barra (92), y 4 sobre el fondo de página cuando se
+    // funde con él (94). En los dos casos queda del lado del contenido, que es lo que importa. Es lo que hace el Dialer, donde la search bar lleva exactamente el
     // mismo color que las tarjetas de la lista (medido: `250,249,254` en las dos).
     //
     // **Se aparta de `SearchBarTokens.ContainerColor`** (`surfaceContainerHigh`, 92) y **va sin
@@ -551,7 +608,12 @@ fun LibraryScreen(
                 searchBarState = searchBarState,
                 searchInputField = searchInputField,
                 searchBarColors = searchBarColors,
-                containerColor = headerColor
+                containerColor = headerColor,
+                contentEndPadding = safeEndInset,
+                // Aparta la cabecera del rail. Va en el modifier EXTERNO, o sea antes de su
+                // `background`, para que el tinte del bloque empiece donde acaba el rail y no
+                // por debajo de él.
+                modifier = Modifier.padding(start = railInset)
             )
 
             // Overlay de búsqueda. No ocupa alto en el slot topBar: internamente es un Dialog
@@ -601,6 +663,14 @@ fun LibraryScreen(
                 }
             }
         },
+        // **Sin slot `bottomBar`, y eso es parte de la decisión** (22 ago 2026): el selector de
+        // abajo pasó a ser un toolbar FLOTANTE (`LibraryBottomToolbar`), y ese slot es para barras
+        // pegadas al borde — le reserva su alto al body, así que el contenido dejaría de pasar por
+        // debajo, que es justo lo que hace que una pieza flotante se lea como flotante. Se dibuja
+        // como capa al final del Box, igual que el rail y que el MiniPlayer.
+        //
+        // Consecuencia a tener presente: `paddingValues.calculateBottomPadding()` ya no trae el
+        // alto de nada, así que el colchón de las listas se calcula abajo a mano.
     ) { paddingValues ->
         // El MiniPlayer vive en MainActivity y FLOTA sobre el final de la
         // lista; arriba, espejo: el CONTENIDO PASA POR DEBAJO del header (TopBar + tabs,
@@ -611,9 +681,28 @@ fun LibraryScreen(
         val topBarInset = paddingValues.calculateTopPadding()
         var bannerHeightPx by remember { mutableIntStateOf(0) }
         val bannerHeight = with(LocalDensity.current) { bannerHeightPx.toDp() }
+        // Alto que reserva la cabecera. La fila de pestañas solo cuenta cuando de verdad está
+        // ARRIBA: con la barra abajo o el rail al lado, esos 54dp serían aire muerto en las seis
+        // pantallas a la vez.
+        val headerInset =
+            topBarInset + (if (chrome == LibraryChrome.None) TabsRowHeight else 0.dp) + bannerHeight
+        // El colchón bajo las listas: navbar del sistema + lo que flota encima. `FloatingBarListInset`
+        // (margen + mini + aire) es el MISMO en los dos modos, porque el mini flota igual contra un
+        // suelo o contra el otro; lo que se suma con el selector abajo es lo que ocupa el toolbar
+        // desde el borde (`LibraryBottomBarPillLift`), que es exactamente lo que el mini sube.
+        //
+        // **La navbar se repone SIEMPRE a mano.** Antes venía del `bottomBar` del Scaffold, que la
+        // consumía por dentro; sin ese slot, `paddingValues.calculateBottomPadding()` devuelve CERO
+        // en los dos modos y una lista con el selector abajo se metería bajo la barra del sistema.
         val listInsets = PaddingValues(
-            top = topBarInset + TabsRowHeight + bannerHeight + HeaderContentGap,
-            bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + ComponentConfig.FloatingBarListInset
+            // El aire hasta el contenido separa el BLOQUE de cabecera, así que solo hace falta
+            // mientras ese bloque exista: con el selector abajo o al lado la cabecera se funde con
+            // el fondo y ya no hay frontera de la que despegarse — el contenido arranca donde
+            // acaba la búsqueda, con el aire que el propio header ya pone debajo de su píldora.
+            top = headerInset + if (chrome == LibraryChrome.None) HeaderContentGap else 0.dp,
+            bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() +
+                (if (chrome == LibraryChrome.BottomBar) LibraryBottomBarPillLift else 0.dp) +
+                ComponentConfig.FloatingBarListInset
         )
         Box(modifier = Modifier.fillMaxSize()) {
             val pullState = rememberPullToRefreshState()
@@ -621,7 +710,9 @@ fun LibraryScreen(
                 isRefreshing = isManualRefreshing,
                 onRefresh = { libraryViewModel.onRefresh() },
                 state = pullState,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(start = railInset, end = safeEndInset),
                 indicator = {
                     // El contenido arranca en y=0 (detrás del header): bajar el indicador
                     // para que asome bajo las tabs y no quede oculto tras la TopBar. Se suma
@@ -635,7 +726,7 @@ fun LibraryScreen(
                     PullToRefreshDefaults.LoadingIndicator(
                         modifier = Modifier
                             .align(Alignment.TopCenter)
-                            .padding(top = topBarInset + TabsRowHeight + bannerHeight),
+                            .padding(top = headerInset),
                         isRefreshing = isManualRefreshing,
                         state = pullState
                     )
@@ -649,12 +740,34 @@ fun LibraryScreen(
                     // Inicio se abría SIN morph desde "Todas" (dos puntas de la misma key, las dos
                     // declarándose destino). Ver [SharedTransitionGate], donde está el caso completo.
                     //
-                    // `derivedStateOf` y no leer `currentPage` a pelo: así solo recomponen las dos
+                    // `derivedStateOf` y no leer la página a pelo: así solo recomponen las dos
                     // páginas que cambian de estado al deslizar, no las cuatro que hay compuestas. La
                     // clave del `remember` es `page`, que es constante para esta ranura — lo que se
-                    // observa es `currentPage`, que es el estado (convención 9c).
+                    // observa es el estado del pager (convención 9c).
+                    //
+                    // **`settledPage` y NO `currentPage`, y el motivo está MEDIDO** (Perfetto, 24 ago
+                    // 2026): `currentPage` salta a mitad del cruce, así que el cambio de `visible`
+                    // caía en el frame en el que el pager ya estaba midiendo las dos páginas. Cambiar
+                    // el valor del local invalida a sus LECTORES — las filas que declaran puntas de
+                    // shared element, unas 18 en pantalla, y por partida doble porque al cruzar
+                    // cambian de estado DOS páginas —, y ese trabajo entraba dentro del
+                    // `measureAndLayout` del propio frame: 29 ms de frame, de los que 23,6 eran la
+                    // medida y dentro 18 `Compose:recompose` (9,0 ms) + 18 `Compose:applyChanges`
+                    // (6,1 ms). Detrás quedaban tres frames de 18-28 ms y ~3 s con el 85 % de los
+                    // frames en buffer stuffing: el tirón al pasar de Inicio a Todas.
+                    //
+                    // `settledPage` congela el valor mientras `isScrollInProgress` (PagerState.kt:406)
+                    // y lo suelta al asentarse, o sea que la re-declaración se paga en un frame
+                    // ocioso en vez de en el del cruce. No es menos trabajo: es el mismo trabajo
+                    // fuera del camino crítico, que es el criterio de la convención 13.
+                    //
+                    // Lo que el gate promete sigue en pie: en reposo hay UNA sola página con scope, y
+                    // durante el gesto también (la saliente lo conserva), así que el empate de dos
+                    // puntas que motivó todo esto no puede volver. El precio es que tocar una fila
+                    // MIENTRAS la pestaña aún se desliza la abriría sin morph — la página entrante
+                    // todavía no declara puntas—, y eso pide un gesto que el propio pager consume.
                     val isActivePage by remember(page, pagerState) {
-                        derivedStateOf { page == pagerState.currentPage }
+                        derivedStateOf { page == pagerState.settledPage }
                     }
                     SharedTransitionGate(visible = isActivePage) {
                     when (tab.tab) {
@@ -664,6 +777,7 @@ fun LibraryScreen(
                                 recentlyAdded = homeRecentlyAdded,
                                 topAlbums = topAlbums,
                                 recentContexts = recentContexts,
+                                favoriteCovers = favoriteCovers,
                                 genreArts = recentGenreArts,
                                 stats = homeStats,
                                 artistPick = homeArtistPick,
@@ -755,7 +869,29 @@ fun LibraryScreen(
                                 songCount = songCount,
                                 sortOrder = uiState.sortOrderAll,
                                 onSortOrderChange = { libraryViewModel.onSortOrderChanged(it, SongFilter.ALL) },
-                                onToggleSourceFilter = libraryViewModel::toggleSourceFilter
+                                onToggleSourceFilter = libraryViewModel::toggleSourceFilter,
+                                // Los chips de esta lista (que solo existen sin la pestaña Inicio,
+                                // ver `LibraryViewModel.showLibraryPlayChips`) reproducen LA LISTA
+                                // QUE SE VE: su orden y sus chips de origen. No es lo que significan
+                                // los del inicio, donde no hay ninguna lista delante. `NONE` y no
+                                // `ROW`: no se pulsó ninguna fila, así que no hay superficie de la
+                                // que crecer.
+                                onPlayAll = {
+                                    playbackViewModel.playLibraryList(
+                                        sortOrder = uiState.sortOrderAll,
+                                        sourceFilters = uiState.sourceFilters,
+                                        shuffled = false
+                                    )
+                                    onNavigateToNowPlaying(PlayerArtOrigin.NONE)
+                                },
+                                onShuffleAll = {
+                                    playbackViewModel.playLibraryList(
+                                        sortOrder = uiState.sortOrderAll,
+                                        sourceFilters = uiState.sourceFilters,
+                                        shuffled = true
+                                    )
+                                    onNavigateToNowPlaying(PlayerArtOrigin.NONE)
+                                }
                             )
                         }
                         LibraryTabId.ARTISTS -> {
@@ -903,13 +1039,24 @@ fun LibraryScreen(
 
             // HEADER como capa SOBRE el contenido: tabs (+ banner) con fondo opaco. La
             // TopBar la dibuja el Scaffold, también por encima del body y del mismo color.
-            Column(modifier = Modifier.padding(top = topBarInset)) {
-                LibraryTabsRow(
-                    tabs = tabs,
-                    selectedIndex = pagerState.currentPage,
-                    onTabSelected = { index -> scope.launch { pagerState.animateScrollToPage(index) } },
-                    containerColor = headerColor
+            Column(
+                modifier = Modifier.padding(
+                    top = topBarInset,
+                    start = railInset,
+                    end = safeEndInset
                 )
+            ) {
+                // La fila solo se pinta si el selector vive ARRIBA. Con la barra abajo o el rail
+                // al lado, el bloque de cabecera se queda en la búsqueda y el banner sube a
+                // ocupar su sitio: son tres presentaciones de lo mismo, nunca dos a la vez.
+                if (chrome == LibraryChrome.None) {
+                    LibraryTabsRow(
+                        tabs = tabs,
+                        selectedIndex = pagerState.currentPage,
+                        onTabSelected = { index -> scope.launch { pagerState.animateScrollToPage(index) } },
+                        containerColor = headerColor
+                    )
+                }
                 // El banner FLOTA sobre la lista (tarjeta suelta, sin fondo de bloque); su
                 // alto medido se suma al contentPadding para que el primer ítem nazca debajo.
                 //
@@ -984,6 +1131,37 @@ fun LibraryScreen(
                     }
                 }
                 }
+            }
+
+            // El rail va DESPUÉS de la cabecera, o sea por encima de todo lo demás, y ocupa la
+            // columna que `railInset` acaba de dejar libre. Puede llenar la pantalla de alto sin
+            // pelearse con la barra de estado por dos motivos: el body del Scaffold llega hasta
+            // arriba (sus insets están a cero y el contenido pasa por debajo del header), y el
+            // inset superior lo consume el propio componente.
+            if (chrome == LibraryChrome.Rail) {
+                LibraryNavRail(
+                    tabs = tabs,
+                    selectedIndex = pagerState.currentPage,
+                    onTabSelected = { index -> scope.launch { pagerState.animateScrollToPage(index) } },
+                    containerColor = chromeColor,
+                    modifier = Modifier.align(Alignment.CenterStart)
+                )
+            }
+
+            // El toolbar del selector, cuando vive abajo. Es una CAPA sobre el contenido —como el
+            // rail y como el MiniPlayer— y no un `bottomBar`: el contenido tiene que pasar por
+            // debajo para que se lea como una pieza flotante, y su alto lo reserva `listInsets`.
+            //
+            // No lleva `railInset`/`safeEndInset`: los tres modos son excluyentes, así que con el
+            // toolbar en pantalla no hay rail del que apartarse, y sus propios márgenes ya cuentan
+            // la perforación.
+            if (chrome == LibraryChrome.BottomBar) {
+                LibraryBottomToolbar(
+                    tabs = tabs,
+                    selectedIndex = pagerState.currentPage,
+                    onTabSelected = { index -> scope.launch { pagerState.animateScrollToPage(index) } },
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                )
             }
         }
 
@@ -1125,8 +1303,8 @@ private val TabHeight = 48.dp
 
 /**
  * Glifo de cada pestaña: los **24 del spec** de la navigation bar (`IconSize`), que con
- * [TabContentPadding] a los lados dejan la píldora inactiva en los **56** de su indicador de
- * solo-glifo. Sale del contenido, no se fuerza ningún ancho.
+ * [TabContentPadding] a los lados dejan la píldora inactiva en **48**. Sale del contenido, no se
+ * fuerza ningún ancho.
  *
  * Estuvo en 20sp para que las seis pestañas entraran en 393dp sin desplazar la fila. Desde el 20 ago
  * 2026 **la fila SCROLLEA a propósito** y la geometría vuelve a ser la del spec — ver
@@ -1135,7 +1313,7 @@ private val TabHeight = 48.dp
  * En **sp** como el resto de `MaterialSymbol` de la app: crece con la escala tipográfica del sistema
  * y con él el ancho de la píldora. El alto no se mueve, lo fija [TabPillHeight].
  */
-private val TabIconSize = 24.sp
+internal val TabIconSize = 24.sp
 
 /**
  * El último contenido VISIBLE del banner, retenido para que su salida tenga algo que animar. Ver el
@@ -1164,24 +1342,57 @@ private val TabIconGap = 4.dp
  * No confundir con [TabPillGap], que es la separación ENTRE píldoras, ni con [TabRowEdgePadding],
  * que es el margen contra los bordes de la pantalla.
  *
- * **16dp**, y las dos guías coinciden en el número por caminos distintos: es el
- * `HorizontalTextPadding` que el `Tab` de M3 aplica a su etiqueta, y es también lo que centra un
- * glifo de 24 en el indicador de 56dp de la navigation bar ((56 − 24) / 2).
+ * **12dp desde el 22 ago 2026.** Es la palanca REAL para ceñir la fila, y la que resolvió el
+ * encargo: entre dos glifos inactivos, lo que se ve es este padding por partida doble (12 + 12 =
+ * 24dp, antes 32) más [TabPillGap], que apenas cuenta porque entre inactivas no hay ningún contorno
+ * dibujado que se toque. Se probó el camino contrario ese mismo día —vaciar el canal, dejando el
+ * padding en 16— y no era ahí: se recuperó el canal y se bajó esto.
+ *
+ * Los 16 que tuvo hasta hoy eran el número donde coinciden dos guías por caminos distintos: el
+ * `HorizontalTextPadding` que el `Tab` de M3 aplica a su etiqueta, y lo que centra un glifo de 24
+ * en el indicador de 56dp de la navigation bar ((56 − 24) / 2). A 12 la píldora inactiva pasa a
+ * medir **48**, o sea el mínimo táctil exacto: [TabMinWidth] y el dibujo dejan de tener holgura
+ * entre sí, y por debajo de este valor el mínimo empieza a mandar — la caja no encogería más y el
+ * glifo se quedaría con más área táctil que píldora.
+ *
+ * De paso, la fila entera baja a ~390dp con las seis pestañas y "Canciones" activa, o sea que
+ * **roza el ancho de un teléfono de 393 y casi deja de scrollear**; con una pestaña de nombre corto
+ * activa, cabe.
  *
  * **El mismo a los DOS lados, sin excepciones.** El spec de tabs pide padding consistente en cada
  * pestaña; hubo un `Spacer` extra detrás de la etiqueta activa —para replicar los "20dp tras el
  * label" de la navigation bar— que dejaba la píldora con 12 a un lado y 16 al otro, y se quitó.
  *
- * Estuvo en 12dp mientras el objetivo era que las seis pestañas entraran sin scroll; ver
+ * Ya estuvo en 12 antes, cuando el objetivo era que las seis entraran sin scroll; ver
  * [TabRowEdgePadding].
  */
-private val TabContentPadding = 16.dp
+private val TabContentPadding = 12.dp
 
 /**
- * Aire a los lados de la píldora de cada pestaña: la mitad de la separación real entre dos
- * píldoras contiguas, porque cada una pone la suya (2 + 2 = 4dp de canal). Ojo si se toca — este
- * padding recorta el área táctil de la pestaña (va antes del `selectable`), así que en vertical no
- * se pone ninguno, y en horizontal cada dp de más son 6dp de fila con las seis pestañas.
+ * Aire a los lados de la píldora de cada pestaña: la mitad de la separación real entre dos píldoras
+ * contiguas, porque cada una pone la suya. Ojo si se toca — este padding recorta el área táctil de
+ * la pestaña (va antes del `selectable`), así que en vertical no se pone ninguno, y en horizontal
+ * cada dp de más son 6dp de fila con las seis pestañas.
+ *
+ * **2dp, o sea 4dp de canal** — el valor histórico, restaurado el 22 ago 2026 tras bajarlo a 1 y a 0
+ * el mismo día y verlo en device. Lo que resolvió el aire de la fila no fue este número sino
+ * [TabContentPadding], que bajó de 16 a 12; con eso hecho, el canal volvió a su sitio.
+ *
+ * **Lo que se toca al vaciarlo son las CAJAS, y las cajas no se ven.** Una pestaña inactiva no
+ * dibuja contorno: su píldora está en alpha 0 y lo único pintado es el glifo, centrado en sus
+ * [TabContentPadding] de cada lado. Por eso este canal casi no se nota entre dos inactivas —lo que
+ * las separa es el padding, dos veces— y por eso ponerlo a cero no pegaba nada a la vista. **No
+ * razonar sobre esta fila como si las seis píldoras estuvieran dibujadas**: solo lo está la activa,
+ * y contra ella sí se ve este canal. Lo otro que se roza al vaciarlo es el **ripple**, que se pinta
+ * con la forma de la píldora y cubre la caja entera, también en las inactivas.
+ *
+ * De aquí DERIVAN otros dos números, así que se toca uno y cambian tres: el `edgePadding` de la fila
+ * ([TabRowEdgePadding] menos este canal, para que el borde VISIBLE siga cayendo en 16) y
+ * [TabMinWidth].
+ *
+ * **Vale para TODAS las pestañas, no solo para las inactivas**, y eso es deliberado: un canal que
+ * dependiera del estado cambiaría el ancho de cada celda al seleccionar, así que la fila entera se
+ * recolocaría bajo el dedo — y ya se mueve lo suyo con la etiqueta que aparece.
  */
 private val TabPillGap = 2.dp
 
@@ -1190,8 +1401,12 @@ private val TabPillGap = 2.dp
  * Expressive (la de icono y etiqueta en línea, que es la forma de la pestaña activa). La app es un
  * híbrido de las dos variantes del spec: de la horizontal salen este alto, el [TabIconGap] de 4 y
  * los 20 de detrás de la etiqueta; de la VERTICAL, la idea de un indicador ancho para las inactivas,
- * que son solo glifo: **56**, que sale del contenido sin forzar nada ([TabIconSize] 24 + 2×
- * [TabContentPadding] 16).
+ * que son solo glifo — ancho que sale del contenido sin forzar nada ([TabIconSize] 24 + 2×
+ * [TabContentPadding]).
+ *
+ * Ese ancho fue **56** —el número que el spec vertical tabula para el indicador— mientras el padding
+ * valía 16; desde el 22 ago 2026 son **48**, por decisión en device de ceñir la fila. La IDEA del
+ * spec se conserva (un contenedor ancho, no un círculo alrededor del glifo); el número, no.
  *
  * Es solo el DIBUJO: el `Tab` que lo contiene conserva sus 48dp de alto, que son el área táctil.
  * Por eso [TabRowBottomPadding] no vale 12 sino 8 — ver ahí.
@@ -1242,7 +1457,7 @@ private val TabRowBottomPadding = 6.dp
  * inicializan en orden de declaración, así que puesto antes leería un 0 y este alto saldría corto
  * en runtime, sin error de compilación.
  */
-private val TabsRowHeight = TabHeight + TabRowBottomPadding
+internal val TabsRowHeight = TabHeight + TabRowBottomPadding
 
 /**
  * Aire entre el corte del bloque de cabecera y el contenido de la página. Lo reservan las listas del
@@ -1264,9 +1479,13 @@ private val HeaderContentGap = 16.dp
 
 /**
  * Ancho mínimo que el `PrimaryScrollableTabRow` reserva por pestaña: los **48dp del mínimo táctil**.
- * Es un piso de ÁREA, no el ancho del dibujo — la píldora inactiva mide 56 por su cuenta
- * ([TabIconSize] + 2×[TabContentPadding]), así que en la práctica este mínimo no llega a activarse;
- * existe para que no pueda quedarse corto si el glifo cambiara.
+ * Es un piso de ÁREA, no el ancho del dibujo.
+ *
+ * **Desde el 22 ago 2026 el piso y el dibujo EMPATAN**, y por eso esta derivación es la correcta:
+ * con [TabContentPadding] en 12 la píldora inactiva mide exactamente 48 ([TabIconSize] 24 + 2×12),
+ * y la CAJA que la contiene mide 48 + 2×[TabPillGap] = 52, que es justo lo que devuelve esta
+ * fórmula. El mínimo dejó de tener holgura. Bajar más el padding ya no encoge la fila: la caja se
+ * queda en su piso y lo único que pasa es que el glifo gana área táctil por fuera de su píldora.
  */
 private val TabMinWidth = 48.dp + TabPillGap * 2
 
@@ -1317,6 +1536,10 @@ private fun LibraryTabsRow(
             // bloque iba del MISMO color que el fondo y ese aire era invisible; al ganar color
             // propio se convirtió en una banda teñida y vacía.
             .background(containerColor)
+            // La fila vive SIEMPRE arriba, bajo la búsqueda: el header ya se comió el inset de la
+            // barra de estado y el aire propio queda del lado que mira al contenido. Tuvo los dos
+            // como parámetros mientras el modo "pestañas abajo" la reusaba en el `bottomBar`; con
+            // el toolbar flotante ese caller desapareció y con él la razón de que fueran variables.
             .padding(bottom = TabRowBottomPadding)
     ) {
         // `containerColor = Color.Transparent`: el tinte ya lo pinta el Box de arriba, que es
@@ -1821,16 +2044,26 @@ private fun LibrarySearchHeader(
     searchBarState: SearchBarState,
     searchInputField: @Composable () -> Unit,
     searchBarColors: SearchBarColors,
-    containerColor: Color
+    containerColor: Color,
+    /**
+     * Lo que hay que apartar del borde final: en horizontal, la perforación de pantalla y la barra
+     * del sistema. Va como parámetro y no en el [modifier] porque se aplica DESPUÉS del
+     * `background`: el tinte del bloque tiene que llegar hasta el borde y es el CONTENIDO el que
+     * se aparta. El inset del otro lado sí viaja en el modifier, y a propósito — ahí el fondo no
+     * debe invadir la columna del rail, que se dibuja debajo de esta cabecera.
+     */
+    contentEndPadding: Dp = 0.dp,
+    modifier: Modifier = Modifier
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             // background ANTES del statusBarsPadding: el tinte del header pinta también
             // detrás de la barra de estado (antes lo hacía el TopAppBar con sus insets).
             .background(containerColor)
             .statusBarsPadding()
+            .padding(end = contentEndPadding)
             // bottom generoso: la píldora quedaba pegada a la píldora activa de las tabs.
             .padding(horizontal = 16.dp)
             .padding(top = 8.dp, bottom = 12.dp)

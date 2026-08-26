@@ -22,6 +22,7 @@ import com.qhana.siku.ui.screens.PlaylistDetailScreen
 import com.qhana.siku.ui.screens.SettingsAppearanceScreen
 import com.qhana.siku.ui.screens.SettingsBackupScreen
 import com.qhana.siku.ui.screens.SettingsDownloadsScreen
+import com.qhana.siku.ui.screens.SettingsExcludedFoldersScreen
 import com.qhana.siku.ui.screens.SettingsEqPresetsScreen
 import com.qhana.siku.ui.screens.SettingsGesturesScreen
 import com.qhana.siku.ui.screens.SettingsPlaybackScreen
@@ -396,6 +397,16 @@ fun AppNavHost(
                 authLoading = authLoading,
                 onConnectOneDrive = onConnectOneDrive,
                 onDisconnectOneDrive = onDisconnectOneDrive,
+                onNavigate = { route -> appState.navigate(route) },
+                sourcesViewModel = sourcesViewModel
+            )
+        }
+
+        composable(
+            route = Screen.SettingsExcludedFolders.route
+        ) {
+            SettingsExcludedFoldersScreen(
+                onBackClick = { navController.popBackStack() },
                 sourcesViewModel = sourcesViewModel
             )
         }

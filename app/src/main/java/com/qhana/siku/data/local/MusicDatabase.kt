@@ -8,6 +8,14 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 /**
+ * Versión del esquema. Top-level y no en el companion porque `@Database` no puede leer una
+ * constante de la clase que ella misma anota.
+ *
+ * v27: `songs.lightTagsAttemptedAt` (sello de la metadata ligera sin tags).
+ */
+const val MUSIC_DB_VERSION = 27
+
+/**
  * Base de datos Room para cache local de canciones y colores.
  *
  * **TODO bump de `version` DEBE traer su `Migration`.** No hay
@@ -19,8 +27,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * teléfono de otro. Es preferible un crash reproducible a datos irrecuperables.
  *
  * Antes de publicar un bump: instalar la versión anterior, usarla, actualizar encima y
- * verificar que la biblioteca sigue completa. Los schemas de `app/schemas/` permiten además
- * escribir tests con `MigrationTestHelper`.
+ * verificar que la biblioteca sigue completa. Eso lo cubre además
+ * `MusicDatabaseMigrationTest` (androidTest), que corre la cadena entera sobre los schemas
+ * exportados en `app/schemas/` — añadir ahí el caso de todo bump que toque DATOS y no solo la
+ * forma de la tabla, porque un backfill equivocado pasa la validación de esquema sin ruido.
  */
 @Database(
     entities = [
@@ -29,7 +39,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PlaylistSongCrossRef::class,
         ArtistEntity::class
     ],
-    version = 27, // v27: songs.lightTagsAttemptedAt (sello de la metadata ligera sin tags)
+    version = MUSIC_DB_VERSION,
     exportSchema = true
 )
 abstract class MusicDatabase : RoomDatabase() {
@@ -115,6 +125,20 @@ abstract class MusicDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Todas las migraciones, en una sola lista. La consumen el builder y
+         * `MusicDatabaseMigrationTest`: si el test declarara la suya, una migración nueva podría
+         * quedarse fuera del test justo cuando más falta hace, sin que nada avisara.
+         */
+        val ALL_MIGRATIONS: Array<Migration> = arrayOf(
+            MIGRATION_21_22,
+            MIGRATION_22_23,
+            MIGRATION_23_24,
+            MIGRATION_24_25,
+            MIGRATION_25_26,
+            MIGRATION_26_27
+        )
+
         fun getInstance(context: Context): MusicDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -122,14 +146,7 @@ abstract class MusicDatabase : RoomDatabase() {
                     MusicDatabase::class.java,
                     "music_cache.db"
                 )
-                    .addMigrations(
-                        MIGRATION_21_22,
-                        MIGRATION_22_23,
-                        MIGRATION_23_24,
-                        MIGRATION_24_25,
-                        MIGRATION_25_26,
-                        MIGRATION_26_27
-                    )
+                    .addMigrations(*ALL_MIGRATIONS)
                     // SIN fallbackToDestructiveMigration a propósito: ver el KDoc de la clase.
                     .build()
                     .also { INSTANCE = it }

@@ -570,7 +570,20 @@ private fun rememberSmoothedProgress(
         val jump = kotlin.math.abs(fraction - from)
         // Un seek (o el cambio de canción) NO se interpola: sería un barrido de un segundo
         // recorriendo toda la barra. Tampoco en pausa, donde no hay avance que suavizar.
-        if (!isPlaying || !onScreen || isDragging || jump > PROGRESS_SNAP_THRESHOLD) {
+        //
+        // **Un RETROCESO tampoco, y ése sin umbral que valga** (21 ago 2026). Esto es interpolación
+        // entre TICKS de una reproducción, y una reproducción solo AVANZA: cualquier movimiento
+        // hacia atrás es un seek, un cambio de pista o un `REPEAT_ONE`, o sea justo lo que tiene que
+        // ser instantáneo. Con la condición atada solo a [PROGRESS_SNAP_THRESHOLD] eso se colaba,
+        // porque el umbral mira la DISTANCIA y no el SENTIDO: cambiar de canción dentro del primer
+        // 5 % de la pista —12 s en una de cuatro minutos, 24 en una de ocho— deja un salto de menos
+        // de 0.05, así que la barra se iba para atrás **interpolada durante un segundo entero** en
+        // vez de saltar a cero. Bug reportado por el usuario el 21 ago ("retrocede por segundo en
+        // lugar de hacerlo de golpe"), difícil de reproducir a voluntad precisamente porque depende
+        // de en qué punto de la canción se salte: terminándola sola el salto vale ~1.0 y sí snapea.
+        // El mismo agujero se veía al soltar un arrastre corto hacia atrás (con `isDragging` ya en
+        // `false`). El umbral se queda para lo que sí puede ser ambiguo: los saltos hacia ADELANTE.
+        if (!isPlaying || !onScreen || isDragging || fraction < from || jump > PROGRESS_SNAP_THRESHOLD) {
             smoothFraction.floatValue = fraction
             return@LaunchedEffect
         }
@@ -1116,23 +1129,52 @@ private fun WavyTrack(
         // `gap` más allá porque `inactiveStartX` interpola el suyo con el mismo `handleAlpha`. Se
         // interpola en vez de conmutar por lo de siempre: el cambio ocurre con el dedo en la barra.
         val waveEndX = activeEndX - dragGap * handleAlpha
-        // Al principio de la canción no cabe onda antes del palo (waveEndX <= startX): se omite, como
-        // el fill del modo plano, y el palo marca la posición solo.
-        if (waveEndX > startX) {
-            val step = WAVE_SAMPLE_STEP_PX
-            wavePath.reset()
-            wavePath.moveTo(startX, waveY(startX))
-            var x = startX + step
-            while (x < waveEndX) {
-                wavePath.lineTo(x, waveY(x))
-                x += step
+        // ARRANQUE DE LA CANCIÓN: la onda que aún no tiene largo se dibuja como el PUNTO en que
+        // consiste su propia punta. No es un elemento nuevo —el trazo lleva cap redondo, así que eso
+        // es EXACTAMENTE lo que se ve en cuanto el progreso mide un píxel—, y el hueco al riel ya le
+        // reservaba su sitio: `restGap` = radio + gap + radio deja el aire de un punto entero antes
+        // del riel. O sea que la barra apartaba sitio para algo que nunca se pintaba, y en 0:00 el
+        // reproductor no enseñaba NADA a la izquierda: una barra que parece deshabilitada justo en
+        // el estado en que más se la mira (canción cargada, recién abierto el reproductor).
+        //
+        // Lo que se colaba es que un `drawPath` de un solo `moveTo` no dibuja: Skia necesita un
+        // segmento para tener dónde poner los caps. Con `waveEndX == startX` el path quedaba
+        // degenerado y la rama del `if` ni siquiera entraba.
+        //
+        // El punto va en `waveY(startX)` y no en `centerY` porque es la MISMA punta que luego crece:
+        // anclarlo al centro daría un salto vertical en el frame en que aparece el primer trazo (el
+        // arranque de la onda ondula, ver [waveY]).
+        //
+        // **Con el palo puesto no se pinta, y eso lo decide la geometría sin ningún factor extra**:
+        // a `waveEndX` se le retira un `dragGap`, así que en fracción 0 cae DETRÁS de `startX` y no
+        // entra en ninguna de las dos ramas. Ahí el indicador de posición es el palo, y un punto
+        // debajo asomaría por los lados — el mismo motivo por el que el fill le cede el hueco.
+        val activeLength = waveEndX - startX
+        when {
+            activeLength >= WAVE_SAMPLE_STEP_PX -> {
+                val step = WAVE_SAMPLE_STEP_PX
+                wavePath.reset()
+                wavePath.moveTo(startX, waveY(startX))
+                var x = startX + step
+                while (x < waveEndX) {
+                    wavePath.lineTo(x, waveY(x))
+                    x += step
+                }
+                // Punto final exacto: con el paso de muestreo la punta quedaría corta.
+                wavePath.lineTo(waveEndX, waveY(waveEndX))
+                drawPath(
+                    path = wavePath,
+                    color = activeColor,
+                    style = Stroke(width = stroke, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                )
             }
-            // Punto final exacto: con el paso de muestreo la punta quedaría corta.
-            wavePath.lineTo(waveEndX, waveY(waveEndX))
-            drawPath(
-                path = wavePath,
+            // Por debajo de un paso de muestreo el trazo y el punto son el mismo dibujo (dos
+            // píxeles de largo con caps redondos ya SON un círculo), así que esta rama cubre el
+            // caso degenerado y el primer píxel de progreso con una sola forma y sin salto.
+            activeLength >= 0f -> drawCircle(
                 color = activeColor,
-                style = Stroke(width = stroke, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                radius = radius,
+                center = Offset(startX, waveY(startX))
             )
         }
 
@@ -1210,8 +1252,11 @@ internal const val POSITION_TICK_MS = 1000
 /**
  * Salto de progreso (fracción de la barra) por encima del cual NO se interpola. Un tick normal
  * avanza `1s / duración` — con la canción más corta de una biblioteca típica (~1 min) eso es
- * ~0.017, así que 0.05 deja pasar el avance natural y ataja solo los seeks y los cambios de
- * pista, que deben ser instantáneos.
+ * ~0.017, así que 0.05 deja pasar el avance natural y ataja los seeks hacia ADELANTE, que deben ser
+ * instantáneos.
+ *
+ * **Solo gobierna los saltos hacia adelante**: un retroceso se snapea siempre, por SENTIDO y no por
+ * distancia, y por eso los cambios de pista ya no dependen de este número (ver `rememberSmoothedProgress`).
  */
 private const val PROGRESS_SNAP_THRESHOLD = 0.05f
 

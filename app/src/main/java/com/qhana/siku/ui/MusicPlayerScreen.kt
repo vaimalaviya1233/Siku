@@ -10,7 +10,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.LoadingIndicator
@@ -36,6 +42,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
+import android.content.res.Configuration
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
@@ -56,6 +64,7 @@ import com.qhana.siku.ui.components.ComponentConfig
 import com.qhana.siku.ui.components.LocalSnackbarHostState
 import com.qhana.siku.ui.navigation.AppNavHost
 import com.qhana.siku.ui.navigation.Screen
+import com.qhana.siku.ui.screens.LibraryBottomBarPillLift
 import com.qhana.siku.ui.screens.POSITION_TICK_MS
 import com.qhana.siku.ui.viewmodel.AuthViewModel
 import com.qhana.siku.ui.viewmodel.LibraryViewModel
@@ -288,11 +297,54 @@ fun MusicPlayerScreen(
     // y seguía animando la superficie hacia la fila aunque la pareja hubiera muerto.
     val currentEntry = appState.currentBackStackEntry
     val currentRoute = currentEntry?.destination?.route
-    val playerLayer = when {
+
+    // Cuánto sube lo que FLOTA abajo (la píldora y el snackbar) cuando la biblioteca pone su barra
+    // de pestañas. Sale de `libraryChrome`, la misma función que consumen `LibraryScreen` —para
+    // decidir si la dibuja— y `PlayerOverlay`. Aquí no se anima: un snackbar aparece y desaparece,
+    // así que no hay nada que ver moverse.
+    val libraryBottomTabs by playbackViewModel.libraryBottomTabs.collectAsStateWithLifecycle()
+    val chromeLift = if (
+        libraryChrome(
+            route = currentRoute,
+            bottomTabs = libraryBottomTabs,
+            landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+        ) == LibraryChrome.BottomBar
+    ) {
+        LibraryBottomBarPillLift
+    } else {
+        0.dp
+    }
+    val requestedLayer = when {
         playerExpanded -> PlayerLayerState.Expanded
         currentSong != null && isPillRoute(currentRoute) -> PlayerLayerState.Collapsed
         else -> PlayerLayerState.Hidden
     }
+    // **Durante el FRAME DE PREPARACIÓN de una fila la capa NO se mueve** (21 ago 2026).
+    //
+    // Ese frame es, por definición, "el reproductor ya se está abriendo": `openPlayer(ROW)` anotó la
+    // fila y espera su `onRowPlaced` para expandir (ver `ContainerOriginRole`). La capa no tiene nada
+    // que decidir ahí, y sin embargo hasta hoy podía cambiar de estado — **sin cola de reproducción**,
+    // `announceSelection` fija `currentSong` en el mismo handler del tap, así que `Collapsed` pasaba a
+    // ser cierto y la capa arrancaba una transición `Hidden→Collapsed` que nadie llega a ver.
+    //
+    // Dos daños, y el segundo es el que rompía la app:
+    //  1. Componía el MiniPlayer entero (la rama `Collapsed`) **en el frame del tap**, que es el frame
+    //     más caro de la app y justo el que este diseño lleva meses intentando aligerar.
+    //  2. Al frame siguiente la fila avisa y se pide `Expanded`, pero la transición ya está `isRunning`
+    //     → `rememberPlayerMorphOrigin` descartaba la petición `ROW`: apertura sin container transform
+    //     y, al cerrar, un morph estrenado con las dos puntas naciendo en el mismo frame → capa VARADA
+    //     (colocada, tragándose los toques, y a alpha 0). Ver el KDoc de `rememberPlayerMorphOrigin`.
+    //
+    // El gate de allá cubre la clase entera (también cuando la transición venía corriendo de antes);
+    // éste quita el caso que la app se provocaba sola, y de paso el frame del tap vuelve a ser barato.
+    //
+    // Contenedor PLANO y no `mutableStateOf`: se lee y se escribe en la misma composición, igual que
+    // `MorphOriginHolder` — como estado de snapshot invalidaría el scope que lo acaba de escribir.
+    // Congelar aquí no descoloca a la fila: `rowVisibility` mapea a `Visible` todo lo que no sea
+    // `Expanded`, así que da igual quedarse en `Hidden` (sin cola) o en `Collapsed` (con ella).
+    val layerHolder = remember { arrayOf(requestedLayer) }
+    val playerLayer = if (appState.pendingRowOrigin != null) layerHolder[0]
+        else requestedLayer.also { layerHolder[0] = it }
     val playerLayerTransition = updateTransition(playerLayer, label = "playerLayer")
     // Sonda: el ESTADO de la capa en cada composición (qué target pide `playerLayer`, dónde está la
     // Transition). Es lo que hace falta cuando el síntoma es "la animación no ocurre" y no un frame lento.
@@ -574,10 +626,20 @@ fun MusicPlayerScreen(
                     snackbar = { AppSnackbar(it) },
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .navigationBarsPadding()
+                        // Mismo criterio que la píldora: barras del sistema Y perforación, que en
+                        // horizontal caen en un costado.
+                        .windowInsetsPadding(
+                            WindowInsets.systemBars
+                                .union(WindowInsets.displayCutout)
+                                .only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom)
+                        )
                         .padding(
-                            bottom = if (miniPlayerShown) ComponentConfig.FloatingBarListInset
-                            else ComponentConfig.FloatingBarBottomMargin
+                            // Con la barra de pestañas puesta, el mini se apoya sobre ELLA, así
+                            // que el snackbar tiene que subir lo mismo o saldría por detrás.
+                            // Misma regla que usa la píldora, no una copia de la condición.
+                            bottom = chromeLift +
+                                if (miniPlayerShown) ComponentConfig.FloatingBarListInset
+                                else ComponentConfig.FloatingBarBottomMargin
                         )
                 )
             }

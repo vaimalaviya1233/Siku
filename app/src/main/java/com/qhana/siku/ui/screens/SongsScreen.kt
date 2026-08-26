@@ -59,6 +59,10 @@ fun SongsScreen(
     sortOrder: SortOrder = SortOrder.TITLE_ASC,
     onSortOrderChange: (SortOrder) -> Unit = {},
     onToggleSourceFilter: (SongSourceFilter) -> Unit = {},
+    // Reproducir la lista ENTERA, en orden o al azar (solo pestaña Todas, fuera de la búsqueda).
+    // Los defaults vacíos son para el overlay de búsqueda, donde la botonera no se pinta.
+    onPlayAll: () -> Unit = {},
+    onShuffleAll: () -> Unit = {},
     // Búsqueda seccionada (solo pestaña Todas): artistas/álbumes que matchean la query,
     // renderizados como carruseles encima de las canciones.
     isSearchActive: Boolean = false,
@@ -125,6 +129,10 @@ fun SongsScreen(
     // la misma expresión copiada, o sea dos sitios capaces de discrepar sobre cuándo hay control.
     val showLocalChip by viewModel.showLocalSourceChip.collectAsStateWithLifecycle()
     val showCloudChips by viewModel.showCloudSourceChips.collectAsStateWithLifecycle()
+    // Los chips de reproducir/aleatorio de esta fila son el REPUESTO de las acciones rápidas del
+    // inicio: solo existen si esa pestaña no está. La regla, igual que la de los chips de origen,
+    // vive en el ViewModel (ver [LibraryViewModel.showLibraryPlayChips]).
+    val showPlayChips by viewModel.showLibraryPlayChips.collectAsStateWithLifecycle()
 
     // Al cambiar la query, volver arriba: si no, el scroll se queda donde estaba y las
     // secciones de artistas/álbumes (que van al principio) quedan fuera de pantalla.
@@ -197,7 +205,12 @@ fun SongsScreen(
                 contentPadding = contentPadding
             ) {
                 item(key = "source_filters", contentType = "sourceFilters") {
-                    SourceFilterRow(songCount, sortOrder, onSortOrderChange, sourceFilters, showLocalChip, showCloudChips, onToggleSourceFilter)
+                    SourceFilterRow(
+                        songCount, sortOrder, onSortOrderChange, sourceFilters,
+                        showLocalChip, showCloudChips, onToggleSourceFilter,
+                        // Lista vacía por los filtros: ver arriba.
+                        showPlayChips = false, onPlayAll = {}, onShuffleAll = {}
+                    )
                 }
                 item { FilteredEmptyBody() }
             }
@@ -216,7 +229,16 @@ fun SongsScreen(
             ) {
                 if (showSourceChips) {
                     item(key = "source_filters", contentType = "sourceFilters") {
-                        SourceFilterRow(songCount, sortOrder, onSortOrderChange, sourceFilters, showLocalChip, showCloudChips, onToggleSourceFilter)
+                        SourceFilterRow(
+                            songCount, sortOrder, onSortOrderChange, sourceFilters,
+                            showLocalChip, showCloudChips, onToggleSourceFilter,
+                            // Con la lista vacía no hay nada que reproducir: en la rama de "ningún
+                            // resultado" quitar un filtro tiene que seguir siendo lo único que se
+                            // puede hacer ahí.
+                            showPlayChips = showPlayChips && itemCount > 0,
+                            onPlayAll = onPlayAll,
+                            onShuffleAll = onShuffleAll
+                        )
                     }
                 }
                 if (searchArtists.isNotEmpty()) {
@@ -361,11 +383,11 @@ private fun SongItemOptimized(
     // `surfaceContainer` (94), las dos apilando hacia el lado oscuro: así la cabecera nunca
     // conseguía separarse de la banda de filas que le pasa por debajo al scrollear.
     val rowSurface = AppColors.surface
-    // Resaltado del ítem en reproducción: `primaryContainer` (contenedor de acento sólido, sin
-    // opacidad), el MISMO tratamiento que la cola. Sustituye al blend del acento del álbum al 30%
-    // sobre el fondo de la fila, que en un álbum monocromo quedaba casi idéntico al resto de
-    // filas (ese acento venía ya proyectado a un tono cercano a la superficie).
-    val backgroundColor = if (isPlaying) AppColors.primaryContainer else rowSurface
+    // Resaltado del ítem en reproducción, por el helper compartido y NO por el rol a pelo: es el
+    // mismo tratamiento que la cola y los detalles, y tiene que salir de una sola definición. El
+    // blend del acento del álbum al 30% que hubo antes quedaba casi idéntico al resto de filas en un
+    // álbum monocromo (ese acento venía ya proyectado a un tono cercano a la superficie).
+    val backgroundColor = songRowBackground(rowSurface, isPlaying)
 
     // Fondo REAL bajo el contenido de la fila, contra el que se mide la píldora de acciones: es
     // `backgroundColor` a secas porque el resaltado del ítem activo lo pinta el `Row` de abajo, no
@@ -507,7 +529,17 @@ private fun SongItemMenu(
                         }) },
                         shape = MenuDefaults.middleItemShape,
                         enabled = !isRedownloading,
-                        leadingIcon = { MenuItemIcon("sync") }
+                        // Mismo criterio que la etiqueta de arriba, que ya distingue los tres
+                        // casos: en curso, redescarga y primera descarga.
+                        leadingIcon = {
+                            MenuItemIcon(
+                                when {
+                                    isRedownloading -> "hourglass_top"
+                                    isDownloaded -> "sync_arrow_down"
+                                    else -> "download"
+                                }
+                            )
+                        }
                     )
                 }
                 // Favorito es un TOGGLE: la sobrecarga `checked` le da contenedor marcado, morph
@@ -519,7 +551,7 @@ private fun SongItemMenu(
                     onCheckedChange = { onToggleFavorite(songId); showMenu = false },
                     text = { Text(if (isFavorite) stringResource(R.string.menu_remove_favorite) else stringResource(R.string.menu_favorite)) },
                     shapes = MenuDefaults.itemShapes(shape = MenuDefaults.trailingItemShape),
-                    leadingIcon = { MenuItemIcon("favorite", fill = isFavorite) }
+                    leadingIcon = { MenuItemIcon(if (isFavorite) "heart_minus" else "heart_plus") }
                 )
             }
         }
@@ -545,7 +577,10 @@ private fun SourceFilterRow(
     sourceFilters: Set<SongSourceFilter>,
     showLocalChip: Boolean,
     showCloudChips: Boolean,
-    onToggle: (SongSourceFilter) -> Unit
+    onToggle: (SongSourceFilter) -> Unit,
+    showPlayChips: Boolean,
+    onPlayAll: () -> Unit,
+    onShuffleAll: () -> Unit
 ) {
     FlowRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -558,12 +593,32 @@ private fun SourceFilterRow(
             .padding(horizontal = 16.dp)
             .padding(bottom = 4.dp)
     ) {
+        // El conteo va SIEMPRE primero: es lo que dice qué lista es ésta, y su sitio no puede
+        // depender de si hay acciones o no — si se corriera, la misma fila cambiaría de anclaje
+        // según una preferencia de pestañas que no tiene nada que ver con ella.
         TonalChip {
             Text(
                 text = androidx.compose.ui.res.pluralStringResource(
                     R.plurals.song_count, songCount, songCount
                 ),
                 color = AppColors.onSecondaryContainer
+            )
+        }
+        // Detrás del conteo y delante del orden y los filtros: son lo único de esta fila que HACE
+        // algo —el resto describe o acota—, y solo existen cuando la pestaña Inicio no está para
+        // ofrecerlas (la regla vive en [LibraryViewModel.showLibraryPlayChips]). Son los MISMOS
+        // `QuickActionChip` del inicio, el mismo componente y no una copia con el mismo aspecto.
+        if (showPlayChips) {
+            QuickActionChip(
+                "shuffle",
+                stringResource(R.string.home_action_shuffle),
+                onClick = onShuffleAll
+            )
+            QuickActionChip(
+                "play_arrow",
+                stringResource(R.string.home_action_play_order),
+                fill = true,
+                onClick = onPlayAll
             )
         }
         SortChip(

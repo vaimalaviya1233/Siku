@@ -9,6 +9,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.qhana.siku.ui.theme.AppColors
+import com.qhana.siku.ui.theme.appSegmentedListItemColors
 
 /**
  * Fila de una LISTA AGRUPADA de M3, canónica y COMPARTIDA por las listas de navegación de la app.
@@ -27,7 +28,8 @@ import com.qhana.siku.ui.theme.AppColors
  *  - el gap entre filas como TOKEN (`ListItemDefaults.SegmentedGap`) en vez de un 1dp por lado
  *    escrito a mano — que resultaba ser ese mismo valor, pero sin quedar atado a él.
  *
- * El reparto de esquinas lo hace `ListItemDefaults.segmentedShapes(index, count)`, que es la misma
+ * El reparto de esquinas lo hace `groupedListItemShapes(index, count)` —`segmentedShapes` de M3 con
+ * el caso de UNA fila corregido—, que es la misma
  * regla (extremos pronunciados, interior pequeño) resuelta por la librería.
  *
  * Las acciones (play, overflow) van en [trailingContent], el slot trailing del ítem, no como
@@ -53,8 +55,8 @@ fun GroupedListRow(
 ) {
     SegmentedListItem(
         onClick = onClick,
-        shapes = ListItemDefaults.segmentedShapes(index = index, count = count),
-        colors = ListItemDefaults.segmentedColors(containerColor = containerColor),
+        shapes = groupedListItemShapes(index = index, count = count),
+        colors = appSegmentedListItemColors(containerColor),
         leadingContent = leadingContent,
         supportingContent = supportingContent,
         trailingContent = trailingContent,

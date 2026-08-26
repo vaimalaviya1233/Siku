@@ -3,9 +3,11 @@ package com.qhana.siku.ui.components
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.Transition
 import androidx.compose.foundation.layout.Box
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
@@ -32,9 +34,9 @@ import com.qhana.siku.ui.theme.appFadeExit
  * Punta **ORIGEN** de un *container transform*: la superficie de la que CRECE una pantalla y a la que
  * vuelve al cerrarse. Envuelve a [content] y no le pide nada — el contenido no sabe que participa.
  *
- * El destino (la pantalla que crece) declara el otro extremo con la misma [key]; hoy lo hace
- * `NowPlayingScreen` a través de su `containerSharedKey`. La configuración del morph vive AQUÍ y en
- * esa pantalla. Comparten [AppContainerBoundsTransform] como spec de bounds, `Alignment.Center` y la
+ * El destino (la pantalla que crece) declara el otro extremo con la misma [key]; hoy lo hace la CAPA
+ * del reproductor, con [playerContainerSharedBounds]. La configuración del morph vive AQUÍ y allá.
+ * Comparten [AppContainerBoundsTransform] como spec de bounds, `Alignment.Center` y la
  * escala de z de [CONTAINER_SHADOW_OVERLAY_Z] — pero **NO el `ContentScale`, y es deliberado**: aquí
  * `Fit` (contenido CHICO, que así no se amplifica al crecer el rect) y allá `FillWidth` (contenido de
  * PANTALLA COMPLETA, que así nace ya a tamaño natural en vez de dibujarse al 3 % y hacer zoom). El
@@ -321,4 +323,86 @@ fun entityImageSharedBounds(
     if (sharedTransitionScope == null || animatedVisibilityScope == null) return Modifier
     val state = with(sharedTransitionScope) { rememberSharedContentState(key = key) }
     return entityImageSharedBounds(state, shape, sharedTransitionScope, animatedVisibilityScope)
+}
+
+/**
+ * Punta **DESTINO** del *container transform* del reproductor: la superficie que crece hasta ser el
+ * NowPlaying, y que al cerrarse encoge de vuelta hacia la píldora o hacia la fila.
+ *
+ * **Vive en la CAPA (`NowPlayingLayer`) y no dentro de `NowPlayingScreen`**, y ese sitio es el arreglo
+ * de un fallo real (21 ago 2026). La pantalla solo se compone cuando hay algo que mostrar
+ * (`shownState != null`), o sea que la existencia de la punta dependía de que hubieran LLEGADO LOS
+ * DATOS: abriendo con la cola vacía —un chip del inicio, o la primera canción de la sesión— la canción
+ * tarda en llegar (~43 ms medidos en logcat), y durante esos frames el morph no tenía destino que
+ * emparejar; cuando por fin aparecía, la punta nacía a mitad de vuelo. La capa, en cambio, está
+ * compuesta siempre. Con esto la superficie crece desde el primer frame aunque todavía no haya
+ * contenido —que es justamente lo que hace un container transform: la superficie viaja y el contenido
+ * se intercambia— en vez de no viajar en absoluto.
+ *
+ * La regla general que sale de aquí: **una punta de shared element no puede depender de datos
+ * asíncronos**; su ciclo de vida lo marca la transición, no el repositorio.
+ *
+ * Configuración (ver también [ContainerTransformOrigin], la punta de ORIGEN):
+ *  - `enter = appContainerContentEnter()` (`None`) y **`exit = ExitTransition.None`**: la visibilidad
+ *    de esta punta la gobierna quien la compone (el reproductor es persistente), y en ese modo el
+ *    estado de reposo es `PostExit` — con un `exit` con fade el alfa de reposo sería 0 y la vuelta la
+ *    animaría la librería con su spring por defecto, o sea el reproductor CRECIENDO translúcido. El
+ *    fundido de salida lo aplica `surfaceFactor` en `NowPlayingScreen`, con el mismo spec.
+ *  - `FillWidth` y **no** `Fit`. **El `ContentScale` NO es el mismo en las dos puntas y no puede
+ *    serlo** (17 ago 2026). La regla verdadera es una sola: *el contenido de cada punta se dibuja a su
+ *    tamaño NATURAL durante todo el morph, y lo que revela u oculta es el RECORTE del contenedor*; lo
+ *    que cambia es qué `ContentScale` consigue eso a cada lado, porque `scaleToBounds` mapea el
+ *    contenido dentro del rect animado y los dos contenidos tienen tamaños opuestos. En el ORIGEN
+ *    (fila o píldora, contenido CHICO) `Fit` lo deja en 1 mientras el rect es el suyo y no lo agranda
+ *    al crecer — con `Crop` allí el contenido de la barra se ampliaba 34×, el "14 Occasions gigante"
+ *    del 16 ago. Aquí, contenido de PANTALLA COMPLETA, el ratio de ANCHO vale ~0.96 desde el primer
+ *    frame (fila y píldora ocupan casi todo el ancho), así que el contenido nace ya a tamaño natural y
+ *    el rect lo va destapando. Con `Fit` en esta punta el menor de los ratios es el de ALTO (~0.03):
+ *    el reproductor entero se dibujaba al 3 % —una maqueta en miniatura con sus controles diminutos—
+ *    y hacía zoom hasta la pantalla, que es un objeto acercándose desde lejos y no un contenedor que
+ *    crece (reportado por el usuario el 17 ago). El bloque afirmaba entonces que las dos puntas debían
+ *    configurarse IGUAL, generalizando de más un descuido del 16 ago, y eso mantuvo la miniatura un
+ *    mes. **`RemeasureToBounds` sigue DESCARTADO**: re-mide el layout cada frame y la carátula, único
+ *    `weight(1f)` de la columna, absorbía toda la holgura (la "doble animación" del 16 ago);
+ *    `scaleToBounds` no re-mide nada.
+ *  - `Alignment.Center` y no `TopCenter`: el contenido se ancla al CENTRO del rect. Abriendo desde una
+ *    fila eso es casi un no-movimiento —el centro de la fila ya está cerca del de la pantalla—, que es
+ *    la quietud que se busca; anclarlo arriba lo haría subir media pantalla bajo el recorte. La
+ *    PORTADA es la excepción y no viaja escalada con esto: tiene su propio shared element
+ *    ([PLAYER_ART_SHARED_KEY]) y se eleva al overlay, así que se dibuja una sola vez en sus propios
+ *    bounds interpolados — es lo que la deja hacer un viaje limpio de la píldora al centro.
+ *  - El que SALE se dibuja ENCIMA y se disuelve sobre el que ENTRA, sólido debajo: así abrir y cerrar
+ *    se ven igual.
+ *  - `clipInOverlayDuringTransition` con el TOKEN `extraLarge` —no su valor— porque la otra forma del
+ *    MiniPlayer sale de ese mismo token: copiar el número dejaría las dos puntas libres de divergir.
+ *
+ * @param key la superficie de la que crece; `null` = sin morph (chip, notificación) y devuelve
+ *   `Modifier` vacío, con la entrada y la salida a cargo del shared axis Z de la capa.
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+fun playerContainerSharedBounds(
+    key: Any?,
+    sharedTransitionScope: SharedTransitionScope?,
+    animatedVisibilityScope: AnimatedVisibilityScope?
+): Modifier {
+    if (sharedTransitionScope == null || animatedVisibilityScope == null || key == null) return Modifier
+    return with(sharedTransitionScope) {
+        val exiting = animatedVisibilityScope.transition.targetState != EnterExitState.Visible
+        Modifier.sharedBounds(
+            sharedContentState = rememberSharedContentState(key = key),
+            animatedVisibilityScope = animatedVisibilityScope,
+            boundsTransform = AppContainerBoundsTransform,
+            enter = appContainerContentEnter(),
+            exit = ExitTransition.None,
+            resizeMode = SharedTransitionScope.ResizeMode.scaleToBounds(
+                ContentScale.FillWidth,
+                Alignment.Center
+            ),
+            zIndexInOverlay =
+                if (exiting) CONTAINER_SURFACE_OVERLAY_Z_EXITING
+                else CONTAINER_SURFACE_OVERLAY_Z_ENTERING,
+            clipInOverlayDuringTransition = OverlayClip(MaterialTheme.shapes.extraLarge)
+        )
+    }
 }

@@ -46,6 +46,7 @@ import com.qhana.siku.ui.components.TonalChip
 import com.qhana.siku.ui.components.rememberActiveRowContentColor
 import com.qhana.siku.ui.components.rememberListItemShape
 import com.qhana.siku.ui.components.rememberReorderableListItemShape
+import com.qhana.siku.ui.components.rememberRowAccentColor
 import com.qhana.siku.ui.components.songRowBackground
 import com.qhana.siku.ui.components.sort
 import sh.calvin.reorderable.ReorderableItem
@@ -381,10 +382,19 @@ fun PlaylistDetailScreen(
                                         // null) — serían dos controles para lo mismo a un
                                         // centímetro uno del otro.
                                         trailingContent = {
+                                            val rowBackground =
+                                                songRowBackground(AppColors.surface, isPlaying)
                                             Row(verticalAlignment = Alignment.CenterVertically) {
                                                 if (isFavoritesList) {
                                                     IconButton(onClick = { onToggleFavorite(song.id) }) {
-                                                        MaterialSymbol("favorite", fill = true, color = AppColors.primary)
+                                                        MaterialSymbol(
+                                                            "favorite",
+                                                            fill = true,
+                                                            // Del fondo REAL de la fila: en la que
+                                                            // suena, `primary` se funde con el
+                                                            // `primaryContainer` que la rellena.
+                                                            color = rememberRowAccentColor(rowBackground)
+                                                        )
                                                     }
                                                 }
                                                 SongOverflowButton(
@@ -397,7 +407,7 @@ fun PlaylistDetailScreen(
                                                     },
                                                     onAddToPlaylist = { songIdForPlaylist = song.id },
                                                     onAddToQueue = { onAddToQueue(song) },
-                                                    rowBackground = songRowBackground(AppColors.surface, isPlaying)
+                                                    rowBackground = rowBackground
                                                 )
                                             }
                                         }
@@ -568,7 +578,9 @@ private fun EmptyPlaylistState(
                 val addButtonHeight = ButtonDefaults.MinHeight
                 Button(colors = appButtonColors(), onClick = onAddSongs, shapes = ButtonDefaults.shapes()) {
                     MaterialSymbol(
-                        "playlist_add",
+                        // "music_note_add" y no "playlist_add": con la lista VACÍA lo que se
+                        // ofrece es meter canciones, no añadir una lista a algo.
+                        "music_note_add",
                         size = ButtonDefaults.iconSizeFor(addButtonHeight).value.sp
                     )
                     Spacer(modifier = Modifier.width(ButtonDefaults.iconSpacingFor(addButtonHeight)))

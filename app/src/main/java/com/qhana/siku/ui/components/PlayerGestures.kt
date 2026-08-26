@@ -58,6 +58,26 @@ object PlayerGestureConfig {
     /** Arrastre vertical hacia arriba que abre el reproductor desde el MiniPlayer. */
     val ExpandThreshold = 40.dp
 
+    /**
+     * Fracción del alto de la píldora que hay que arrastrar HACIA ABAJO para pararla: **media
+     * barra**, o sea lo mismo que cuesta abrir el reproductor tirando hacia arriba.
+     *
+     * La tentación es cobrarle más al gesto destructivo, y sería un error: **el recorrido hacia
+     * abajo está ACOTADO por el borde de la pantalla**. La píldora flota a
+     * [ComponentConfig.FloatingBarBottomMargin] más los insets del sistema, así que un dedo que
+     * apoya en su mitad inferior tiene poco más de 40dp de cristal antes de quedarse sin sitio — un
+     * umbral de tres cuartos del alto no se alcanzaría desde ahí y soltar no pararía NUNCA, que es
+     * el mismo modo de fallo de [SwipeSongThresholdOfMaxDrag].
+     *
+     * Lo que protege de un descarte accidental no es el tamaño del umbral sino las otras dos
+     * decisiones: abajo **se dispara al SOLTAR** (con la barra siguiendo al dedo, así que se ve
+     * venir y se puede abandonar) y lo que pasa después **tiene deshacer**.
+     */
+    private const val MiniDismissHeightFraction = 0.5f
+
+    /** Arrastre vertical hacia abajo en el MiniPlayer que para la reproducción. */
+    val MiniDismissThreshold = ComponentConfig.MiniPlayerHeight * MiniDismissHeightFraction
+
     /** Opacidad del reproductor al llegar al umbral de cierre. */
     const val DismissMinAlpha = 0.6f
 
@@ -75,6 +95,14 @@ object PlayerGestureConfig {
      * vez de motorizado. Antes era un `spring(NoBouncy, MediumLow)` a mano.
      */
     internal fun <T> settleSpring() = AppMotionScheme.defaultSpatialSpec<T>()
+
+    /**
+     * Tramo final del descarte: lo que queda de recorrido cuando el gesto ya decidió, así que va
+     * con el token spatial RÁPIDO — el usuario ya soltó y lo que espera detrás (el snackbar de
+     * deshacer) no debe hacerse esperar. Su rebote no se ve: para cuando el spring se asienta, la
+     * superficie ya está fuera de la pantalla.
+     */
+    internal fun <T> exitSpring() = AppMotionScheme.fastSpatialSpec<T>()
 }
 
 /**
@@ -83,7 +111,8 @@ object PlayerGestureConfig {
  * carátula) y el `graphicsLayer` que traslada y atenúa la pantalla mientras el dedo baja.
  *
  * Al superar el umbral el offset NO se resetea: el cierre arranca desde donde quedó el dedo, sin el
- * salto de un snap a cero. Volver a cero es cosa de [reset], que llama el reproductor cuando ya está
+ * salto de un snap a cero (y con `exitDistance` puesto, sigue hasta salir de la pantalla antes de
+ * avisar). Volver a cero es cosa de [reset], que llama el reproductor cuando ya está
  * guardado del todo — antes bastaba con que se descompusiera al cerrarse, pero desde que el subárbol
  * es PERSISTENTE (ver `PlayerOverlay`) este `Animatable` sobrevive, y sin reponerlo el reproductor
  * reaparecería desplazado y atenuado en la posición en que lo soltó el dedo.
@@ -92,6 +121,15 @@ object PlayerGestureConfig {
 class PlayerDismissState internal constructor(
     private val scope: CoroutineScope,
     private val thresholdPx: Float,
+    /**
+     * Distancia a la que la superficie termina de irse, o `null` si al soltar no hay nada que
+     * animar. Es lo que separa a los dos consumidores: al REPRODUCTOR lo saca de escena el
+     * container transform, que arranca desde donde quedó el dedo (por eso `null`: animar aquí
+     * competiría con el morph); la PÍLDORA no tiene morph de salida —cuando la reproducción para,
+     * `currentSong` pasa a null y su rama se descompone— así que sin este tramo desaparecería de
+     * golpe a mitad del gesto. [onDismiss] se llama al LLEGAR, no al soltar.
+     */
+    private val exitDistancePx: Float?,
     private val onDismiss: () -> Unit
 ) {
     private val offset = Animatable(0f)
@@ -124,7 +162,17 @@ class PlayerDismissState internal constructor(
         if (dismissing) return
         if (offset.value >= thresholdPx && thresholdPx > 0f) {
             dismissing = true
-            onDismiss()
+            val exit = exitDistancePx
+            if (exit == null) {
+                onDismiss()
+            } else {
+                scope.launch {
+                    // `maxOf` por si el dedo ya pasó de largo: la salida nunca puede ser un salto
+                    // hacia atrás.
+                    offset.animateTo(maxOf(exit, offset.value), PlayerGestureConfig.exitSpring())
+                    onDismiss()
+                }
+            }
         } else {
             scope.launch { offset.animateTo(0f, PlayerGestureConfig.settleSpring()) }
         }
@@ -134,15 +182,23 @@ class PlayerDismissState internal constructor(
 @Composable
 fun rememberPlayerDismissState(
     threshold: Dp = PlayerGestureConfig.DismissThreshold,
+    /**
+     * Recorrido que la superficie completa SOLA tras cruzar el umbral, antes de avisar. `null` (el
+     * default, el del reproductor) = al soltar se descarta en el sitio; ver el KDoc del parámetro
+     * homónimo de [PlayerDismissState].
+     */
+    exitDistance: Dp? = null,
     onDismiss: () -> Unit
 ): PlayerDismissState {
     val scope = rememberCoroutineScope()
-    val thresholdPx = with(LocalDensity.current) { threshold.toPx() }
+    val density = LocalDensity.current
+    val thresholdPx = with(density) { threshold.toPx() }
+    val exitDistancePx = exitDistance?.let { with(density) { it.toPx() } }
     // rememberUpdatedState: el estado sobrevive a recomposiciones y no debe quedarse con una
     // lambda vieja (onDismiss se reconstruye con cada cambio de canción en PlayerOverlay).
     val currentOnDismiss by rememberUpdatedState(onDismiss)
-    return remember(scope, thresholdPx) {
-        PlayerDismissState(scope, thresholdPx) { currentOnDismiss() }
+    return remember(scope, thresholdPx, exitDistancePx) {
+        PlayerDismissState(scope, thresholdPx, exitDistancePx) { currentOnDismiss() }
     }
 }
 
@@ -191,7 +247,7 @@ fun Modifier.albumArtSwipe(
     // Los callbacks NO pueden ser clave del `pointerInput`: son instancias nuevas con cada canción
     // (`PlayerActions` se rememoiza con el id), así que tenerlos como clave reiniciaba el detector
     // a mitad de un arrastre —sin pasar por `onDragCancel`— y dejaba la carátula desplazada y el
-    // reproductor atenuado hasta el siguiente toque. Mismo patrón que `miniPlayerExpandDrag`.
+    // reproductor atenuado hasta el siguiente toque. Mismo patrón que `miniPlayerVerticalDrag`.
     val currentOnNext by rememberUpdatedState(onNext)
     val currentOnPrevious by rememberUpdatedState(onPrevious)
     if (!enabled) return this
@@ -293,17 +349,31 @@ fun Modifier.albumArtTaps(
 }
 
 /**
- * Arrastre hacia ARRIBA en el MiniPlayer para abrir el reproductor. Dispara al cruzar el umbral
- * sin esperar a que el dedo se levante: la píldora no se mueve durante el gesto (es una barra de
- * 72dp, no hay recorrido que enseñar), así que esperar al release dejaría el gesto sin respuesta
- * hasta el final y se sentiría roto.
+ * Arrastre vertical en el MiniPlayer: hacia ARRIBA abre el reproductor, hacia ABAJO lo descarta
+ * (para la reproducción, vía [dismiss]).
+ *
+ * **Las dos direcciones van en el MISMO detector**, y no en dos modifiers: `pointerInput` compite
+ * por el evento, así que el primero que reconoce un arrastre vertical se lo queda y el otro no
+ * llega a ver nunca su mitad del gesto.
+ *
+ * Y responden distinto a propósito, porque no son la misma clase de acción:
+ * - **Arriba dispara AL CRUZAR el umbral**, sin esperar al release: la píldora no se mueve en ese
+ *   sentido (no hay hueco arriba que enseñar), así que esperar al dedo dejaría el gesto mudo hasta
+ *   el final y se sentiría roto.
+ * - **Abajo dispara AL SOLTAR**, y mientras tanto la barra sigue al dedo (ver [PlayerDismissState],
+ *   que es quien traslada y atenúa): es una acción destructiva, así que tiene que poder abandonarse
+ *   a mitad de camino — y el recorrido es justamente lo que enseña que soltar ahí la va a descartar.
  */
 @Composable
-fun Modifier.miniPlayerExpandDrag(enabled: Boolean, onExpand: () -> Unit): Modifier {
+fun Modifier.miniPlayerVerticalDrag(
+    enabled: Boolean,
+    dismiss: PlayerDismissState?,
+    onExpand: () -> Unit
+): Modifier {
     if (!enabled) return this
     val thresholdPx = with(LocalDensity.current) { PlayerGestureConfig.ExpandThreshold.toPx() }
     val currentOnExpand by rememberUpdatedState(onExpand)
-    return pointerInput(thresholdPx) {
+    return pointerInput(thresholdPx, dismiss) {
         var travel = 0f
         var fired = false
         detectVerticalDragGestures(
@@ -311,12 +381,29 @@ fun Modifier.miniPlayerExpandDrag(enabled: Boolean, onExpand: () -> Unit): Modif
                 travel = 0f
                 fired = false
             },
+            onDragEnd = { dismiss?.onRelease() },
+            onDragCancel = { dismiss?.onRelease() },
             onVerticalDrag = { change, dragAmount ->
-                travel += dragAmount
-                if (!fired && travel <= -thresholdPx) {
-                    fired = true
-                    change.consume()
-                    currentOnExpand()
+                // `fired`: ya se abrió el reproductor con este mismo gesto, así que lo que quede de
+                // arrastre no tiene a quién ir — la píldora ya no está.
+                if (!fired) {
+                    travel += dragAmount
+                    if (travel <= -thresholdPx) {
+                        fired = true
+                        // El recorrido hacia abajo que hubiera antes NO se toca: el morph arranca
+                        // desde los bounds que la píldora tiene puestos —quien la traslada lo hace
+                        // por layout, así que el lookahead los ve— y al soltar el dedo `onDragEnd`
+                        // la devuelve a su sitio con el spring de retorno de siempre.
+                        change.consume()
+                        currentOnExpand()
+                    } else {
+                        dismiss?.let {
+                            it.onDrag(dragAmount)
+                            // Solo se consume si de verdad se está moviendo algo: un arrastre hacia
+                            // arriba que aún no llegó al umbral no debe robarle el evento a nadie.
+                            if (it.offsetY > 0f) change.consume()
+                        }
+                    }
                 }
             }
         )

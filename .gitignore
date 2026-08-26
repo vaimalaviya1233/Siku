@@ -24,3 +24,6 @@ local.properties
 
 # Capturas del profiler (Perfetto). Pesan cientos de MB y son de una sesión concreta.
 /performance/
+
+# Cachés de los scripts de tools/
+__pycache__/

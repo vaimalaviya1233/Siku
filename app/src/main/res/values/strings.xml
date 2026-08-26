@@ -292,6 +292,7 @@
     <string name="queue_save_short">Guardar</string>
     <string name="queue_clear_short">Vaciar</string>
     <string name="queue_cleared">Cola vaciada</string>
+    <string name="playback_stopped">Reproducción detenida</string>
     <string name="common_undo">Deshacer</string>
     <string name="queue_added">Añadida a la cola</string>
     <string name="queue_already_in">Ya está en la cola</string>
@@ -544,6 +545,9 @@
     <string name="settings_tabs_header">Pestañas</string>
     <string name="settings_tabs_desc">Arrastra para ordenar. Las pestañas desactivadas no aparecen en la biblioteca.</string>
     <string name="settings_tabs_min">Tiene que quedar al menos una pestaña</string>
+    <!-- Modo "pestañas abajo": solo cambia DÓNDE se dibuja el selector, no qué pestañas hay. -->
+    <string name="settings_bottom_tabs">Pestañas abajo</string>
+    <string name="settings_bottom_tabs_desc">Muestra las pestañas en una barra inferior en vez de bajo la búsqueda. Con el teléfono girado siempre van al lado.</string>
 
     <!-- ==================== Chip de formato del reproductor ==================== -->
     <string name="settings_detailed_format">Detalle del formato</string>
@@ -670,6 +674,19 @@
     <string name="source_phone_music_desc">Toda la música del dispositivo, o solo las carpetas que elijas.</string>
     <string name="sources_rescan">Volver a escanear</string>
     <string name="sources_rescan_desc">Full scan de todas las fuentes y limpieza de las canciones que ya no existen.</string>
+
+    <!-- Carpetas excluidas del escaneo del dispositivo -->
+    <string name="settings_excluded_folders">Carpetas excluidas</string>
+    <string name="settings_excluded_folders_desc">Elige qué carpetas ignora el escaneo del dispositivo.</string>
+    <string name="settings_excluded_folders_hint">El escaneo del dispositivo indexa toda la música que ve el sistema, y ahí caen audios de mensajería, grabaciones y sonidos de juegos. Apaga las carpetas que no son tu biblioteca. Las canciones excluidas salen de la app —con sus listas y su historial—, pero los archivos no se tocan.</string>
+    <string name="settings_excluded_folders_loading">Buscando carpetas…</string>
+    <string name="settings_excluded_folders_empty">El sistema no ve música en este dispositivo.</string>
+    <string name="settings_excluded_folder_detail">%1$s · %2$d canciones</string>
+    <string name="excluded_folders_applied">Aplicando cambios…</string>
+    <plurals name="settings_excluded_folders_count">
+        <item quantity="one">1 carpeta excluida</item>
+        <item quantity="other">%d carpetas excluidas</item>
+    </plurals>
     <string name="sources_rescan_started">Escaneando fuentes…</string>
 
     <!-- Copia de seguridad de playlists (Fase 6) -->
@@ -714,8 +731,10 @@
     <string name="settings_progress_handle_desc">Mantiene el palito de la posición siempre visible en la barra del reproductor. Si lo apagas, aparece solo mientras arrastras.</string>
     <string name="settings_mini_player_rect">Miniplayer rectangular</string>
     <string name="settings_mini_player_rect_desc">Usa esquinas redondeadas en la barra flotante en vez de la forma de píldora.</string>
+    <string name="settings_mini_player_round_play">Botón de reproducción redondo</string>
+    <string name="settings_mini_player_round_play_desc">En la barra flotante, un círculo en vez de la forma cuadrada redondeada.</string>
     <string name="settings_player_gestures">Gestos del reproductor</string>
-    <string name="settings_player_gestures_desc">Desliza la carátula para cambiar de canción, hacia abajo para cerrar el reproductor y hacia arriba en el miniplayer para abrirlo. Toca dos veces a los lados de la carátula para saltar %1$d segundos.</string>
+    <string name="settings_player_gestures_desc">Desliza la carátula para cambiar de canción o hacia abajo para cerrar el reproductor. En el miniplayer, desliza hacia arriba para abrirlo y hacia abajo para detener la reproducción. Toca dos veces a los lados de la carátula para saltar %1$d segundos.</string>
 
     <!-- Estilo de paleta: cómo se genera el tema a partir del color de la carátula -->
     <string name="settings_palette_style">Estilo de color</string>

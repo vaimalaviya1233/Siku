@@ -2,6 +2,8 @@ package com.qhana.siku.ui.components
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ListItemDefaults
+import androidx.compose.material3.ListItemShapes
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -90,6 +92,31 @@ fun rememberReorderableListItemShape(
 }
 
 /** El reparto de esquinas del grupo, compartido por las dos funciones de arriba. */
+
+/**
+ * Los `ListItemShapes` de una fila dentro de un grupo segmentado, para los `SegmentedListItem` de
+ * M3 (que resuelven la forma ellos, a diferencia de [rememberListItemShape], que la calcula para
+ * superficies propias).
+ *
+ * **Existe por el caso de UNA sola fila.** `ListItemDefaults.segmentedShapes` devuelve ahí el
+ * `defaultShapes` tal cual (`ListItem.kt`, rama `count == 1`), o sea el radio INTERIOR de 4dp: una
+ * tarjeta suelta con esquinas de fila del medio, que se lee cuadrada al lado de todo lo demás. Un
+ * grupo de uno no tiene vecinos con los que encajar, así que sus cuatro esquinas son exteriores —
+ * es el mismo criterio que [rememberListItemShape] ya aplica en `groupCornerRadii`.
+ *
+ * El `pressedShape` sigue siendo el del spec: solo se sustituye la forma en reposo.
+ */
+@Composable
+fun groupedListItemShapes(index: Int, count: Int): ListItemShapes =
+    ListItemDefaults.segmentedShapes(
+        index = index,
+        count = count,
+        defaultShapes = if (count == 1) {
+            ListItemDefaults.shapes(shape = RoundedCornerShape(ProminentRadius))
+        } else {
+            ListItemDefaults.shapes()
+        }
+    )
 private fun groupCornerRadii(index: Int, count: Int, highlighted: Boolean): CornerRadii = when {
     highlighted || count == 1 ->
         CornerRadii(ProminentRadius, ProminentRadius, ProminentRadius, ProminentRadius)

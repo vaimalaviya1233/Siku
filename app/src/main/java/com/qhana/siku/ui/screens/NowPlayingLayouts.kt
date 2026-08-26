@@ -7,6 +7,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.qhana.siku.data.model.PlaybackOrigin
@@ -76,7 +77,7 @@ internal fun NowPlayingPortrait(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = NowPlayingConfig.ContentKeyline),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         AlbumArtSection(
@@ -94,6 +95,10 @@ internal fun NowPlayingPortrait(
             dismiss = dismiss,
             modifier = Modifier
                 .weight(1f)
+                // **La portada SANGRA la keyline**: es la protagonista de la pantalla y la única
+                // pieza que no se alinea con el resto (24 ago 2026). Ver [bleedHorizontally] para
+                // por qué se hace aquí y no repartiendo el padding de la columna entre los hijos.
+                .bleedHorizontally(NowPlayingConfig.ContentKeyline)
                 .fillMaxWidth()
                 // La carátula es cuadrada dentro de este hueco y `weight(1f)`, o sea que vive de lo
                 // que sobra: cada dp que se lleve cualquier otro bloque la encoge por los CUATRO
@@ -106,14 +111,13 @@ internal fun NowPlayingPortrait(
                 // hueco de arriba medía el doble que el de abajo y la info se leía apelmazada contra
                 // la portada.
                 //
-                // El horizontal se queda a ojo en 8 sobre los 16 de la columna (24/8 la dejaba
-                // chica, 8/0 la llevaba a tocar los márgenes) y hoy no manda: con la pantalla en
-                // vertical el límite es el ALTO.
+                // **Y NO lleva padding horizontal.** Tenía 8dp propios sobre los 16 de la columna,
+                // o sea 24 por lado, que con el sangrado serían justo lo que impide el efecto: el
+                // margen lateral de la portada es ahora el que sobre del reparto de ALTO, cero
+                // cuando el alto alcance para llenar el ancho.
                 .padding(
                     top = NowPlayingConfig.ItemGap,
-                    bottom = NowPlayingConfig.BlockGap,
-                    start = 8.dp,
-                    end = 8.dp
+                    bottom = NowPlayingConfig.BlockGap
                 )
         )
 
@@ -215,6 +219,40 @@ internal fun NowPlayingPortrait(
     }
 }
 
+
+/**
+ * Saca el contenido [bleed] por cada lado del padding del padre — **la portada del reproductor es
+ * la única pieza que lo usa** (24 ago 2026).
+ *
+ * Mide al hijo con el ancho ENTERO (el disponible más los dos márgenes), lo coloca desplazado a
+ * `-bleed` y **reporta el ancho de antes**, así que la columna sigue midiendo y alineando igual que
+ * si nada: lo único que se sale es el dibujo.
+ *
+ * **Por qué no se reparte el padding entre los hijos**, que sería la otra forma de conseguirlo: la
+ * keyline se quedaría sin dueño y el próximo bloque que alguien añada a esta columna nacería pegado
+ * al borde de la pantalla, sin error de compilación y sin más síntoma que un texto descuadrado en
+ * una pantalla que casi nadie mira a 393dp. Con la keyline en la columna, alinearse es lo que pasa
+ * por defecto y **salirse es lo que hay que pedir explícitamente**, que es exactamente el reparto de
+ * responsabilidad correcto cuando la excepción es UNA.
+ *
+ * Va por `Modifier.layout` y no por `offset`/`graphicsLayer` porque la portada es punta de shared
+ * element: sus bounds salen del LOOKAHEAD, donde una traslación de dibujo no existe (mismo motivo
+ * que `chromeShift` y el arrastre de la píldora).
+ */
+private fun Modifier.bleedHorizontally(bleed: Dp): Modifier = layout { measurable, constraints ->
+    // Sin ancho acotado no hay margen del que salirse: medir "todo + 32" contra infinito no
+    // significa nada, así que el modificador se aparta y deja pasar las constraints tal cual.
+    val extra = if (constraints.hasBoundedWidth) bleed.roundToPx() else 0
+    val placeable = measurable.measure(
+        constraints.copy(maxWidth = constraints.maxWidth + extra * 2)
+    )
+    val reportedWidth = (placeable.width - extra * 2)
+        .coerceIn(constraints.minWidth, constraints.maxWidth)
+    layout(reportedWidth, placeable.height) {
+        placeable.place(-extra, 0)
+    }
+}
+
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 internal fun NowPlayingLandscape(
@@ -284,7 +322,7 @@ internal fun NowPlayingLandscape(
         modifier = Modifier
             .fillMaxSize()
             .displayCutoutPadding()
-            .padding(horizontal = 24.dp),
+            .padding(horizontal = NowPlayingConfig.LandscapeContentKeyline),
         horizontalArrangement = Arrangement.spacedBy(32.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -318,7 +356,10 @@ internal fun NowPlayingLandscape(
                 compactChip = true,
                 // Los insets ya vienen del Scaffold; repetir el del status bar aquí dejaría una
                 // franja vacía sobre la barra.
-                applyStatusBarPadding = false
+                applyStatusBarPadding = false,
+                // Esta columna respira más que la de portrait, así que la línea con la que se
+                // alinean los glifos de los extremos es la suya.
+                contentKeyline = NowPlayingConfig.LandscapeContentKeyline
             )
 
             // Carátula: ocupa el alto sobrante entre info bar y toolbar, cuadrada y centrada.

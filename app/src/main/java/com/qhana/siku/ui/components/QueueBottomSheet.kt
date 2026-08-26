@@ -174,11 +174,28 @@ fun QueueBottomSheet(
         }
     }
 
-    // Scroll inicial al elemento actual
-    LaunchedEffect(Unit) {
-        if (localCurrentIndex >= 0 && localPlaylist.isNotEmpty()) {
-            listState.scrollToItem((localCurrentIndex - 3).coerceAtLeast(0))
-        }
+    // Scroll inicial a la canción en curso, que queda ENCABEZANDO la lista: la cola se abre para ver
+    // lo que viene y reordenarlo, así que todo lo que se ponga por encima son filas menos de lo que
+    // sí se está mirando. Hubo un `- 3` (dejar tres reproducidas arriba "por contexto") y no había
+    // nada que hiciera a 3 mejor que a 1 o a 5 — la señal de que el número no debía existir.
+    //
+    // **La clave NO puede ser `Unit`**, y ese era el bug de "la cola siempre abre por el principio":
+    // la lista llega VACÍA a la primera composición —`uiPlaylist` es un `produceState` que mapea los
+    // modelos en `Dispatchers.Default` (ver NowPlayingScreen), así que su primer valor es
+    // `emptyList()`—, de modo que en el ÚNICO intento la guarda `isNotEmpty()` era falsa y no había
+    // segundo. La lista aparecía unos ms después, ya en el ítem 0. La clave tiene que ser la
+    // condición que el efecto necesita, no el momento del montaje.
+    //
+    // El flag es lo que lo deja en UN scroll por apertura: sin él, cualquier cambio de tamaño
+    // (quitar una canción, o la reemisión del controller tras un reorden) devolvería la lista a la
+    // canción en curso y se llevaría por delante el sitio donde el usuario estaba mirando. Alcanza
+    // con `remember` porque la hoja se DESCOMPONE al cerrarse (ver [SheetOverlay]): la vida del
+    // recuerdo es exactamente una apertura.
+    var initialScrollDone by remember { mutableStateOf(false) }
+    LaunchedEffect(playlistSize, localCurrentIndex) {
+        if (initialScrollDone || playlistSize <= 0 || localCurrentIndex < 0) return@LaunchedEffect
+        initialScrollDone = true
+        listState.scrollToItem(localCurrentIndex)
     }
 
     androidx.activity.compose.BackHandler(enabled = true) {
@@ -382,7 +399,18 @@ private fun QueueActionsToolbar(
                 // construcción es su propio `onPrimaryContainer`: rellenar con él y poner el contenido
                 // en `primaryContainer` da una píldora sólida de alto contraste con la barra en los
                 // cuatro casos (vívido/apagado × claro/oscuro), sin depender del croma de la carátula.
+                //
+                // APAGADO = PLANO sobre la barra, igual que los otros dos items. Los cuatro roles
+                // van explícitos porque **un rol que no se pasa NO se hereda: se resuelve contra
+                // `MaterialTheme.colorScheme`**, que desde la migración a [AppColors] es el esquema
+                // BASE (claro/oscuro + wallpaper) y no lleva el color del álbum. Aquí solo estaba
+                // escrito el par marcado, así que el estado apagado —el que se ve casi siempre—
+                // se pintaba con el `secondaryContainer` del wallpaper: una píldora AZUL dentro de
+                // una barra teñida por la carátula. Y en un toolbar el contenedor tonal tampoco
+                // corresponde: la barra ya es la superficie, el relleno es lo que marca el estado.
                 colors = ToggleButtonDefaults.tonalToggleButtonColors(
+                    containerColor = Color.Transparent,
+                    contentColor = toolbarContent,
                     checkedContainerColor = AppColors.onPrimaryContainer,
                     checkedContentColor = AppColors.primaryContainer
                 ),
@@ -444,16 +472,13 @@ private fun QueueItemRow(
     onRemove: () -> Unit,
     dragHandleModifier: Modifier
 ) {
-    // Resaltado del ítem en reproducción: `primaryContainer` (contenedor tonal sólido, sin opacidad)
-    // con su contenido en `onPrimaryContainer`. Es el contenedor de acento con MÁS croma —la paleta
-    // primary lleva más color que la secondary—, así que en álbumes con color se despega claramente.
-    // En un álbum monocromo el tema entero es neutro y este contenedor queda tonalmente cerca del
-    // resto de filas: es el límite del enfoque por contenedor cuando no hay color con el que teñir.
-    val backgroundColor = if (isCurrentSong) {
-        AppColors.primaryContainer
-    } else {
-        AppColors.surfaceContainerHigh
-    }
+    // Resaltado del ítem en reproducción, por el helper compartido: un escalón de superficie teñido
+    // con el croma de `primaryContainer` —la paleta primary lleva más color que la secondary— sobre
+    // la base REAL de estas filas, que aquí es `surfaceContainerHigh` y no el `surface` de la
+    // biblioteca. Con el rol a pelo, el mismo resaltado saltaba distinto en cada pantalla según de
+    // qué fondo partiera. En un álbum monocromo el tema entero es neutro y el escalón se lee solo
+    // por tono: es el límite del enfoque por contenedor cuando no hay color con el que teñir.
+    val backgroundColor = songRowBackground(AppColors.surfaceContainerHigh, isCurrentSong)
     // Contenido de la fila activa: el `on-` de ese relleno con contraste garantizado (el porqué vive
     // en `rememberActiveRowContentColor`, que es la definición ÚNICA que comparten las cuatro
     // superficies donde se resalta la canción actual).

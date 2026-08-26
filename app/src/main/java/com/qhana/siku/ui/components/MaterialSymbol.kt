@@ -129,7 +129,7 @@ private const val MenuIconOpticalSize = 20
  *
  * Cada combinación distinta de ejes (FILL/wght/GRAD/opsz) es un `Typeface` distinto que Android
  * construye con `Typeface.Builder(assets, path).setFontVariationSettings(...)`, o sea **parseando el
- * archivo entero otra vez** — y `material_symbols_rounded.ttf` pesa **15 MB**. Compose resuelve una
+ * archivo entero otra vez**, y ese coste es proporcional al TAMAÑO del archivo. Compose resuelve una
  * fuente de assets de forma BLOQUEANTE dentro del `measure` del primer texto que la pide, así que en
  * un arranque en frío ese parseo caía en el hilo principal, en el segundo frame de la app: medido en
  * Perfetto el 20 ago 2026, dos `TextStringSimpleNode::measure` de **89,8 y 41,4 ms** (una variante
@@ -143,6 +143,14 @@ private const val MenuIconOpticalSize = 20
  * ejes, no por instancia — así que lo resuelto aquí es exactamente lo que el primer frame encuentra
  * hecho. Va en la Application y NO en un `LaunchedEffect`: el efecto arranca después de la primera
  * composición, y la primera composición ya pide estos glifos (las pestañas de la biblioteca).
+ *
+ * **La fuente empaquetada es un SUBSET desde la 1.2.0**: 117 glifos en vez de 4174, 0,24 MB en vez
+ * de 14,9 (ver `tools/subset_icon_font.py` y la tarea `verifyIconFontSubset`). Eso reduce el parseo
+ * en dos órdenes de magnitud y deja este precalentamiento casi gratis — pero NO lo hace inútil: la
+ * resolución sigue siendo bloqueante dentro del `measure`, y sigue siendo mejor pagarla en un hilo
+ * de fondo que en el segundo frame. Lo que sí deja de ser cierto es el tamaño de la factura, así
+ * que las cifras de arriba son de ANTES del subset y solo valen como historia de por qué existe
+ * esto.
  *
  * **Si se añade una variante nueva al arranque (otro `weight`, `grade` u `opticalSize` en pantalla
  * desde el primer frame), añadirla a [STARTUP_VARIANTS]**; una variante que solo aparece más tarde

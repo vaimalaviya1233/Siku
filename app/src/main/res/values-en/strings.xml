@@ -260,6 +260,7 @@
     <string name="queue_save_short">Save</string>
     <string name="queue_clear_short">Clear</string>
     <string name="queue_cleared">Queue cleared</string>
+    <string name="playback_stopped">Playback stopped</string>
     <string name="common_undo">Undo</string>
     <string name="queue_added">Added to queue</string>
     <string name="queue_already_in">Already in the queue</string>
@@ -490,6 +491,8 @@
     <string name="settings_tabs_header">Tabs</string>
     <string name="settings_tabs_desc">Drag to reorder. Disabled tabs do not show up in the library.</string>
     <string name="settings_tabs_min">At least one tab must stay on</string>
+    <string name="settings_bottom_tabs">Tabs at the bottom</string>
+    <string name="settings_bottom_tabs_desc">Show the tabs in a bottom bar instead of under the search field. In landscape they always move to the side.</string>
 
     <!-- ==================== Player format chip ==================== -->
     <string name="settings_detailed_format">Format details</string>
@@ -613,6 +616,19 @@
     <string name="source_phone_music_desc">All the music on your device, or just the folders you pick.</string>
     <string name="sources_rescan">Scan again</string>
     <string name="sources_rescan_desc">Full scan of every source and cleanup of songs that no longer exist.</string>
+
+    <!-- Folders excluded from the device scan -->
+    <string name="settings_excluded_folders">Excluded folders</string>
+    <string name="settings_excluded_folders_desc">Choose which folders the device scan ignores.</string>
+    <string name="settings_excluded_folders_hint">The device scan indexes every piece of music the system can see, which includes messaging audio, voice recordings and game sounds. Turn off the folders that aren\'t your library. Excluded songs leave the app — along with their playlists and history — but the files are untouched.</string>
+    <string name="settings_excluded_folders_loading">Looking for folders…</string>
+    <string name="settings_excluded_folders_empty">The system sees no music on this device.</string>
+    <string name="settings_excluded_folder_detail">%1$s · %2$d songs</string>
+    <string name="excluded_folders_applied">Applying changes…</string>
+    <plurals name="settings_excluded_folders_count">
+        <item quantity="one">1 folder excluded</item>
+        <item quantity="other">%d folders excluded</item>
+    </plurals>
     <string name="sources_rescan_started">Scanning sources…</string>
 
     <!-- Playlist backup (Phase 6) -->
@@ -654,8 +670,10 @@
     <string name="settings_progress_handle_desc">Keeps the position handle always visible on the player bar. Turn it off and it only shows while you drag.</string>
     <string name="settings_mini_player_rect">Rectangular mini player</string>
     <string name="settings_mini_player_rect_desc">Uses rounded corners on the floating bar instead of the pill shape.</string>
+    <string name="settings_mini_player_round_play">Round play button</string>
+    <string name="settings_mini_player_round_play_desc">A circle instead of the rounded square shape on the floating bar.</string>
     <string name="settings_player_gestures">Player gestures</string>
-    <string name="settings_player_gestures_desc">Swipe the album art to change songs, down to close the player and up on the mini player to open it. Double tap the sides of the album art to skip %1$d seconds.</string>
+    <string name="settings_player_gestures_desc">Swipe the album art to change songs or down to close the player. On the mini player, swipe up to open it and down to stop playback. Double tap the sides of the album art to skip %1$d seconds.</string>
 
     <!-- Palette style: how the theme is generated from the album art color -->
     <string name="settings_palette_style">Color style</string>

@@ -53,6 +53,10 @@ data class PlaybackSettingsState(
     val nowPlayingProgressHandle: Boolean = MusicPreferences.DEFAULT_PROGRESS_HANDLE,
     /** MiniPlayer como rectángulo redondeado en vez de píldora (false = píldora, el diseño actual). */
     val miniPlayerRoundedRect: Boolean = false,
+    /** Botón de play del MiniPlayer redondo en vez de squircle (false = squircle, el default). */
+    val miniPlayerRoundPlayButton: Boolean = false,
+    /** Pestañas de la biblioteca ABAJO (navigation bar) en vez de en la fila bajo la búsqueda. */
+    val libraryBottomTabs: Boolean = false,
     /** Chip de formato del NowPlaying con la ficha técnica (bitrate/bits + frecuencia). */
     val nowPlayingDetailedFormat: Boolean = false,
     /** Deslizar la carátula/el player y el doble toque para saltar. Encendido por defecto. */
@@ -92,6 +96,8 @@ data class LibraryUiState(
     val nowPlayingProgressThickness: Int get() = playbackSettings.nowPlayingProgressThickness
     val nowPlayingProgressHandle: Boolean get() = playbackSettings.nowPlayingProgressHandle
     val miniPlayerRoundedRect: Boolean get() = playbackSettings.miniPlayerRoundedRect
+    val miniPlayerRoundPlayButton: Boolean get() = playbackSettings.miniPlayerRoundPlayButton
+    val libraryBottomTabs: Boolean get() = playbackSettings.libraryBottomTabs
     val nowPlayingDetailedFormat: Boolean get() = playbackSettings.nowPlayingDetailedFormat
     val playerGestures: Boolean get() = playbackSettings.playerGestures
     val useSystemEq: Boolean get() = playbackSettings.useSystemEq

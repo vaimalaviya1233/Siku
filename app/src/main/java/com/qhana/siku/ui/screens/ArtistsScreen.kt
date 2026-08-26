@@ -16,6 +16,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.MaterialShapes
+import androidx.graphics.shapes.RoundedPolygon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -45,7 +47,6 @@ import com.qhana.siku.ui.components.ACCENT_SECONDARY_ALPHA
 import com.qhana.siku.ui.components.ComponentConfig
 import com.qhana.siku.ui.components.FilteredEmptyHint
 import com.qhana.siku.ui.components.GroupedListRow
-import com.qhana.siku.ui.components.HeptagonShape
 import com.qhana.siku.ui.components.entityImageSharedBounds
 import com.qhana.siku.ui.components.SortChip
 import com.qhana.siku.ui.components.SourceFilterChips
@@ -59,15 +60,34 @@ import com.qhana.siku.ui.theme.AppColors
 import com.qhana.siku.ui.theme.AppSurface
 
 /**
- * Máscara heptagonal COMPARTIDA por todas las filas: una sola instancia (el path unitario se
- * calcula una vez) y un solo cacheKey para el memory cache de Coil.
+ * Máscara COMPARTIDA por todas las filas: una sola instancia (el path unitario se calcula una vez)
+ * y un solo cacheKey para el memory cache de Coil.
  *
- * El `cacheKey` identifica la TRANSFORMACIÓN dentro de la clave del memory cache de Coil: si algún
- * día la forma cambia, tiene que cambiar con ella o dos recortes distintos compartirían entrada.
+ * La forma es **`MaterialShapes.Cookie7Sided`** desde el 21 ago 2026; antes fue un heptágono propio
+ * (`HeptagonShape`, eliminado al quedarse sin consumidores) y, un rato ese mismo día, `Gem`.
+ *
+ * **Sale de [ArtistPhotoShape] y de ningún otro sitio.** La forma de esta foto vive en TRES
+ * consumidores —esta máscara, la silueta que se declara para el vuelo del shared element, y el
+ * fondo del placeholder— y con la forma escrita a mano en cada uno es posible cambiar unos y no
+ * otros. Pasó: al pasar de `Gem` a `Cookie7Sided` se cambió solo la máscara, así que el bitmap
+ * llevaba una cookie horneada mientras el overlay del vuelo lo recortaba con una gema. El síntoma
+ * no parecía de forma sino de MOVIMIENTO —al volver del detalle la imagen se contraía hacia
+ * adentro—, porque lo que se veía era una silueta cerrándose sobre otra distinta.
  */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+private val ArtistPhotoShape: RoundedPolygon get() = MaterialShapes.Cookie7Sided
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 private val ArtistPhotoMask by lazy {
-    RoundedPolygonMaskTransformation(HeptagonShape, cacheKey = "heptagon")
+    RoundedPolygonMaskTransformation(ArtistPhotoShape, cacheKey = ARTIST_PHOTO_CACHE_KEY)
 }
+
+/**
+ * Identifica la TRANSFORMACIÓN dentro de la clave del memory cache de Coil. **Cambiar la forma
+ * obliga a cambiar esto**, o los recortes ya cacheados con la forma vieja se sirven como si fueran
+ * los nuevos.
+ */
+private const val ARTIST_PHOTO_CACHE_KEY = "cookie7"
 
 /**
  * Pestaña "Artistas": lista con foto Deezer, nombre y contadores. Las fotos NO se fetchean
@@ -216,13 +236,13 @@ private fun ArtistRow(
     // La foto es shared element hacia el header del detalle del artista (misma familia
     // de morph que carátula MiniPlayer→NowPlaying). sharedBounds (no sharedElement):
     // el contenido difiere (thumb chico vs foto grande) y así cross-fadea.
-    // La silueta heptagonal se declara para el vuelo aunque el bitmap ya la traiga HORNEADA (ver
+    // La silueta se declara para el vuelo aunque el bitmap ya la traiga HORNEADA (ver
     // [ArtistPhotoMask]): el placeholder no la lleva, y el overlay del `SharedTransitionScope` se
     // salta los recortes de los padres, así que sin esto la punta despega como un cuadrado.
     // Sin `remember` alrededor: `RoundedPolygon.toShape()` es `@Composable` (no una función normal)
     // y ya cachea por dentro con `remember(this, startAngle)`, así que envolverlo era a la vez
     // ilegal —invocar un composable desde la lambda de `remember`— y redundante.
-    val photoShape = HeptagonShape.toShape()
+    val photoShape = ArtistPhotoShape.toShape()
     val sharedModifier = entityImageSharedBounds(
         key = "artist_image_${artist.name}",
         shape = photoShape,
@@ -279,7 +299,7 @@ private fun ArtistRow(
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(AppColors.surfaceContainerHighest, HeptagonShape.toShape()),
+                            .background(AppColors.surfaceContainerHighest, photoShape),
                         contentAlignment = Alignment.Center
                     ) {
                         MaterialSymbol("artist", color = AppColors.onSurfaceVariant)

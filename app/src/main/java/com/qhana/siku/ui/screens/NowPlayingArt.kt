@@ -26,6 +26,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.sp
@@ -75,7 +77,9 @@ internal fun NowPlayingTopBar(
      * En vertical la barra es el `topBar` del Scaffold y pone ella el inset del status bar; en
      * horizontal cuelga dentro del contenido, que ya lo recibió por `innerPadding`.
      */
-    applyStatusBarPadding: Boolean = true
+    applyStatusBarPadding: Boolean = true,
+    /** La línea con la que deben alinearse los GLIFOS de los extremos (ver [opticalEdgePadding]). */
+    contentKeyline: Dp = NowPlayingConfig.ContentKeyline
 ) {
     // Los dos iconos de la barra van con el ACENTO del álbum, no con `onSurface`. Con onSurface (un
     // neutro casi acromático) se leían como un GRIS suelto al lado del resto de la barra, que va todo
@@ -87,11 +91,14 @@ internal fun NowPlayingTopBar(
         ensureContrast(accentColor, backgroundColor, TopBarIconMinContrast)
     }
 
+    // El padding lateral NO es de la fila sino de cada botón, y sale del tamaño de SU glifo: los
+    // dos iconos tienen cuerpos distintos (32 y 28), así que a igual margen quedan a distinta
+    // distancia visual del borde. Ver [opticalEdgePadding].
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .then(if (applyStatusBarPadding) Modifier.statusBarsPadding() else Modifier)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+            .padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
@@ -102,7 +109,8 @@ internal fun NowPlayingTopBar(
             icon = "keyboard_arrow_down",
             description = stringResource(R.string.np_close_desc),
             contentColor = iconColor,
-            iconSize = 32.sp
+            iconSize = 32.sp,
+            modifier = Modifier.padding(start = opticalEdgePadding(32.sp, contentKeyline))
         )
 
         PlaybackSourceChip(
@@ -118,9 +126,29 @@ internal fun NowPlayingTopBar(
             icon = "expand_content",
             description = stringResource(R.string.np_ambient_mode_desc),
             contentColor = iconColor,
-            iconSize = 28.sp
+            iconSize = 28.sp,
+            modifier = Modifier.padding(end = opticalEdgePadding(28.sp, contentKeyline))
         )
     }
+}
+
+/**
+ * Cuánto separar del borde un icon button para que su GLIFO —y no su caja— caiga en [keyline].
+ *
+ * Un `ExpressiveActionIcon` es un cuadrado táctil de 48dp con el dibujo centrado, así que pegarlo
+ * a la keyline mete el glifo `(48 - tamaño) / 2` más adentro: con los cuerpos de esta barra, 24 y
+ * 26dp donde el título está a 16. Se leía como si los dos iconos estuvieran corridos hacia el
+ * centro, que es exactamente lo que son. Restando esa mitad, el dibujo se alinea con el texto y el
+ * área táctil sigue midiendo 48.
+ *
+ * Es el mismo reparto que hace M3 en sus app bars, donde el icon button va a 4dp del borde para
+ * dejar su glifo de 24 en la keyline de 16 — solo que aquí el tamaño del glifo es un parámetro, así
+ * que la cuenta se hace en vez de tabularse.
+ */
+@Composable
+private fun opticalEdgePadding(iconSize: TextUnit, keyline: Dp): Dp {
+    val glyph = with(LocalDensity.current) { iconSize.toDp() }
+    return (keyline - (NowPlayingConfig.ActionIconTouchSize - glyph) / 2).coerceAtLeast(0.dp)
 }
 
 /**
@@ -524,6 +552,37 @@ private fun NowPlayingArtImage(
     }
 }
 
+/** Aire lateral del área pulsable de artista/álbum, acotado por el margen del contenido. */
+private val TextChipPadding = 8.dp
+
+/** Vertical aparte y menor: de más, las tres líneas de la ficha dejan de leerse como un bloque. */
+private val TextChipVerticalPadding = 4.dp
+
+private val TextChipCorner = 8.dp
+
+/**
+ * Una línea de texto que se puede pulsar y que además LO PARECE al pulsarla: el `clickable` se
+ * queda pegado a las letras si el padding no está dentro de él, y entonces el ripple sale del
+ * mismo tamaño que el texto, sin un milímetro de aire.
+ *
+ * El detalle que lo hace no trivial es que el aire no puede correr el texto: artista y álbum se
+ * alinean con el título, que no es pulsable y por tanto no lleva padding. Así que el inset se
+ * compensa con un `offset` NEGATIVO del mismo valor — el contenedor empieza antes del margen y el
+ * texto acaba justo donde estaba. Lo que crece es la superficie que reacciona, no el bloque.
+ *
+ * El desplazamiento se come parte del margen lateral de la pantalla ([NowPlayingConfig.ContentKeyline]),
+ * que es de donde sale el tope: pedir más aire que margen sacaría el ripple fuera de la pantalla.
+ *
+ * Es `@Composable` porque la sobrecarga simple de `clickable` resuelve `LocalIndication` y lo
+ * necesita; devolver un `Modifier` desde una función composable es válido y es el patrón habitual.
+ */
+@Composable
+private fun Modifier.clickableTextChip(onClick: () -> Unit): Modifier = this
+    .offset(x = -TextChipPadding)
+    .clip(RoundedCornerShape(TextChipCorner))
+    .clickable(onClick = onClick)
+    .padding(horizontal = TextChipPadding, vertical = TextChipVerticalPadding)
+
 @Composable
 internal fun SongInfoSection(
     song: Song,
@@ -580,10 +639,7 @@ internal fun SongInfoSection(
                 color = AppColors.secondary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .clickable { onArtistClick(song.artist) }
-                    .padding(vertical = 2.dp)
+                modifier = Modifier.clickableTextChip { onArtistClick(song.artist) }
             )
             if (song.album.isNotBlank()) {
                 Text(
@@ -592,10 +648,7 @@ internal fun SongInfoSection(
                     color = AppColors.secondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { onAlbumClick(song.album) }
-                        .padding(vertical = 2.dp)
+                    modifier = Modifier.clickableTextChip { onAlbumClick(song.album) }
                 )
             }
         }
@@ -614,7 +667,7 @@ internal fun SongInfoSection(
  * rellena con el acento del álbum al activarse, y el corazón da un pequeño REBOTE
  * (snap 0.7 → spring con overshoot) en cada cambio de estado.
  *
- * Tamaño de spec LARGE-narrow: 64×96 con icono de 32.
+ * Tamaño de spec LARGE-narrow ([FavoriteHeartWidth]×[FavoriteHeartHeight]) con icono de 32.
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -675,8 +728,8 @@ private fun FavoriteHeartPill(
             checkedContentColor = heartColor
         ),
         modifier = modifier
-            .width(64.dp)
-            .height(96.dp)
+            .width(FavoriteHeartWidth)
+            .height(FavoriteHeartHeight)
             .semantics {
                 contentDescription = favoriteDesc
             }
@@ -691,6 +744,25 @@ private fun FavoriteHeartPill(
         }
     }
 }
+
+// --- Botón de favorito (ver [FavoriteHeartPill]) ---
+
+/** Ancho del icon button LARGE-narrow del spec (64×96 con glifo de 32). */
+private val FavoriteHeartWidth = 64.dp
+
+/**
+ * Alto del corazón: el del contenedor Large, **tal cual lo tabula el spec**.
+ *
+ * **Se probó bajarlo a 72 el 24 ago 2026 y el usuario lo descartó en device — NO reintroducirlo.**
+ * El argumento a favor era de layout y sigue siendo cierto: es este botón —y no el texto, que pide
+ * ~70— quien fija el alto de toda la región de info, y en esta columna cada dp sale de la CARÁTULA
+ * (`weight(1f)` y cuadrada), así que eran 24dp de lado de portada. Pero a 72 el botón deja de leerse
+ * como la PÍLDORA VERTICAL que es (64×96 es 1:1,5, la misma proporción que el play en pausa; 64×72
+ * queda en 1:1,125, o sea casi un cuadrado redondeado) y esa forma es lo que lo distingue del resto
+ * de la pantalla. Los dp de la portada se buscan en otro lado: ver la barra superior y la fila de
+ * chips de tiempo en `docs/NOWPLAYING.md`.
+ */
+private val FavoriteHeartHeight = 96.dp
 
 // --- Destello del doble toque de salto (ver [AlbumArtSection]) ---
 
